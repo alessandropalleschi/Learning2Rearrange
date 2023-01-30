@@ -1,0 +1,22 @@
+<robot name="containerB">
+	<link name="_name">
+		<visual>
+			<origin rpy="0 0 0" xyz="1.6281896159420108e-03 8.6037972980616e-04 -5.011170636862517e-03" />
+			<geometry>
+				<mesh filename="containerB/containerB.obj" scale="1 1 1" />
+			</geometry>
+			<material name="texture">
+				<color rgba="1.0 1.0 1.0 1.0" />
+			</material>
+		</visual>
+		<collision>
+			<geometry>
+				<mesh filename="containerB/containerB_vhacd.obj" scale="1 1 1" />
+			</geometry>
+		<origin rpy="0 0 0" xyz="1.6281896159420108e-03 8.6037972980616e-04 -5.011170636862517e-03" /></collision>
+		<inertial>
+			<mass value="0.2" />
+			<inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0" />
+		</inertial>
+	</link>
+</robot>

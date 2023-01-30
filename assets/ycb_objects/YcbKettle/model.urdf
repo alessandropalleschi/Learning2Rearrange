@@ -1,0 +1,22 @@
+<robot name="kettle">
+	<link name="_name">
+		<visual>
+			<origin rpy="0 0 0" xyz="-8.79207574343692e-03 3.037914496507845e-03 2.0770728588104248e-04" />
+			<geometry>
+				<mesh filename="kettle/kettle.obj" scale="1 1 1" />
+			</geometry>
+			<material name="texture">
+				<color rgba="1.0 1.0 1.0 1.0" />
+			</material>
+		</visual>
+		<collision>
+			<geometry>
+				<mesh filename="kettle/kettle_vhacd.obj" scale="1 1 1" />
+			</geometry>
+		<origin rpy="0 0 0" xyz="-8.79207574343692e-03 3.037914496507845e-03 2.0770728588104248e-03" /></collision>
+		<inertial>
+			<mass value="1.0" />
+			<inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0" />
+		</inertial>
+	</link>
+</robot>

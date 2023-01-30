@@ -1,0 +1,22 @@
+<robot name="Spray">
+	<link name="_name">
+		<visual>
+			<origin rpy="1.5758 0 0" xyz="0.001139712715474107 -0.006226063665119912 0.044162647" />
+			<geometry>
+				<mesh filename="Spray/Sprayflask_5k.obj" scale="0.001 0.001 0.001" />
+			</geometry>
+			<material name="texture">
+				<color rgba="1.0 1.0 1.0 1.0" />
+			</material>
+		</visual>
+		<collision>
+			<geometry>
+				<mesh filename="Spray/Sprayflask_5k_vhacd.obj" scale="0.001 0.001 0.001" />
+			</geometry>
+		<origin rpy="1.5758 0 0" xyz="0.001139712715474107 -0.006226063665119912 0.044162647" /></collision>
+		<inertial>
+			<mass value="1.0" />
+			<inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0" />
+		</inertial>
+	</link>
+</robot>
