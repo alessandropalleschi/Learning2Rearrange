@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <!-- Meta tags for social media banners, these should be filled in appropriatly as they are your "business card" -->
+  <!-- Replace the content tag with appropriate information -->
+  <meta name="description" content="DESCRIPTION META TAG">
+  <meta property="og:title" content="SOCIAL MEDIA TITLE TAG" />
+  <meta property="og:description" content="SOCIAL MEDIA DESCRIPTION TAG TAG" />
+  <meta property="og:url" content="URL OF THE WEBSITE" />
+  <!-- Path to banner image, should be in the path listed below. Optimal dimenssions are 1200X630-->
+  <meta property="og:image" content="static/image/your_banner_image.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+
+
+  <meta name="twitter:title" content="TWITTER BANNER TITLE META TAG">
+  <meta name="twitter:description" content="TWITTER BANNER DESCRIPTION META TAG">
+  <!-- Path to banner image, should be in the path listed below. Optimal dimenssions are 1200X600-->
+  <meta name="twitter:image" content="static/images/your_twitter_banner_image.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <!-- Keywords for your paper to be indexed by-->
+  <meta name="keywords" content="KEYWORDS SHOULD BE PLACED HERE">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+
+  <title>Learning to Rearrange Objects in Confined Environments</title>
+  <link rel="icon" type="image/x-icon" href="static/images/favicon.ico">
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro" rel="stylesheet">
+
+  <link rel="stylesheet" href="static/css/bulma.min.css">
+  <link rel="stylesheet" href="static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="static/css/fontawesome.all.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="static/css/index.css">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script src="https://documentcloud.adobe.com/view-sdk/main.js"></script>
+  <script defer src="static/js/fontawesome.all.min.js"></script>
+  <script src="static/js/bulma-carousel.min.js"></script>
+  <script src="static/js/bulma-slider.min.js"></script>
+  <script src="static/js/index.js"></script>
+</head>
+
+<body>
+
+
+  <section class="hero">
+    <div class="hero-body">
+      <div class="container is-max-desktop">
+        <div class="columns is-centered">
+          <div class="column has-text-centered">
+            <h1 class="title is-1 publication-title">Learning to Rearrange Objects in Confined Environments</h1>
+            <div class="is-size-5 publication-authors">
+              <!-- Paper authors -->
+              <span class="author-block">
+                <a href="https://alessandropalleschi.github.io" target="_blank">Alessandro
+                  Palleschi<sup>1</sup></a>,</span>
+              <span class="author-block">
+                <a href="https://profiles.stanford.edu/marion-lepert" target="_blank">Marion
+                  Lepert<sup>2</sup></a>,</span>
+              <span class="author-block">
+                <a href="https://lianwenzhao.github.io/" target="_blank">Whenzao Lian<sup>3</sup></a>,
+              </span>
+              <span class="author-block">
+                <a href="https://www.centropiaggio.unipi.it/~pallottino" target="_blank">Lucia
+                  Pallottino<sup>1</sup></a>,
+              </span>
+              <span class="author-block">
+                <a href="https://web.stanford.edu/~bohg/" target="_blank">Jeannette Bohg<sup>2</sup></a>,
+              </span>
+            </div>
+
+            <div class="is-size-5 publication-authors">
+              <span class="author-block"><sup>1</sup>Research Center "Enrico Piaggio", University of Pisa,
+                <sup>2</sup>Stanford University, Department of Computer Science, 
+                <sup>3</sup>Intrinsic Innovation LLC in CA, USA
+                <br>2023 IEEE/RSJ International Conference on Intelligent Robots and Systems (Under Review)</span>
+            </div>
+
+<!--             <div class="column has-text-centered">
+              <div class="publication-links">
+ -->                <!-- Arxiv PDF link -->
+<!--                 <span class="link-block">
+                  <a href="https://www.dropbox.com/s/lhdfjomooxyqtss/bare_jrnl_new_sample4.pdf?dl=0" target="_blank"
+                    class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon">
+                      <i class="fas fa-file-pdf"></i>
+                    </span>
+                    <span>Paper</span>
+                  </a>
+                </span>
+ -->
+                <!-- Supplementary PDF link -->
+                <!--                     <span class="link-block">
+                      <a href="static/pdfs/supplementary_material.pdf" target="_blank"
+                      class="external-link button is-normal is-rounded is-dark">
+                      <span class="icon">
+                        <i class="fas fa-file-pdf"></i>
+                      </span>
+                      <span>Supplementary</span>
+                    </a>
+                  </span>
+ -->
+                <!-- Github link -->
+                <!--                   <span class="link-block">
+                    <a href="https://github.com/YOUR REPO HERE" target="_blank"
+                    class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon">
+                      <i class="fab fa-github"></i>
+                    </span>
+                    <span>Code</span>
+                  </a>
+                </span>
+ -->
+                <!-- ArXiv abstract Link -->
+                <!-- <span class="link-block">
+                  <a href="https://arxiv.org/abs/<ARXIV PAPER ID>" target="_blank"
+                  class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon">
+                    <i class="ai ai-arxiv"></i>
+                  </span>
+                  <span>arXiv</span>
+                </a>
+              </span> -->
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- Teaser video-->
+  <section class="hero teaser">
+    <div class="container is-max-desktop">
+      <div class="hero-body">
+        <video poster="" id="tree" autoplay controls muted loop height="100%">
+          <!-- Your video here -->
+          <source src="static/videos/banner_video.mp4" type="video/mp4">
+        </video>
+      </div>
+    </div>
+  </section>
+  <!-- End teaser video -->
+
+  <!-- Paper abstract -->
+  <section class="section hero is-light">
+    <div class="container is-max-desktop">
+      <div class="columns is-centered has-text-centered">
+        <div class="column is-four-fifths">
+          <h2 class="title is-3">Abstract</h2>
+          <div class="content has-text-justified">
+            <p>
+              Robots capable of rearranging objects in cluttered
+and confined spaces have numerous real-world applications,
+such as in retail, logistics, and household tasks. However,
+environmental constraints and visual occlusions make it
+difficult to predict the effects of robot-environment interactions,
+presenting a significant challenge for rearrangement planning.
+Existing solutions rely on simplified assumptions, such as
+full observability, and typically use collision-free, single-object
+prehensile manipulation strategies that are less effective in
+partially observable settings. To address these limitations, this
+paper proposes a data-driven approach that leverages deep
+reinforcement learning to learn a rearrangement policy that
+combines two actions: pushing and pick-and-place. Specifically,
+the approach uses fully convolutional networks and Q-learning
+to make dense pixel-wise predictions of expected rewards for the
+two actions from side-views of the cluttered and confined space.
+At each step, the learned policy executes the action with the
+highest Q-value given the current observation. The proposed
+method is evaluated in simulation, where a learned policy is
+rolled out to rearrange up to 14 objects inside a confined
+cabinet. Results show that the approach achieves an average
+success rate improvement of 31.7% compared to baselines.
+Overall, this work demonstrates the efficacy of a data-driven
+approach to enable robots to effectively rearrange objects in
+complex, cluttered environments. </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- End paper abstract -->
+
+
+  <!-- Image carousel -->
+  <section class="hero is-small">
+    <div class="hero-body">
+      <div class="container">
+        <div id="results-carousel" class="carousel results-carousel">
+            <!-- Your image here -->
+            <div class="item" style="text-align: center;">
+
+            <img src="static/images/carousel1.jpg" alt="MY ALT TEXT" class="center" width="80%" />
+            <h2 class="subtitle has-text-centered">
+              Schematic representation of the rearrangement
+              problem. Given a visual observation of a set of objects in a
+              confined workspace, the robot uses a learned policy to select
+              actions that bring the environment into a sorted state. </h2>
+          </div>
+          <div class="item" style="text-align: center;">
+            <!-- Your image here -->
+            <img src="static/images/carousel2.jpg" alt="MY ALT TEXT" class="center" width="80%" />
+            <h2 class="subtitle has-text-centered">
+              Proposed architecture: Given a side view of the environment acquired through an RGB-D sensor, we first transform
+the visual observation of the inside of the cabinet to create a recolored orthographic view, highlighting the class membership
+of each visible object and the area where the objects should be sorted. The heightmap is sent to two FCNs that generate
+pixel-wise Q-maps corresponding to the expected rewards for taking a push or a pick-and-place action at each specific pixel. </h2>
+          </div>
+          <div class="item" style="text-align: center;">
+            <!-- Your image here -->
+            <img src="static/images/carousel3.jpg" class="center" width="80%" height="auto" alt="MY ALT TEXT" />
+            <h2 class="subtitle has-text-centered">
+              Architecture of the fully convolutional residual
+              network used to compute the Q-maps from the current
+              observation. Conv(k,i) denotes a convolutional layer with
+              k×k filters and i channels, RB(i) represents a residual block
+              composed of two convolutional layers with 3 × 3 filters and
+              i channels.
+            </h2>
+          </div>
+
+          <div class="item" style="text-align: center;">
+            <!-- Your image here -->
+            <img src="static/images/carousel4.jpg" class="center" width="80%" height="auto" alt="MY ALT TEXT" />
+            <h2 class="subtitle has-text-centered">
+              Different pushing directions are handled by rotating
+the observation fed to the network. In this work we model
+two pushing directions (left and right) corresponding to a
+0 deg and a 180 deg rotation.
+
+            </h2>
+          </div>
+          <div class="item" style="text-align: center;">
+            <!-- Your image here -->
+            <img src="static/images/carousel5.jpg" alt="MY ALT TEXT" class="center" width="80%" height="auto"/>
+            <h2 class="subtitle has-text-centered">
+              An FCN is used to determine the picking
+pose from the current observation. The placement pose is
+instead computed using a heuristic function based on the
+class of the picked object and associated target region, as
+well as the current state of the environment.
+            </h2>
+          </div>
+          <div class="item" style="text-align: center;">
+            <!-- Your image here -->
+            <img src="static/images/carousel6.png" class="center" width="100%" height="auto" alt="MY ALT TEXT" />
+            <h2 class="subtitle has-text-centered">
+              (a) A UR5 equipped with a pushing blade interacting with a simulated confined environment. (b) Example of an
+              initial arrangement for 10 objects and three different classes. Objects of the same color belong to the same class. The target
+              regions are shown only for clarity. (c) The robot manipulates the objects to bring them inside the assigned target regions.            </h2>
+          </div>
+          <div class="item" style="text-align: center;">
+            <!-- Your image here -->
+            <img src="static/images/carousel7.png" class="center" width="70%" height="auto" alt="MY ALT TEXT" />
+            <h2 class="subtitle has-text-centered">
+              Hindsight Experience Replay: during training, the
+robot executes an action at based on the current observation
+ot, bringing the environment into a new state, corresponding
+to an observation at time t+1. In this state, all the objects are inside
+the three target regions but are not correctly sorted. Thus,
+the misplaced objects are reassigned to a different class,
+obtaining a new transition with two recolored observations
+and modified reward. Both the
+original transition and the relabeled one are inserted into
+the experience replay buffer.
+
+            </h2>
+          </div>
+          <div class="item" style="text-align: center;">
+            <!-- Your image here -->
+            <img src="static/images/carousel8.png" class="center" width="70%" height="auto" alt="MY ALT TEXT" />
+            <h2 class="subtitle has-text-centered">
+              Results with different numbers of YCB objects from the testing set in random initial arrangements for the three
+              methods: P+S is our approach, S is a pick-and-place-only variant of our approach, and the two heuristic-based pick-and-place only baselines (H-d and H-a)            </h2>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- End image carousel -->
+
+
+
+
+  <!-- Youtube video -->
+  <section class="hero is-small is-light">
+    <div class="hero-body">
+      <div class="container">
+        <!-- Paper video. -->
+        <h2 class="title is-3">Video Presentation</h2>
+        <div class="columns is-centered has-text-centered">
+          <div class="column is-four-fifths">
+
+            <div class="publication-video">
+              <!-- Youtube embed code here -->
+              <video poster="" id="tree" autoplay="false" controls muted loop height="100%">
+                <!-- Your video here -->
+                <source src="static/videos/multimedia.mp4" type="video/mp4">
+              </video>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <!-- End youtube video -->
+
+
+  <!-- Video carousel -->
+  <!-- <section class="hero is-small">
+  <div class="hero-body">
+    <div class="container">
+      <h2 class="title is-3">Another Carousel</h2>
+      <div id="results-carousel" class="carousel results-carousel">
+        <div class="item item-video1">
+          <video poster="" id="video1" autoplay controls muted loop height="100%">
+ --> <!-- Your video file here -->
+  <!--             <source src="static/videos/carousel1.mp4"
+            type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-video2">
+          <video poster="" id="video2" autoplay controls muted loop height="100%">
+ --> <!-- Your video file here -->
+  <!--             <source src="static/videos/carousel2.mp4"
+            type="video/mp4">
+          </video>
+        </div>
+        <div class="item item-video3">
+          <video poster="" id="video3" autoplay controls muted loop height="100%">\
+ --> <!-- Your video file here -->
+  <!--             <source src="static/videos/carousel3.mp4"
+            type="video/mp4">
+          </video>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+ --><!-- End video carousel -->
+
+
+
+
+
+
+  <!-- Paper poster -->
+  <section class="hero is-small is-light">
+    <div class="hero-body">
+      <div class="container">
+        <h2 class="title">Paper</h2>
+
+        <iframe src="static/pdfs/paper.pdf" width="100%" height="550">
+        </iframe>
+
+      </div>
+    </div>
+  </section>
+  <!--End paper poster -->
+
+
+  <!--BibTex citation -->
+  <section class="section" id="BibTeX">
+    <div class="container is-max-desktop content">
+      <h2 class="title">BibTeX</h2>
+      <pre><code>@inproceedings{palleschi2023learning,
+        title={Learning to rearrange objects in confined spaces},
+        author={Palleschi, Alessandro and Lepert, Marion and Lian, Wenzhao and Pallottino, Lucia and Bohg, Jeannette},
+        booktitle={2023 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS) - Under Review},
+        year={2023},
+        organization={IEEE}
+      }
+      </code></pre>
+    </div>
+  </section>
+  <!--End BibTex citation -->
+
+  <section class="section" id="Acknowledgement">
+    <div class="container is-max-desktop content">
+      <h2 class="title">Acknowledgement</h2>
+      <div class="content has-text-justified">
+        <p>
+          Toyota Research Institute provided funds to support this work. This
+          work has also received funding from Intrinsic, the European Union
+          Horizon 2020 research and innovation program under agreement no. 871237
+          (SOPHIA), and the Italian Ministry of Education and Research (MIUR)
+          in the framework of the CrossLab and FoReLab projects (Departments of
+          Excellence).      </div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="columns is-centered">
+        <div class="column is-8">
+          <div class="content">
+
+            <p>
+              This page was built using the <a href="https://github.com/eliahuhorwitz/Academic-project-page-template"
+                target="_blank">Academic Project Page Template</a>.
+              You are free to borrow the of this website, we just ask that you link back to this page in the footer.
+              <br> This website is licensed under a <a rel="license"
+                href="http://creativecommons.org/licenses/by-sa/4.0/" target="_blank">Creative
+                Commons Attribution-ShareAlike 4.0 International License</a>.
+            </p>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Statcounter tracking code -->
+
+  <!-- You can add a tracker to track page visits by creating an account at statcounter.com -->
+
+  <!-- End of Statcounter Code -->
+
+</body>
+
+</html>
