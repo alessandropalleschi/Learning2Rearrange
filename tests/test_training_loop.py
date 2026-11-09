@@ -148,7 +148,8 @@ def test_train_and_evaluate(belief='none', placement='heuristic'):
         num_obj=1, max_obj=3, max_actions=5, random_seed=0, logging_directory='t', num_envs=2, gui=False,
         is_testing=False, load_snapshot=False, snapshot=None, snapshot_target=None, save_every=8,
         save_visualizations=False, updates_per_step=1, physics='legacy', randomize=False, max_iterations=24,
-        start_method='fork', belief=belief, placement=placement, eps_decay=0.9995)
+        start_method='fork', belief=belief, placement=placement, eps_decay=0.9995,
+        step_distance=0.002, move_budget=1000)
     import config
     orig = config.Config
     # tiny batch so the buffer is large enough to optimise within a few steps
