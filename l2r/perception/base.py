@@ -31,7 +31,10 @@ class GroundTruthPerception:
 
 
 def make_perception(params):
-    """Perception selected by `SimParams.perception` ('gt' | 'network')."""
+    """Perception selected by `SimParams.perception` ('gt' | 'network' | 'agnostic')."""
+    if params.perception == 'agnostic':
+        from l2r.perception.agnostic import AgnosticPerception
+        return AgnosticPerception(params.perception_weights)
     if params.perception == 'network':
         from l2r.perception.network import NetworkPerception
         return NetworkPerception(params.perception_weights)

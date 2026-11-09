@@ -136,7 +136,7 @@ class Scene:
 
     def _draw_object_names(self, count):
         """Names of the objects of an episode: three distinct YCB objects, one per class, drawn at random."""
-        ycb = random.sample(OBJECT_CATALOGUE, 3)
+        ycb = random.sample(list(self.params.object_types or OBJECT_CATALOGUE), 3)
         names = [f'{c} {o}' for c, o in zip(CLASSES, ycb)]
         counts, chosen = dict.fromkeys(CLASSES, 0), []
         while len(chosen) < count:

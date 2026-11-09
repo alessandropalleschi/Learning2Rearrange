@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from l2r.config import SimParams
+from l2r.perception.agnostic import AgnosticPerception, agnostic_targets
 from l2r.perception.base import GroundTruthPerception
 from l2r.perception.network import INPUT_SCALE, NetworkPerception
 from l2r.perception.unet import SegmentationNet
@@ -30,11 +31,12 @@ def type_map(segm, names):
 
 
 # ---------------------------------------------------------------------------------------------------- data
-def collect(out_dir, scenes, seed=0, min_objects=1, max_objects=10, randomize=True):
+def collect(out_dir, scenes, seed=0, min_objects=1, max_objects=10, randomize=True, object_types=None):
     """Render `scenes` random arrangements (camera pose jitter and sensor noise on) and store them downsampled."""
     from l2r.sim.environment import Environment
     os.makedirs(out_dir, exist_ok=True)
-    env = Environment(num_obj=[max_objects], params=SimParams(randomize=randomize, sensor_noise=randomize))
+    env = Environment(num_obj=[max_objects], params=SimParams(randomize=randomize, sensor_noise=randomize,
+                                                                  object_types=tuple(object_types) if object_types else None))
     rng = np.random.default_rng(seed)
     for i in range(scenes):
         np.random.seed(seed + i)
@@ -45,19 +47,20 @@ def collect(out_dir, scenes, seed=0, min_objects=1, max_objects=10, randomize=Tr
         color, depth, segm, *_ = env.camera.render()
         s = INPUT_SCALE
         np.savez_compressed(os.path.join(out_dir, '%05d.npz' % i), color=color[::s, ::s], depth=depth[::s, ::s].astype(np.float16),
-                            types=type_map(segm, env.scene.names)[::s, ::s])
+                            types=type_map(segm, env.scene.names)[::s, ::s],
+                            agnostic=agnostic_targets(segm[::s, ::s], env.scene.names))
         if i % 50 == 0:
             print('collected', i, '/', scenes, flush=True)
 
 
-def load_dataset(data_dir):
+def load_dataset(data_dir, task='types'):
     files = sorted(glob.glob(os.path.join(data_dir, '*.npz')))
     inputs, targets = [], []
     for f in files:
         d = np.load(f)
         x = np.concatenate([d['color'].astype(np.float32) / 255.0, (d['depth'].astype(np.float32) / 1.5)[..., None]], -1)
         inputs.append(x.transpose(2, 0, 1))
-        targets.append(d['types'])
+        targets.append(d['agnostic'] if task == 'agnostic' else d['types'])
     return torch.from_numpy(np.stack(inputs)), torch.from_numpy(np.stack(targets)).long()
 
 
@@ -95,17 +98,18 @@ def validate(model, x, y, classes):
     return iou_from_confusion(c)
 
 
-def train(data_dir, out, minutes=8.0, batch=8, lr=2e-3, seed=0, threads=4):
+def train(data_dir, out, minutes=8.0, batch=8, lr=2e-3, seed=0, threads=4, task='types'):
     torch.set_num_threads(threads)
     torch.manual_seed(seed)
-    x, y = load_dataset(data_dir)
-    classes = 1 + len(OBJECT_CATALOGUE)
+    x, y = load_dataset(data_dir, task)
+    num_types = 2 if task == 'agnostic' else len(OBJECT_CATALOGUE)  # agnostic: interior and boundary
+    classes = 1 + num_types
     split = max(1, int(0.9 * len(x)))
     (xt, yt), (xv, yv) = (x[:split], y[:split]), (x[split:], y[split:])
     frequency = torch.bincount(yt.reshape(-1), minlength=classes).float()
     weights = (frequency.sum() / frequency.clamp(min=1)).sqrt()
     weights = weights / weights[0]
-    model = SegmentationNet(len(OBJECT_CATALOGUE))
+    model = SegmentationNet(num_types)
     print('%d training / %d validation images, %.2f M parameters, class weights %s'
           % (len(xt), len(xv), sum(p.numel() for p in model.parameters()) / 1e6, np.round(weights.numpy(), 1)))
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -204,6 +208,42 @@ def evaluate(weights, scenes=20, seed=1000, max_objects=8):
             'class_agreement': float(np.mean(class_acc)), 'free_space_iou': float(np.mean(free_iou))}
 
 
+def evaluate_agnostic(weights, scenes=20, seed=1000, max_objects=8, object_types=None):
+    """Object-agnostic network on fresh scenes (optionally restricted to `object_types`, e.g. including a held-out type):
+    pixel IoU of interior / boundary, instance recall / precision in the image, and the policy's observation against ground truth."""
+    from l2r.sim.environment import Environment
+    perception = AgnosticPerception(weights)
+    env = Environment(num_obj=[max_objects], params=SimParams(object_types=tuple(object_types) if object_types else None))
+    rng = np.random.default_rng(seed)
+    c = torch.zeros(3, 3, dtype=torch.long)
+    grid, class_acc, free_iou = np.zeros(4), [], []
+    for i in range(scenes):
+        np.random.seed(seed + i)
+        random.seed(seed + i)
+        env.num_obj = [int(rng.integers(2, max_objects + 1))]
+        while not env.reset():
+            pass
+        color, depth, segm, *_ = env.camera.render()
+        pred = perception.predict(color, depth)
+        c += confusion(torch.from_numpy(pred.astype(np.int64)), torch.from_numpy(agnostic_targets(segm, env.scene.names).astype(np.int64)), 3)
+        env.perception = GroundTruthPerception()
+        reference = env.observe()
+        env.perception = perception
+        observed = env.observe()
+        env.perception = GroundTruthPerception()
+        grid += match_instances(observed['idmap'].astype(np.int64), reference['idmap'].astype(np.int64), min_area=8)
+        objects = (reference['classmap'] > 0) | (observed['classmap'] > 0)
+        class_acc.append(float((reference['classmap'][objects] == observed['classmap'][objects]).mean()) if objects.any() else 1.0)
+        a, b = reference['freespace'] > 0, observed['freespace'] > 0
+        free_iou.append(float((a & b).sum() / max((a | b).sum(), 1)))
+    iou = iou_from_confusion(c)
+    result = {'iou_background': float(iou[0]), 'iou_interior': float(iou[1]), 'iou_boundary': float(iou[2]),
+              'recall': grid[0] / max(grid[1], 1), 'precision': grid[2] / max(grid[3], 1),
+              'class_agreement': float(np.mean(class_acc)), 'free_space_iou': float(np.mean(free_iou)), 'object_types': object_types}
+    print('agnostic perception:', {k: (round(v, 3) if isinstance(v, float) else v) for k, v in result.items()})
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Segmentation network for the object masks of the observation.')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -212,18 +252,24 @@ def main(argv=None):
     c.add_argument('--out', default='data/perception')
     c.add_argument('--seed', type=int, default=0)
     c.add_argument('--max_objects', type=int, default=10)
+    c.add_argument('--object_types', nargs='+', default=None, help='YCB types of the scenes (>= 3), e.g. all but a held-out one')
     t = sub.add_parser('train')
     t.add_argument('--data', default='data/perception')
     t.add_argument('--out', default='assets/perception/segnet.pth')
     t.add_argument('--minutes', type=float, default=8.0)
     t.add_argument('--threads', type=int, default=4)
+    t.add_argument('--task', choices=['types', 'agnostic'], default='types', help="'agnostic': object-agnostic masks (no type catalogue)")
     e = sub.add_parser('evaluate')
     e.add_argument('--weights', default='assets/perception/segnet.pth')
     e.add_argument('--scenes', type=int, default=20)
+    e.add_argument('--task', choices=['types', 'agnostic'], default='types')
+    e.add_argument('--object_types', nargs='+', default=None, help='restrict the evaluation scenes (agnostic task): include a held-out type')
     args = parser.parse_args(argv)
     if args.command == 'collect':
-        collect(args.out, args.scenes, args.seed, max_objects=args.max_objects)
+        collect(args.out, args.scenes, args.seed, max_objects=args.max_objects, object_types=args.object_types)
     elif args.command == 'train':
-        train(args.data, args.out, args.minutes, threads=args.threads)
+        train(args.data, args.out, args.minutes, threads=args.threads, task=args.task)
+    elif args.task == 'agnostic':
+        evaluate_agnostic(args.weights, args.scenes, object_types=args.object_types)
     else:
         evaluate(args.weights, args.scenes)

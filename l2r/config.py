@@ -15,7 +15,7 @@ class Config:
     #     F = gamma * phi(s') - phi(s), which leaves the optimal policy unchanged: phi = scale * (sorted fraction - 1) or
     #     -scale * mean distance of the objects to their target region (relative to the cabinet width). 'noop' adds a
     #     penalty to actions that moved no object (>= 5 mm). ---
-    reward_mode: str = 'sparse'  # 'sparse' | 'progress' | 'distance' | 'noop'
+    reward_mode: str = 'progress'  # 'sparse' (paper) | 'progress' (default: potential-based shaping) | 'distance' | 'noop'
     reward_shaping_scale: float = 1.0
     noop_penalty: float = 1.0
 
@@ -102,7 +102,7 @@ class Config:
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
                    footprint_placement=get('footprint_placement', False), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
-                   hierarchy=get('hierarchy', False), reward_mode=get('reward_mode', 'sparse'),
+                   hierarchy=get('hierarchy', False), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
 
@@ -125,7 +125,7 @@ class Config:
                                  'length (actor-critic) and the pixel are chosen')
         parser.add_argument('--push_length_range', type=float, nargs=2, default=[0.03, 0.15], metavar=('MIN', 'MAX'),
                             help='continuous push length range in m (with --hierarchy)')
-        parser.add_argument('--reward_mode', choices=['sparse', 'progress', 'distance', 'noop'], default='sparse',
+        parser.add_argument('--reward_mode', choices=['sparse', 'progress', 'distance', 'noop'], default='progress',
                             help="reward: the paper's sparse one, potential-based shaping by sorted fraction ('progress') or by "
                                  "distance to the target region ('distance'), or sparse + a penalty for actions that move nothing")
         parser.add_argument('--reward_scale', type=float, default=1.0, help='scale of the shaping potential')
@@ -209,6 +209,7 @@ class SimParams:
     # perception: where the object masks come from
     perception: str = 'gt'                  # 'gt' = PyBullet ground truth, 'network' = trained segmentation network
     perception_weights: str = 'assets/perception/segnet.pth'
+    object_types: tuple = None              # YCB types the episodes draw from (>= 3; default: the whole catalogue)
 
     # end effector: the suction cup (default) or a parallel-jaw gripper (`--end_effector gripper`)
     end_effector: str = 'suction'
@@ -251,6 +252,7 @@ class SimParams:
         params.perception = getattr(args, 'perception', 'gt')
         params.end_effector = getattr(args, 'end_effector', 'suction')
         params.perception_weights = getattr(args, 'perception_weights', params.perception_weights)
+        params.object_types = tuple(getattr(args, 'object_types', None) or ()) or None
         return params
 
     @staticmethod
@@ -263,8 +265,9 @@ class SimParams:
                                  "grasps. 'modern': improved + rate-limited joint controller, 100 solver iterations, "
                                  "deterministic contacts, strict place errors, adaptive waypoints, force check only near the "
                                  "cabinet (all opt-in, not yet validated against the legacy behaviour)")
-        parser.add_argument('--perception', choices=['gt', 'network'], default='gt',
+        parser.add_argument('--perception', choices=['gt', 'network', 'agnostic'], default='gt',
                             help="object masks: PyBullet ground truth, or a trained segmentation network (train_perception.py)")
+        parser.add_argument('--object_types', nargs='+', default=None, help='YCB types of the episodes (>= 3), e.g. to hold one out')
         parser.add_argument('--perception_weights', default='assets/perception/segnet.pth', help='weights of the network')
         parser.add_argument('--end_effector', choices=['suction', 'gripper'], default='suction',
                             help='suction cup, or a parallel-jaw gripper (the pick Q-map gets one channel per jaw yaw, --jaw_yaws)')

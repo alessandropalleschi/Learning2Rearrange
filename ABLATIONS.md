@@ -54,7 +54,7 @@ Variants (`--reward_mode`, `--reward_scale`):
   complete an object by themselves.
 * `noop`: sparse + penalty (default 1) when no object moved by 5 mm. Since the measured no-ops are exactly the failed / unexecuted actions, this doubles
   the cost of a failed attempt: it may help the agent learn feasibility faster, but it also changes the optimal policy (not policy-invariant).
-Recommendation: baseline = sparse; first ablation = `progress` (safe, invariant); `distance` for the push-heavy settings; `noop` last. The sparse signal is
+Default since the shaping was requested: `progress` (the paper's sparse reward is `--reward_mode sparse`). Ablation order: sparse (paper baseline) vs `progress` (safe, invariant); `distance` for the push-heavy settings; `noop` last. The sparse signal is
 less sparse than the paper suggests (a third of the random actions change the count), so large gains from shaping are not expected; the 70% of
 actions that are not executed are the bigger loss, and they are better attacked by feasibility masks (`--footprint_placement`) than by rewards.
 Hindsight relabelling keeps the sparse goal reward for the relabelled transition (the shaping term of the relabelled world is not known).

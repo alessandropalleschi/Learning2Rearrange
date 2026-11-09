@@ -55,3 +55,33 @@ def test_augmentation_keeps_labels_aligned_with_the_image():
     x2, y2 = augment(x, y.clone(), generator)
     flipped = [i for i in range(6) if not torch.equal(y2[i], y[i])]
     assert flipped and all(torch.equal(y2[i], y[i].flip(-1)) for i in flipped)
+
+
+def test_agnostic_targets_mark_touching_objects_and_instances_separate_them():
+    from l2r.perception.agnostic import AgnosticPerception, agnostic_targets
+    ids = np.zeros((12, 12), int)
+    ids[2:8, 2:6] = 7
+    ids[2:8, 6:10] = 8  # touching
+    target = agnostic_targets(ids, {7: 'a X', 8: 'b Y'})
+    assert set(np.unique(target)) == {0, 1, 2} and (target[4, 5] == 2) and (target[4, 6] == 2) and target[4, 3] == 1
+    instances = AgnosticPerception.instances_from_prediction(target, min_area=3)
+    assert len(set(np.unique(instances)) - {0}) == 2 and (instances > 0).sum() == (target > 0).sum()
+    assert instances[4, 3] != instances[4, 8]
+
+
+def test_agnostic_class_assignment_matches_descriptors(monkeypatch):
+    from l2r.perception.agnostic import AgnosticPerception
+    from types import SimpleNamespace
+    perception = AgnosticPerception(model=__import__('torch').nn.Identity())
+    color = np.zeros((20, 20, 3), np.uint8)
+    color[2:10, 2:10] = (200, 0, 0)
+    color[10:18, 10:18] = (0, 0, 200)
+    ids = np.zeros((20, 20), int)
+    ids[2:10, 2:10], ids[10:18, 10:18] = 5, 6
+    scene = SimpleNamespace(names={5: 'green A', 6: 'blue B'})
+    pred = np.zeros((20, 20), np.uint8)
+    pred[2:10, 2:10] = pred[10:18, 10:18] = 1
+    monkeypatch.setattr(perception, 'predict', lambda c, d: pred)
+    seg = perception.segment(color, np.zeros((20, 20)), ids, scene)
+    assert sorted(seg.names.values()) == ['blue B', 'green A'] and set(seg.to_object.values()) == {5, 6}
+    assert seg.names[seg.instances[3, 3]] == 'green A' and seg.names[seg.instances[12, 12]] == 'blue B'
