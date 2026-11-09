@@ -133,7 +133,6 @@ def configure_cabinet(params):
 
 
 class Environment:
-    MOVE_JOINTS_MAX_STEPS = 1000   # simulation-step budget of move_joints
     WAIT_STATIC_MAX_STEPS = 480    # simulation-step budget of wait_static (1 s of simulated time)
 
     def __init__(self, gui=False, time_step=1 / 480, num_obj=[9], params=None):
@@ -1002,7 +1001,7 @@ class Environment:
 
     def move_joints(self, target_joints, speed=0.02, timeout=0.5):
         """Move UR5e to target joint configuration."""
-        for _ in range(self.MOVE_JOINTS_MAX_STEPS):  # simulation steps, not wall-clock
+        for _ in range(self.params.move_joints_max_steps):  # simulation steps, not wall-clock
             current_joints = np.array([p.getJointState(self.ur5e, i)[0] for i in self.ur5e_joints])
             diff_joints = target_joints - current_joints
             diff_joints[-1] = 0
@@ -1068,7 +1067,7 @@ class Environment:
 
     def straight_move(self, pose0, pose1, rot, speed=0.01, max_force=300, detect_force=False, detect_contact=False):
         """Move every 1 cm, keep the move in a straight line instead of a curve. Keep level with rot"""
-        step_distance = 0.002  # every 1 cm
+        step_distance = self.params.step_distance  # distance between IK waypoints
         vec = np.float32(pose1) - np.float32(pose0)
         length = np.linalg.norm(vec)
         if(length==0):

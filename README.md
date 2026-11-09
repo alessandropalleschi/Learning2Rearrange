@@ -51,6 +51,10 @@ Logs go to `logs/<logging_directory>/` (`episodes.csv`, TensorBoard in `tb/`, sn
 tensorboard --logdir logs
 ```
 
+Speed: simulation is the bottleneck. Use one worker per CPU core (`nproc`), e.g. `--num_envs 8`, and see where the time
+goes with `python profile_sim.py --actions 20` (compare `--step_distance 0.004` / `--move_budget 400`: coarser IK waypoints
+and a smaller joint-move budget are faster but change the motion slightly, so re-check the success rate).
+
 Evaluate a snapshot on fixed seeds (success rate and mean number of actions per object count):
 
 ```bash

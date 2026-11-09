@@ -24,6 +24,7 @@ def main(args):
     cfg = Config(start_objects=args.num_obj, max_objects=args.max_obj, max_actions=args.max_actions,
                  belief=args.belief, placement=args.placement, eps_decay=args.eps_decay)
     params = SimParams.preset(args.physics, randomize=args.randomize)
+    params.step_distance, params.move_joints_max_steps = args.step_distance, args.move_budget
     sim_module.configure_cabinet(params)  # the main process needs the same workspace bounds as the workers
     seed_everything(args.random_seed)
     log_dir = os.path.join(os.path.abspath('logs'), args.logging_directory)
@@ -136,6 +137,9 @@ if __name__ == '__main__':
     parser.add_argument('--max_actions', type=int, default=40, help='maximum number of actions per episode')
     parser.add_argument('--num_envs', type=int, default=1, help='parallel simulators')
     parser.add_argument('--updates_per_step', type=int, default=1, help='gradient steps per environment step')
+    parser.add_argument('--step_distance', type=float, default=0.002,
+                        help='m between IK waypoints of straight moves (larger = faster, coarser; try 0.004)')
+    parser.add_argument('--move_budget', type=int, default=1000, help='simulation steps allowed per joint move')
     parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy',
                         help="'paper': 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated)")
     parser.add_argument('--eps_decay', type=float, default=0.9995,

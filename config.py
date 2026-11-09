@@ -84,6 +84,10 @@ class SimParams:
     block_mass: float = 1.0         # kg
     cylinder_mass: float = 0.7      # kg
 
+    # motion / speed (defaults reproduce the original behaviour; larger step / smaller budget = faster, coarser)
+    step_distance: float = 0.002            # m between IK waypoints of straight-line moves
+    move_joints_max_steps: int = 1000       # simulation-step budget of one joint move
+
     # domain randomisation (applied at every reset)
     randomize: bool = False
     friction_range: tuple = (0.3, 0.8)      # lateral friction of the objects
