@@ -37,6 +37,12 @@ class Config:
     transformer_dim: int = 192
     transformer_layers: int = 3
 
+    # --- Network architecture (ablation): U-Net skip connections; explicit task-geometry input channels (target-region bands per
+    #     class + row / column coordinates) ---
+    arch_skips: bool = False
+    equiv_targets: bool = False  # TD target applied to all cells equivalent to the taken one (an object's front band, a 5x5 neighbourhood)
+    region_channels: bool = False
+
     # --- Action masks on the dense Q-maps: 'basic' = grasp on any object cell, push near objects (original);
     #     'structured' = grasp only at the front face of an object, push only where the blade has something in its path ---
     mask_level: str = 'basic'
@@ -56,6 +62,9 @@ class Config:
     # --- Demonstrations (DQfD): a large-margin loss keeps the expert action on top, TD keeps the values meaningful ---
     demo_margin: float = 0.8          # margin l(aE, a) of the expert action over every other feasible action
     demo_margin_weight: float = 1.0
+    demo_margin_radius: int = 0       # 0: the margin applies to every other pixel; r > 0: it grows linearly from 0 at the expert pixel to
+                                      # the full margin at Chebyshev distance r in the expert's own map (neighbouring cells of one
+                                      # object are equally good, a smooth network can not separate them)
     demo_fraction: float = 0.25       # share of each batch drawn from the demonstrations (when loaded)
 
     # --- Placement (ablation): 'heuristic' = hand-written rule inside the pick-and-place action (paper);
@@ -113,7 +122,8 @@ class Config:
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
                    footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
-                   hierarchy=get('hierarchy', False), mask_level=get('mask_level', 'basic'), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
+                   hierarchy=get('hierarchy', False), arch_skips=get('arch_skips', False),
+                   region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False), mask_level=get('mask_level', 'basic'), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
 
@@ -141,6 +151,13 @@ class Config:
                                  "distance to the target region ('distance'), or sparse + a penalty for actions that move nothing")
         parser.add_argument('--reward_scale', type=float, default=1.0, help='scale of the shaping potential')
         parser.add_argument('--noop_penalty', type=float, default=1.0, help="penalty of 'noop' actions (reward mode 'noop')")
+        parser.add_argument('--arch_skips', action='store_true', help='U-Net skip connections from the encoder to the decoder')
+        parser.add_argument('--equiv_targets', action='store_true',
+                            help='regress the TD target at every cell equivalent to the taken action (the whole front band of the '
+                                 'grasped object; a 5x5 neighbourhood for pushes / places) instead of one pixel')
+        parser.add_argument('--region_channels', action='store_true',
+                            help='input channels with the target region of each class and row / column coordinates (needs observations '
+                                 'that carry the regions: demonstrations must be re-recorded)')
         parser.add_argument('--mask_level', choices=['basic', 'structured'], default='basic',
                             help="'structured': mask the Q-maps to grasps at an object's front face and pushes with something in the "
                                  "blade's path")

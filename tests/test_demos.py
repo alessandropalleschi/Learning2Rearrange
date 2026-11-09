@@ -91,3 +91,18 @@ def test_expert_pushes_objects_that_are_one_push_from_their_region_and_checks_th
     assert ScriptedExpert._blade_touches(obs, 55, 50, 1, 0.08)  # in its column, pushing towards it
     assert not ScriptedExpert._blade_touches(obs, 55, 70, 1, 0.08)  # beside it: check_push would accept, the blade would miss
     assert not ScriptedExpert._blade_touches(obs, 75, 50, 1, 0.08)  # the object is behind the blade
+
+
+def test_equivalent_cells_cover_the_front_band_of_the_grasped_object():
+    trainer = make_trainer(equiv_targets=True)
+    s = state()  # one object: padded rows 14..25, columns 12..23
+    top, left = trainer._pads(H, W)
+    cells = trainer._equivalent_cells([s, s], torch.tensor([QNet.PICK, QNet.PUSH]), torch.tensor([20 + top + 4 - 4, 30 + top]),
+                                      torch.tensor([20 + left, 5 + left]), H, W, top, left)
+    band = cells[0].cpu().numpy() > 0
+    rr, cc = np.nonzero(band)
+    # canvas coordinates: the object spans rows 14..25 and (padded) columns 12..23 = canvas columns 14..25 (left offset 2); its front
+    # face is column 25 and the band is the 3 cells just inside it
+    assert sorted(set(rr)) == list(range(14, 26)) and sorted(set(cc)) == [22, 23, 24] and band.sum() == 36
+    push = cells[1].cpu().numpy() > 0
+    assert push.sum() == 25  # 5x5 around the taken start cell

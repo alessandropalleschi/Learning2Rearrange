@@ -116,3 +116,39 @@ def test_pick_head_has_one_channel_per_jaw_yaw_and_trains_the_taken_channel():
     out = [net.forward_selected(x, prim, torch.tensor([r, 0])) for r in (0, 2)]
     full = net(x)[1]
     assert torch.allclose(out[0][0, 0], full[0, 0], atol=1e-5) and torch.allclose(out[1][0, 0], full[0, 2], atol=1e-5)
+
+
+def test_skip_network_is_consistent_and_uses_the_encoder_features():
+    torch.manual_seed(0)
+    net = QNet(4, 'none', 8, 1, False, skips=True)
+    x = torch.randn(2, 4, 128, 104)
+    push, pick, _, _ = net(x)
+    out = net.forward_selected(x, torch.tensor([QNet.PUSH, QNet.PICK]), torch.tensor([1, 0]))
+    assert torch.allclose(out[0], push[0, 1:2], atol=1e-4) and torch.allclose(out[1], pick[1], atol=1e-4)
+    (push.mean() + pick.mean()).backward()
+    assert net.fuse[0].weight.grad is not None and net.stem[0].weight.grad.abs().sum() > 0
+    plain = QNet(4, 'none', 8, 1, False)
+    assert sum(p.numel() for p in net.parameters()) > sum(p.numel() for p in plain.parameters())
+    # the skips matter: the decoder output changes when only a skip feature changes
+    b, (s0, s1, s2) = net.encode_skips(x[:1])
+    assert not torch.allclose(net.decode(b, (s0, s1, s2)), net.decode(b, (s0, s1, s2 * 0)))
+
+
+def test_geometry_channels_mark_the_regions_and_the_coordinates():
+    from l2r.learning.trainer import REGION_CHANNELS
+    trainer = Trainer(Config(region_channels=True))
+    assert trainer.input_channels == 4 + REGION_CHANNELS
+    obs = {'colormap': np.zeros((128, 104, 3), np.uint8), 'depthmap': np.zeros((128, 104), np.float32),
+           'regions': np.array([[10, 30], [50, 70], [90, 110]])}  # rows of the un-padded map (the maps carry a 4 px border)
+    x = trainer.prepare(obs)
+    assert x.shape == (4 + REGION_CHANNELS, 128, 104)
+    band = x[4 + 0]
+    assert band[14:35, :].min() == 1 and band[:14].sum() == 0 and band[35:].sum() == 0  # rows 10..30 + 4 px border
+    assert x[4 + 1][54:75].min() == 1 and x[4 + 2][94:115].min() == 1
+    rows, cols = x[4 + 3], x[4 + 4]
+    assert rows[0, 0] == -1 and rows[-1, 0] == 1 and cols[0, 0] == -1 and cols[0, -1] == 1 and rows[5, 3] == rows[5, 90]
+    try:
+        trainer.prepare({'colormap': obs['colormap'], 'depthmap': obs['depthmap']})
+        raise AssertionError('missing regions must fail loudly')
+    except KeyError:
+        pass

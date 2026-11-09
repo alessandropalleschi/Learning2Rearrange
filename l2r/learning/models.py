@@ -131,7 +131,7 @@ class QNet(nn.Module):
     nr_rotations = 2  # push left / right (0 and 180 degrees)
 
     def __init__(self, in_channels=IN_CHANNELS, belief='none', hidden=64, n_push_lengths=1, learned_placement=True,
-                 backbone='conv', transformer_dim=192, transformer_layers=3, hierarchical=False, n_pick=1):
+                 backbone='conv', transformer_dim=192, transformer_layers=3, hierarchical=False, n_pick=1, skips=False):
         """learned_placement: build the place head (conditioned on the held class). Without it `forward` returns
         `None` as place map: the head would cost about as much as the pick head for nothing.
         n_pick: pick Q-map channels (parallel-jaw gripper: one per jaw yaw; suction cup: 1)."""
@@ -139,6 +139,7 @@ class QNet(nn.Module):
         self.n_pick = n_pick
         self.belief, self.hidden, self.n_push_lengths = belief, hidden, n_push_lengths
         self.learned_placement, self.backbone, self.hierarchical = learned_placement, backbone, hierarchical
+        self.skips = skips
         self.stem = nn.Sequential(nn.Conv2d(in_channels, 64, 3, padding=1, bias=False), norm(64), nn.ReLU(inplace=True))
         self.rb1, self.rb2, self.rb3 = ResidualBlock(64, 128), ResidualBlock(128, 256), ResidualBlock(256, 512)
         # bottleneck: pooled global context (conv backbone) or global self-attention (hybrid conv + transformer)
@@ -150,7 +151,11 @@ class QNet(nn.Module):
             self.rec_out = nn.Conv2d(hidden, 512, 1)
             nn.init.zeros_(self.rec_out.weight)  # start as a memoryless network, learn to use the belief
             nn.init.zeros_(self.rec_out.bias)
-        self.rb4, self.rb5, self.rb6 = ResidualBlock(512, 256), ResidualBlock(256, 128), ResidualBlock(128, 64)
+        if skips:  # U-Net style: the decoder also sees the encoder features of the same resolution (1/4, 1/2, full)
+            self.rb4, self.rb5, self.rb6 = ResidualBlock(512, 256), ResidualBlock(256 + 256, 128), ResidualBlock(128 + 128, 64)
+            self.fuse = nn.Sequential(nn.Conv2d(64 + 64, 64, 3, padding=1, bias=False), norm(64), nn.ReLU(inplace=True))
+        else:
+            self.rb4, self.rb5, self.rb6 = ResidualBlock(512, 256), ResidualBlock(256, 128), ResidualBlock(128, 64)
         # one Q-map per selectable push length; the second direction is the same head on the flipped input
         if hierarchical:
             # hierarchical parameterised action: a *continuous* push length. The push critic gets the length as an extra
@@ -171,22 +176,33 @@ class QNet(nn.Module):
     def _up(x):
         return F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=True)
 
+    def encode_skips(self, x):
+        """Input -> (bottleneck features (B,512,H/8,W/8), encoder features at full, 1/2 and 1/4 resolution for the skips)."""
+        s0 = self.stem(x)
+        s1 = self.rb1(F.max_pool2d(s0, 2))
+        s2 = self.rb2(F.max_pool2d(s1, 2))
+        return self.rb3(F.max_pool2d(s2, 2)), (s0, s1, s2)
+
     def encode(self, x):
         """Input -> bottleneck features (B,512,H/8,W/8)."""
-        x = self.stem(x)
-        x = self.rb1(F.max_pool2d(x, 2))
-        x = self.rb2(F.max_pool2d(x, 2))
-        return self.rb3(F.max_pool2d(x, 2))
+        return self.encode_skips(x)[0]
 
-    def decode(self, b):
-        """Bottleneck features (with context) -> full-resolution features (B,64,H,W)."""
+    def decode(self, b, skips=None):
+        """Bottleneck features (with context) -> full-resolution features (B,64,H,W). `skips` from `encode_skips` (needed
+        when the network was built with skips=True)."""
         x = self.rb4(self.context(b))
-        x = self.rb5(self._up(x))
-        x = self.rb6(self._up(x))
-        return self._up(x)
+        if not self.skips:
+            x = self.rb5(self._up(x))
+            x = self.rb6(self._up(x))
+            return self._up(x)
+        s0, s1, s2 = skips
+        x = self.rb5(torch.cat([self._up(x), s2], dim=1))
+        x = self.rb6(torch.cat([self._up(x), s1], dim=1))
+        return self.fuse(torch.cat([self._up(x), s0], dim=1))
 
     def features(self, x):
-        return self.decode(self.encode(x))
+        b, skips = self.encode_skips(x)
+        return self.decode(b, skips)
 
     @staticmethod
     def flip(x):
@@ -209,13 +225,15 @@ class QNet(nn.Module):
 
     def _features(self, x, h_prev, a_prev, held):
         """Decoder features of the input (f0) and of its 180 degree rotation (f1), and the new belief state."""
-        both = self.encode(torch.cat([x, self.flip(x)]))  # both push directions in one batched pass
+        both, both_skips = self.encode_skips(torch.cat([x, self.flip(x)]))  # both push directions in one batched pass
         b0, b1 = (self._with_held(b, held) for b in both.chunk(2))
+        skips0 = tuple(s.chunk(2)[0] for s in both_skips)
+        skips1 = tuple(s.chunk(2)[1] for s in both_skips)
         h = None
         if self.belief == 'recurrent':
             h, ctx = self.update_belief(b0, h_prev, a_prev)
             b0, b1 = b0 + ctx, b1 + self.flip(ctx)
-        return self.decode(b0), self.decode(b1), h
+        return self.decode(b0, skips0), self.decode(b1, skips1), h
 
     @staticmethod
     def _pooled(f):
@@ -268,12 +286,13 @@ class QNet(nn.Module):
         is_push = primitive == self.PUSH
         L = self.n_push_lengths
         fl = (is_push & (rotation // L == 1))[:, None, None, None]
-        b = self._with_held(self.encode(torch.where(fl, self.flip(x), x)), held)
+        b, skips = self.encode_skips(torch.where(fl, self.flip(x), x))
+        b = self._with_held(b, held)
         if self.belief == 'recurrent':
             b0 = self._with_held(self.encode(x), held)  # belief is always computed in the un-rotated frame
             _, ctx = self.update_belief(b0, h_prev, a_prev)
             b = b + torch.where(fl, self.flip(ctx), ctx)
-        f = self.decode(b)
+        f = self.decode(b, skips)
         pr = primitive[:, None, None, None]
         push_maps = self.push_head(f)  # (B,L,H,W): pick the channel of the chosen length
         push_out = push_maps.gather(1, (rotation % L)[:, None, None, None].expand(-1, 1, *push_maps.shape[2:]))

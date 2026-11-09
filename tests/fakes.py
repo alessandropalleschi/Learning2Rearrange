@@ -17,7 +17,8 @@ class FakeSim:
 
     def __init__(self, gui=False, num_obj=(1,), params=None, client=None):
         self.num_obj, self.t, self.ws = list(num_obj), 0, Workspace()
-        self.scene = SimpleNamespace(relabel_ids=[1], relabel_classes=[1], progress=self._progress, positions=self._positions)
+        self.scene = SimpleNamespace(relabel_ids=[1], relabel_classes=[1], progress=self._progress, positions=self._positions,
+                                     regions={'blue': [-0.28, -0.18], 'green': [-0.05, 0.05], 'yellow': [0.18, 0.28]})
         self.moving = True  # objects move a little with every action
         self.force_events = []
 

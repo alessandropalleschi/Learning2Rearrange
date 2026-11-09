@@ -14,7 +14,7 @@ from skimage.draw import line
 
 from l2r.config import Config
 from l2r.learning.belief import BeliefTracker, compact_belief
-from l2r.sim.constants import LABELS, TARGET_ORDER
+from l2r.sim.constants import CLASSES, LABELS, TARGET_ORDER
 from l2r.sim.environment import Environment
 
 
@@ -275,10 +275,14 @@ class RearrangeEnv:
             obs['belief_full'] = self.tracker.update(obs, last_action)
         return obs
 
+    def _regions(self):
+        """(3, 2) rows [low, high] of the target region of each class (CLASSES order) in the un-padded heightmap."""
+        return np.array([[self.ws.y_to_row(y) for y in self.sim.scene.regions[name]] for name in CLASSES], np.int16)
+
     def compact(self, obs):
         """What leaves the environment and is stored in the replay buffer (a few 100 KB instead of ~4 MB:
         the raw camera images and the auxiliary maps are dropped)."""
-        out = {'colormap': obs['colormap'], 'depthmap': obs['depthmap']}
+        out = {'colormap': obs['colormap'], 'depthmap': obs['depthmap'], 'regions': self._regions()}
         if obs.get('held_class'):  # object in the gripper (learned placement): what the place head needs
             out['held_class'] = obs['held_class']
             out['freespace'] = (obs['freespace'] > 0).astype(np.uint8)

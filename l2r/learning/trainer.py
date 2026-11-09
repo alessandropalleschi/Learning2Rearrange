@@ -12,6 +12,9 @@ from l2r.learning.memory import ReplayMemory, PrioritizedReplay
 from l2r.learning.belief import BELIEF_CHANNELS
 from l2r.learning.models import QNet, DEVICE, ACTION_CHANNELS, HELD_CLASSES
 
+REGION_CHANNELS = 5  # 3 region bands + 2 coordinate channels
+PAD = 4  # border of the observation maps (rows on both sides, columns on the left)
+
 QMaps = namedtuple('QMaps', ['push', 'pick', 'place', 'hidden', 'lengths', 'prim'], defaults=(None, None))
 
 
@@ -38,12 +41,13 @@ class Trainer(object):
 
         self.belief = self.cfg.belief
         self.learned_placement = self.cfg.placement == 'learned'
-        in_channels = 4 + (BELIEF_CHANNELS if self.belief == 'spatial' else 0)
+        in_channels = self.input_channels
         n_len = len(self.cfg.push_lengths)
         if DEVICE.type == 'cuda':
             torch.backends.cudnn.benchmark = True  # the input size is fixed: let cuDNN pick the fastest kernels
         net_args = (in_channels, self.belief, self.cfg.recurrent_hidden, n_len, self.learned_placement, self.cfg.backbone,
-                    self.cfg.transformer_dim, self.cfg.transformer_layers, self.cfg.hierarchy, self.cfg.pick_channels)
+                    self.cfg.transformer_dim, self.cfg.transformer_layers, self.cfg.hierarchy, self.cfg.pick_channels,
+                    self.cfg.arch_skips)
         self.model, self.model_target = QNet(*net_args).to(DEVICE), QNet(*net_args).to(DEVICE)
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
@@ -71,19 +75,37 @@ class Trainer(object):
         top, left = (height - h) // 2, (width - w) // 2
         return top, left
 
+    @property
+    def input_channels(self):
+        """RGB + height, the spatial belief (7) and the geometry channels (3 target-region bands + row / column coordinates)."""
+        return 4 + (BELIEF_CHANNELS if self.belief == 'spatial' else 0) + (REGION_CHANNELS if self.cfg.region_channels else 0)
+
     def prepare(self, obs):
         """Observation dict -> (C,H,W) float tensor on the network canvas (the map size rounded up to a multiple of 8).
         Channels: RGB, height (/0.4 m) and, for the spatial belief, the 7 belief channels."""
         color, depth = obs['colormap'], obs['depthmap']
         h, w = depth.shape[:2]
-        c = 4 + (BELIEF_CHANNELS if self.belief == 'spatial' else 0)
+        c = self.input_channels
         x = np.zeros((c, *self.canvas(h, w)), np.float32)
         top, left = self._pads(h, w)
         x[:3, top:top + h, left:left + w] = np.asarray(color, np.float32).transpose(2, 0, 1) / 255.0
         x[3, top:top + h, left:left + w] = np.asarray(depth, np.float32) / 0.4
         if self.belief == 'spatial':
-            x[4:, top:top + h, left:left + w] = np.asarray(obs['belief'], np.float32) / 255.0
+            x[4:4 + BELIEF_CHANNELS, top:top + h, left:left + w] = np.asarray(obs['belief'], np.float32) / 255.0
+        if self.cfg.region_channels:
+            self._geometry_channels(x[c - REGION_CHANNELS:], obs, top, left, h, w)
         return torch.from_numpy(x)
+
+    @staticmethod
+    def _geometry_channels(out, obs, top, left, h, w):
+        """Task geometry the colour map hides: where each class's target region is (also behind objects, where the map is grey)
+        and where the cell is (row / column coordinates in -1..1; a convolution is otherwise blind to absolute position)."""
+        if 'regions' not in obs:
+            raise KeyError("region_channels need observations with 'regions' (re-record the demonstrations)")
+        for k, (low, high) in enumerate(np.asarray(obs['regions'])):
+            out[k, top + PAD + int(low):top + PAD + int(high) + 1, left:left + w] = 1.0  # rows of the un-padded map + the 4 px border
+        out[3, top:top + h, left:left + w] = np.linspace(-1, 1, h, dtype=np.float32)[:, None]
+        out[4, top:top + h, left:left + w] = np.linspace(-1, 1, w, dtype=np.float32)[None, :]
 
     # ------------------------------------------------------------------ recurrent belief inputs
     @staticmethod
@@ -322,8 +344,14 @@ class Trainer(object):
                 pred, extra_loss, actor_loss = self._hierarchical_pass(x, states, transitions, prim, rot, rows, cols,
                                                                        (hp, ap, held), h, w)
             else:
-                pred = self.model.forward_selected(x, prim, rot, hp, ap, held).float()[arange, 0, rows, cols]
+                q_map = self.model.forward_selected(x, prim, rot, hp, ap, held).float()[:, 0]
+                pred = q_map[arange, rows, cols]
         per_sample = F.smooth_l1_loss(pred, label, reduction='none')  # Huber loss (paper Eq. 3)
+        if self.cfg.equiv_targets and not self.cfg.hierarchy:
+            cells = self._equivalent_cells(states, prim, rows, cols, h, w, top, left)
+            huber = F.smooth_l1_loss(q_map, label[:, None, None].expand_as(q_map), reduction='none')
+            per_sample = (huber * cells).sum((1, 2)) / cells.sum((1, 2)).clamp(min=1)
+        self.last_td_loss = float(per_sample.detach().mean())
         if weights is not None:  # importance-sampling correction of prioritized replay
             per_sample = per_sample * torch.as_tensor(weights, device=DEVICE)
         loss = per_sample.mean() + extra_loss
@@ -348,6 +376,37 @@ class Trainer(object):
         self.last_q = float(pred.detach().mean().cpu())
         return float(loss.detach().cpu())
 
+    def _equivalent_cells(self, states, prim, rows, cols, h, w, top, left):
+        """(B,Hc,Wc) float mask, in canvas coordinates, of the cells that are equivalent to the taken action: for a grasp the
+        connected front band of the object it touched (every cell in it gives the same contact), for a push or a place the 5x5
+        neighbourhood (restricted to free cells for a place). Always includes the taken cell."""
+        from scipy import ndimage
+        from l2r.learning.masks import front_grasp_cells
+        o = self.offset_px
+        canvas = self.canvas(h, w)
+        out = np.zeros((len(states), *canvas), np.float32)
+        prim_np, rows_np, cols_np = prim.cpu().numpy(), rows.cpu().numpy(), cols.cpu().numpy()
+        for i, state in enumerate(states):
+            r, c = int(rows_np[i]), int(cols_np[i])  # canvas coordinates
+            cr, cc = r - top - o, c - left - o  # cropped (action) coordinates
+            cells = np.zeros(canvas, bool)
+            if prim_np[i] == QNet.PICK:
+                depth = state['depthmap']
+                band = front_grasp_cells(depth[o:depth.shape[0] - o, o:depth.shape[1]] > 0.008)
+                labels, _ = ndimage.label(band, structure=np.ones((3, 3)))
+                if 0 <= cr < labels.shape[0] and 0 <= cc < labels.shape[1] and labels[cr, cc] > 0:
+                    rr, ccs = np.nonzero(labels == labels[cr, cc])
+                    cells[rr + top + o, ccs + left + o] = True
+            else:
+                cells[max(r - 2, 0):r + 3, max(c - 2, 0):c + 3] = True
+                if prim_np[i] == QNet.PLACE and state.get('held_class'):
+                    free = np.zeros(canvas, bool)
+                    free[top + o:top + h - o, left + o:left + w] = self.place_valid(state)
+                    cells &= free
+            cells[r, c] = True
+            out[i] = cells
+        return torch.from_numpy(out).to(DEVICE)
+
     def _margin_loss(self, x, states, prim, rot, rows, cols, demo, inputs, h, w):
         """DQfD: max_a [Q(s,a) + l * (a != a_E)] - Q(s, a_E), over the feasible actions, averaged over demonstration samples.
         Belief 'recurrent' is not supported (its hidden state is not recorded in demonstrations)."""
@@ -371,8 +430,18 @@ class Trainer(object):
         expert = channel * size + rows[idx] * canvas[1] + cols[idx]
         masks = masks.scatter(1, expert[:, None], True)  # the expert's own action is feasible by definition
         penalty = torch.full_like(q, self.cfg.demo_margin).scatter(1, expert[:, None], 0.0)
+        if self.cfg.demo_margin_radius > 0:
+            grid_r = torch.arange(canvas[0], device=DEVICE)[None, :, None]
+            grid_c = torch.arange(canvas[1], device=DEVICE)[None, None, :]
+            distance = torch.maximum((grid_r - rows[idx][:, None, None]).abs(), (grid_c - cols[idx][:, None, None]).abs())
+            own_map = self.cfg.demo_margin * (distance.float() / self.cfg.demo_margin_radius).clamp(max=1.0)
+            penalty = penalty.view(len(idx), -1, *canvas).clone()
+            penalty[torch.arange(len(idx), device=DEVICE), channel] = own_map
+            penalty = penalty.view(len(idx), -1)
         best = torch.where(masks, q + penalty, torch.full_like(q, neg)).max(1).values
-        return (best - q.gather(1, expert[:, None])[:, 0]).mean()
+        margin = (best - q.gather(1, expert[:, None])[:, 0]).mean()
+        self.last_margin = float(margin.detach())
+        return margin
 
     def pretrain(self, demos, steps, log=print):
         """Pre-train on the demonstrations alone (TD + large margin), then synchronise the target network."""
