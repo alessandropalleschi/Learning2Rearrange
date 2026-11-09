@@ -82,7 +82,7 @@ Bugs found while porting (fixed afterwards; `tests/golden/*.json` were re-record
 | `ForceMonitor` sampled every reading twice (`update()` then `force()`), halving the median window | `update()` computes the force once and exposes `last_force` |
 | `place()` returned the success of the *retreat*, so a place aborted by the force limit still counted as executed | success = reached and placed and retreated and valid |
 | a dead `np.random.randint(0, 1)` draw (one candidate set) | removed |
-| the target of the heuristic placement ignores the object's extent: it is placed up to 8 columns (4 cm) from the back wall while the object body reaches past the tool **[measured]**: the force limit stops the approach at the back wall | open: erode the free-space map by the object's half-depth |
+| the target of the heuristic placement ignores the object's extent: it is placed up to 8 columns (4 cm) from the back wall while the object body reaches past the tool **[measured]**: the force limit stops the approach at the back wall | `--footprint_placement` clears the free-space map of the cells closer to the back wall than the object is deep: on 8 seeded scenes, completed pick-and-place 2/8 -> 5/8 and force-limit stops 5 -> 2 (same objects reached their target region: sorted gain 1.65 in both). Small sample, off by default |
 | per-event `print`s from the simulator | `logging` (`DEBUG` for force stops, `WARNING` for a failed reset) |
 
 Removed: the unused `ontargetmap`, the raw `color` / `depth` / `mask` images in the observation, class entries other than

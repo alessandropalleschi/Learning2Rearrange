@@ -24,6 +24,7 @@ Useful flags:
 | `--max_actions` | actions per episode |
 | `--physics paper` | 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated; default `legacy`) |
 | `--push_lengths 0.04 0.08 0.12` | learned push: the policy also chooses the push length (default: fixed 0.08 m as in the paper) |
+| `--footprint_placement` | keep placement targets clear of the back wall by the held object's depth (fewer aborted places; see `SIMULATION_NOTES.md`) |
 | `--placement heuristic\|learned` | where the held object is placed: rule from the paper, or a learned place head (see below) |
 | `--belief none\|spatial\|recurrent` | belief-state ablation (see below); `evaluate.py` needs the same value |
 | `--sim_quality improved` | opt-in simulation improvements: IK with joint limits, tared/filtered/debounced F/T contact detection, verified suction grasps (see below) |
