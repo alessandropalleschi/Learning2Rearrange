@@ -9,6 +9,14 @@ class Config:
     reward_goal: float = 0.0        # action that solves the task
     reward_invalid: float = -10.0   # action that leads to an invalid state (object dropped, toppled)
 
+    # --- Reward variants (ablation). 'sparse' is the paper's reward. 'progress' / 'distance' add potential-based shaping
+    #     F = gamma * phi(s') - phi(s), which leaves the optimal policy unchanged: phi = scale * (sorted fraction - 1) or
+    #     -scale * mean distance of the objects to their target region (relative to the cabinet width). 'noop' adds a
+    #     penalty to actions that moved no object (>= 5 mm). ---
+    reward_mode: str = 'sparse'  # 'sparse' | 'progress' | 'distance' | 'noop'
+    reward_shaping_scale: float = 1.0
+    noop_penalty: float = 1.0
+
     # --- Q-learning ---
     gamma: float = 0.9              # future discount
     learning_rate: float = 1e-4     # Adam
@@ -26,6 +34,13 @@ class Config:
     backbone: str = 'conv'
     transformer_dim: int = 192
     transformer_layers: int = 3
+
+    # --- Hierarchical agent (ablation): level 1 chooses the primitive from global features, level 2 its parameters:
+    #     the pixel from the dense Q-map and, for pushes, a *continuous* length from an actor head (DDPG-style) ---
+    hierarchy: bool = False
+    push_length_range: tuple = (0.03, 0.15)  # m, continuous push length
+    hier_prim_weight: float = 0.5            # weight of the level-1 (primitive value) loss
+    hier_length_noise: float = 0.15          # exploration noise on the normalised length at epsilon = eps_start
 
     # --- Placement (ablation): 'heuristic' = hand-written rule inside the pick-and-place action (paper);
     #     'learned' = pick and place are two decisions, the place pixel comes from a third Q-head
@@ -68,6 +83,56 @@ class Config:
     # --- Input representation ---
     offset_px: int = 4              # border (px) cropped from the Q-maps
     pixel_size: float = 0.005       # m / px of the heightmap
+
+    @classmethod
+    def from_args(cls, args):
+        """Build the configuration from the command-line flags of train / evaluate / profile (missing flags: defaults)."""
+        get = lambda name, default: getattr(args, name, default)
+        defaults = cls()
+        return cls(start_objects=get('num_obj', defaults.start_objects), max_objects=get('max_obj', defaults.max_objects),
+                   max_actions=get('max_actions', defaults.max_actions), batch_size=get('batch_size', defaults.batch_size), belief=get('belief', 'none'),
+                   placement=get('placement', 'heuristic'), eps_decay=get('eps_decay', defaults.eps_decay),
+                   push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
+                   footprint_placement=get('footprint_placement', False), backbone=get('backbone', 'conv'),
+                   hierarchy=get('hierarchy', False), reward_mode=get('reward_mode', 'sparse'),
+                   reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
+                   noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
+
+    @staticmethod
+    def add_arguments(parser):
+        """Flags that define the model / agent (must be identical for training and evaluation)."""
+        parser.add_argument('--batch_size', type=int, default=32, help='replay batch size')
+        parser.add_argument('--push_lengths', type=float, nargs='+', default=[0.08],
+                            help='selectable push lengths in m; one value = fixed (paper: 0.08), several = learned')
+        parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic',
+                            help="'learned': a Q-head chooses where to place the held object (default: rule from the paper)")
+        parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
+                            help='belief state ablation: memoryless / spatial memory map / ConvGRU latent')
+        parser.add_argument('--backbone', choices=['conv', 'hybrid'], default='conv',
+                            help="'hybrid': transformer encoder on the 1/8-resolution bottleneck of the conv network")
+        parser.add_argument('--hierarchy', action='store_true',
+                            help='hierarchical agent: a primitive-value head selects the primitive, then a continuous push '
+                                 'length (actor-critic) and the pixel are chosen')
+        parser.add_argument('--push_length_range', type=float, nargs=2, default=[0.03, 0.15], metavar=('MIN', 'MAX'),
+                            help='continuous push length range in m (with --hierarchy)')
+        parser.add_argument('--reward_mode', choices=['sparse', 'progress', 'distance', 'noop'], default='sparse',
+                            help="reward: the paper's sparse one, potential-based shaping by sorted fraction ('progress') or by "
+                                 "distance to the target region ('distance'), or sparse + a penalty for actions that move nothing")
+        parser.add_argument('--reward_scale', type=float, default=1.0, help='scale of the shaping potential')
+        parser.add_argument('--noop_penalty', type=float, default=1.0, help="penalty of 'noop' actions (reward mode 'noop')")
+        parser.add_argument('--footprint_placement', action='store_true',
+                            help="keep placement targets clear of the back wall by the held object's depth")
+
+    @property
+    def q_range(self):
+        """(min, max) of the action values: rewards are bounded, and potential-based shaping shifts Q by -phi(s) <= scale."""
+        shaped = self.reward_mode in ('progress', 'distance')
+        low = (self.reward_invalid - (self.noop_penalty if self.reward_mode == 'noop' else 0.0)) / (1.0 - self.gamma)
+        return low, self.reward_goal + (self.reward_shaping_scale if shaped else 0.0)
+
+    def __post_init__(self):
+        if self.hierarchy:  # the length is continuous: the feasibility mask uses the longest push
+            self.push_lengths = (self.push_length_range[1],)
 
     @property
     def push_lengths_px(self) -> tuple:

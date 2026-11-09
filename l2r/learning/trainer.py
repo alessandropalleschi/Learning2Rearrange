@@ -12,7 +12,7 @@ from l2r.learning.memory import ReplayMemory, PrioritizedReplay
 from l2r.learning.belief import BELIEF_CHANNELS
 from l2r.learning.models import QNet, DEVICE, ACTION_CHANNELS, HELD_CLASSES
 
-QMaps = namedtuple('QMaps', ['push', 'pick', 'place', 'hidden'])
+QMaps = namedtuple('QMaps', ['push', 'pick', 'place', 'hidden', 'lengths', 'prim'], defaults=(None, None))
 
 
 class Trainer(object):
@@ -27,8 +27,7 @@ class Trainer(object):
         self.amp = bool(self.cfg.amp and DEVICE.type == 'cuda')
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.amp)
         # Q values are bounded: rewards lie in [reward_invalid, reward_goal]
-        self.q_min = self.cfg.reward_invalid / (1.0 - self.cfg.gamma)
-        self.q_max = self.cfg.reward_goal
+        self.q_min, self.q_max = self.cfg.q_range
         self.episode = ReplayMemory(50)
         self.double = True
         self.iteration = 0
@@ -44,7 +43,7 @@ class Trainer(object):
         if DEVICE.type == 'cuda':
             torch.backends.cudnn.benchmark = True  # the input size is fixed: let cuDNN pick the fastest kernels
         net_args = (in_channels, self.belief, self.cfg.recurrent_hidden, n_len, self.learned_placement, self.cfg.backbone,
-                    self.cfg.transformer_dim, self.cfg.transformer_layers)
+                    self.cfg.transformer_dim, self.cfg.transformer_layers, self.cfg.hierarchy)
         self.model, self.model_target = QNet(*net_args).to(DEVICE), QNet(*net_args).to(DEVICE)
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
@@ -113,7 +112,7 @@ class Trainer(object):
         def cell(row, col):
             return (min((row + o + top) // 8, rows - 1), min((col + o + left) // 8, cols - 1))
 
-        rot, row, col = action['pix']
+        rot, row, col = action['pix'][:3]
         channel = {'push': rot // len(self.cfg.push_lengths), 'grasp': 2, 'place': 3}[action['primitive']]
         a[channel][cell(row, col)] = 1.0
         if action.get('place_pix') is not None:
@@ -187,11 +186,14 @@ class Trainer(object):
         x = torch.stack([self.prepare(o) for o in obs_list]).to(DEVICE)
         hp, ap = self._recurrent_inputs(obs_list)
         with torch.no_grad(), torch.autocast(device_type=DEVICE.type, enabled=self.amp):
-            push, pick, place, h_new = net(x, hp, ap, self._held(obs_list))
+            out = net.forward_ext(x, hp, ap, self._held(obs_list))
         h, w = obs_list[0]['depthmap'].shape[:2]
         crop = lambda q: self._crop(q.float(), h, w).cpu().numpy()
-        return QMaps(crop(push), crop(pick), crop(place) if place is not None else np.zeros_like(crop(pick)),
-                     None if h_new is None else h_new.float().cpu().numpy().astype(np.float16))
+        return QMaps(crop(out.push), crop(out.pick),
+                     crop(out.place) if out.place is not None else np.zeros_like(crop(out.pick)),
+                     None if out.hidden is None else out.hidden.float().cpu().numpy().astype(np.float16),
+                     None if out.lengths is None else crop(out.lengths),
+                     None if out.prim is None else out.prim.float().cpu().numpy())
 
     # ------------------------------------------------------------------ learning
     def _soft_update(self, alpha):
@@ -219,6 +221,43 @@ class Trainer(object):
         return [torch.from_numpy(masks[k]).to(DEVICE) for k in ('push', 'grasp', 'place')]
 
     PRIMITIVES = {'grasp': QNet.PICK, 'push': QNet.PUSH, 'place': QNet.PLACE}
+
+    def _hierarchical_pass(self, x, states, transitions, prim, rot, rows, cols, inputs, h, w):
+        """Hierarchical agent: (Q of the taken actions, level-1 loss, actor loss).
+
+        * critic: the taken push is evaluated at its *executed* continuous length;
+        * level 1: the value of every primitive is regressed to the best Q of that primitive at the actor's length
+          (over the feasible pixels), for the primitives that are available in the state;
+        * actor: maximise the critic at the taken pixel / direction (only for pushes)."""
+        hp, ap, held = inputs
+        B, arange = len(transitions), torch.arange(len(transitions), device=DEVICE)
+        length = torch.tensor([float(t.action[3]) if t.primitive_action == 'push' else 0.0 for t in transitions],
+                              device=DEVICE)
+        out = self.model.forward_train(x, length, hp, ap, held)
+        push_map = out['push_exec'].gather(1, rot[:, None, None, None].expand(-1, 1, *out['pick'].shape[2:]))[:, 0]
+        place_map = out['place'][:, 0] if out['place'] is not None else out['pick'][:, 0]
+        taken = torch.where((prim == QNet.PUSH)[:, None, None], push_map,
+                            torch.where((prim == QNet.PLACE)[:, None, None], place_map, out['pick'][:, 0]))
+        pred = taken.float()[arange, rows, cols]
+
+        neg = -1e9
+        push_mask, pick_mask, place_mask = self._masks_padded(states, h, w)
+        with torch.no_grad():
+            def best(q, mask):
+                return torch.where(mask.expand_as(q), q.float(), torch.full_like(q.float(), neg)).flatten(1).max(1).values
+
+            values = torch.stack([best(out['push_actor'].detach(), push_mask), best(out['pick'].detach(), pick_mask),
+                                  best(out['place'].detach(), place_mask) if out['place'] is not None
+                                  else torch.full((B,), neg, device=DEVICE)], dim=1)  # order of `prim`: push, pick, place
+            available = values > neg / 2
+            targets = values.clamp(self.q_min, self.q_max)
+        level1 = (F.smooth_l1_loss(out['prim'].float(), targets, reduction='none') * available).sum() / available.sum().clamp(min=1)
+        actor_loss = None
+        pushed = prim == QNet.PUSH
+        if pushed.any():
+            q_actor = out['push_actor'].float()[arange, rot, rows, cols]
+            actor_loss = -q_actor[pushed].mean()
+        return pred, self.cfg.hier_prim_weight * level1, actor_loss
 
     def train_step(self, transitions, weights=None):
         """One double-DQN gradient step on a list of Transition. Gradients flow only through the taken pixel."""
@@ -268,17 +307,29 @@ class Trainer(object):
                 label = label.clamp(self.q_min, self.q_max)
 
         # ---- prediction at the taken pixel only
+        arange = torch.arange(B, device=DEVICE)
+        extra_loss, actor_loss = 0.0, None
         with torch.autocast(device_type=DEVICE.type, enabled=self.amp):
-            out = self.model.forward_selected(x, prim, rot, hp, ap, held)
-        pred = out.float()[torch.arange(B, device=DEVICE), 0, rows, cols]
+            if self.cfg.hierarchy:
+                pred, extra_loss, actor_loss = self._hierarchical_pass(x, states, transitions, prim, rot, rows, cols,
+                                                                       (hp, ap, held), h, w)
+            else:
+                pred = self.model.forward_selected(x, prim, rot, hp, ap, held).float()[arange, 0, rows, cols]
         per_sample = F.smooth_l1_loss(pred, label, reduction='none')  # Huber loss (paper Eq. 3)
         if weights is not None:  # importance-sampling correction of prioritized replay
             per_sample = per_sample * torch.as_tensor(weights, device=DEVICE)
-        loss = per_sample.mean()
+        loss = per_sample.mean() + extra_loss
         self.last_td = (pred - label).detach().cpu().numpy()
 
         self.optimizer.zero_grad()
+        length_params = list(self.model.length_head.parameters()) if self.cfg.hierarchy else []
+        actor_grads = None
+        if actor_loss is not None:  # DDPG: the actor follows the gradient of the critic; no other parameter is touched
+            actor_grads = torch.autograd.grad(self.scaler.scale(actor_loss), length_params, allow_unused=True)
         self.scaler.scale(loss).backward()
+        if actor_grads is not None:
+            for parameter, grad in zip(length_params, actor_grads):
+                parameter.grad = grad
         self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
         self.scaler.step(self.optimizer)

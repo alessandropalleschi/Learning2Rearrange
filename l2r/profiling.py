@@ -17,7 +17,7 @@ import numpy as np
 
 from l2r.config import Config, SimParams
 from l2r.envs.rearrange import RearrangeEnv
-from l2r.learning.policy import select_action
+from l2r.learning.policy import select_for
 from l2r.learning.trainer import Trainer
 from l2r.sim.constants import OCCLUDED_RGB
 from l2r.sim.workspace import Workspace
@@ -34,7 +34,7 @@ def run_random_actions(env, trainer, cfg, ws, n_actions):
     for _ in range(n_actions):
         t0 = time.time()
         q = trainer.forward_batch([obs])
-        primitive, pix, _ = select_action(trainer, obs, q.push[0], q.pick[0], q.place[0], 1.0, cfg, ws)
+        primitive, pix, _ = select_for(trainer, obs, q, 0, 1.0, cfg, ws)
         t1 = time.time()
         obs, _, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix})
         stats['times'][primitive].append(time.time() - t1)
@@ -79,15 +79,13 @@ def main(argv=None):
     parser.add_argument('--num_obj', type=int, default=3)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--top', type=int, default=15, help='functions to list in the profile')
+    Config.add_arguments(parser)
     SimParams.add_arguments(parser)
     parser.add_argument('--randomize', action='store_true', default=False, help='domain randomisation')
-    parser.add_argument('--push_lengths', type=float, nargs='+', default=[0.08])
-    parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic')
-    parser.add_argument('--footprint_placement', action='store_true', help='clear placement targets of the back wall')
     args = parser.parse_args(argv)
 
-    cfg = Config(placement=args.placement, max_actions=10 ** 6, push_lengths=tuple(args.push_lengths),
-                 footprint_placement=args.footprint_placement)
+    cfg = Config.from_args(args)
+    cfg.max_actions = 10 ** 6
     params = SimParams.from_args(args)
     ws = Workspace.from_params(params)
     np.random.seed(args.seed)

@@ -47,6 +47,8 @@ for the review of the simulator (errors fixed, findings, open issues). Compare m
 Not changed (needs tuning on your setup): explicit motor forces / velocity limits of the joint controller, and a force-limited
 vacuum model instead of the fixed constraint (`suction_max_force` is already a parameter; the `paper` preset uses 50 N).
 
+See **ABLATIONS.md** for the transformer backbone, the hierarchical agent, the reward variants (with measurements) and the decision on ACT-style models.
+
 ### Perception: a segmentation network instead of the simulator's ground truth (`--perception network`)
 The policy sees colour-coded class maps built from object masks. By default the masks are PyBullet's ground truth; with
 `--perception network` a trained U-Net (`l2r/perception`) provides them. An object's *class* (which target region it belongs to) is part

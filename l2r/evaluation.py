@@ -14,12 +14,12 @@ import numpy as np
 from l2r.config import Config, SimParams
 from l2r.envs.rearrange import make_env
 from l2r.envs.vec import VecEnv
-from l2r.learning.policy import attach_initial, carry, select_action
+from l2r.learning.policy import attach_initial, carry, select_for
 from l2r.learning.trainer import Trainer
 from l2r.sim.workspace import Workspace
 from l2r.utils import seed_everything
 
-IDLE_ACTION = {'primitive': 'push', 'pix': (0, 0, 0)}  # sent to simulators that have no episode left (ignored)
+IDLE_ACTION = {'primitive': 'push', 'pix': (0, 0, 0, 0.0)}  # sent to simulators that have no episode left (ignored)
 
 
 def evaluate(trainer, venv, cfg, ws, num_obj, episodes, base_seed):
@@ -39,7 +39,7 @@ def evaluate(trainer, venv, cfg, ws, num_obj, episodes, base_seed):
         q = trainer.forward_batch([obs[i] for i in active])
         actions = [IDLE_ACTION] * n
         for k, i in enumerate(active):
-            primitive, pix, _ = select_action(trainer, obs[i], q.push[k], q.pick[k], q.place[k], 0.0, cfg, ws)
+            primitive, pix, _ = select_for(trainer, obs[i], q, k, 0.0, cfg, ws)
             actions[i] = {'primitive': primitive, 'pix': pix}
         next_obs, _, terminated, truncated, infos = venv.step(actions)
         for k, i in enumerate(active):
@@ -64,20 +64,13 @@ def main(argv=None):
     parser.add_argument('--episodes', type=int, default=20, help='episodes per object count')
     parser.add_argument('--num_envs', type=int, default=1)
     parser.add_argument('--max_actions', type=int, default=40)
-    parser.add_argument('--push_lengths', type=float, nargs='+', default=[0.08], help='must match the snapshot')
-    parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic', help='must match the snapshot')
-    parser.add_argument('--backbone', choices=['conv', 'hybrid'], default='conv', help='must match the snapshot')
-    parser.add_argument('--footprint_placement', action='store_true', help='must match the training setting')
-    parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
-                        help='must match the belief the snapshot was trained with')
+    Config.add_arguments(parser)  # must match the snapshot
     SimParams.add_arguments(parser)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--logging_directory', default='eval')
     args = parser.parse_args(argv)
 
-    cfg = Config(max_actions=args.max_actions, belief=args.belief, placement=args.placement,
-                 push_lengths=tuple(args.push_lengths), footprint_placement=args.footprint_placement,
-                 backbone=args.backbone)
+    cfg = Config.from_args(args)
     params = SimParams.from_args(args)
     ws = Workspace.from_params(params)
     seed_everything(args.seed)

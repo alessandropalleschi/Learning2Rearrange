@@ -19,6 +19,7 @@ Belief state (ablation, `belief` argument of QNet):
 Pushing directions: the paper models two (left/right) = 0 and 180 degree rotations of the input. A 180
 degree rotation of a square image is an exact double flip, so no interpolation is needed.
 """
+from collections import namedtuple
 
 import torch
 import torch.nn as nn
@@ -123,16 +124,19 @@ class ConvGRUCell(nn.Module):
         return (1 - z) * h + z * n
 
 
+Outputs = namedtuple('Outputs', ['push', 'pick', 'place', 'hidden', 'lengths', 'prim'])
+
+
 class QNet(nn.Module):
     nr_rotations = 2  # push left / right (0 and 180 degrees)
 
     def __init__(self, in_channels=IN_CHANNELS, belief='none', hidden=64, n_push_lengths=1, learned_placement=True,
-                 backbone='conv', transformer_dim=192, transformer_layers=3):
+                 backbone='conv', transformer_dim=192, transformer_layers=3, hierarchical=False):
         """learned_placement: build the place head (conditioned on the held class). Without it `forward` returns
         `None` as place map: the head would cost about as much as the pick head for nothing."""
         super().__init__()
         self.belief, self.hidden, self.n_push_lengths = belief, hidden, n_push_lengths
-        self.learned_placement, self.backbone = learned_placement, backbone
+        self.learned_placement, self.backbone, self.hierarchical = learned_placement, backbone, hierarchical
         self.stem = nn.Sequential(nn.Conv2d(in_channels, 64, 3, padding=1, bias=False), norm(64), nn.ReLU(inplace=True))
         self.rb1, self.rb2, self.rb3 = ResidualBlock(64, 128), ResidualBlock(128, 256), ResidualBlock(256, 512)
         # bottleneck: pooled global context (conv backbone) or global self-attention (hybrid conv + transformer)
@@ -146,7 +150,14 @@ class QNet(nn.Module):
             nn.init.zeros_(self.rec_out.bias)
         self.rb4, self.rb5, self.rb6 = ResidualBlock(512, 256), ResidualBlock(256, 128), ResidualBlock(128, 64)
         # one Q-map per selectable push length; the second direction is the same head on the flipped input
-        self.push_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, n_push_lengths, 1))
+        if hierarchical:
+            # hierarchical parameterised action: a *continuous* push length. The push critic gets the length as an extra
+            # input channel, an actor head proposes it per pixel, a primitive head scores push / pick / place globally.
+            self.push_head = nn.Sequential(ResidualBlock(64 + 1, 64), nn.Conv2d(64, 1, 1))
+            self.length_head = nn.Sequential(nn.Conv2d(64, 32, 3, padding=1), nn.ReLU(inplace=True), nn.Conv2d(32, 1, 1))
+            self.prim_head = nn.Sequential(nn.Linear(128, 64), nn.ReLU(inplace=True), nn.Linear(64, 3))
+        else:
+            self.push_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, n_push_lengths, 1))
         self.pick_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
         if learned_placement:  # Q-map over the free cells, conditioned on the class of the object in the gripper
             self.place_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
@@ -194,19 +205,58 @@ class QNet(nn.Module):
         """Add the embedding of the held class (zeros = nothing held) to the bottleneck features."""
         return b if held is None or not self.learned_placement else b + self.held_embed(held)[:, :, None, None]
 
-    def forward(self, x, h_prev=None, a_prev=None, held=None):
-        """All Q-maps. x: (B,C,H,W) -> push (B,2L,H,W) [index = direction*L + length], pick (B,1,H,W), place (B,1,H,W) in input
-        orientation, and the new hidden state (None unless belief == 'recurrent').
-        held: (B,3) one-hot class of the object in the gripper (zeros when nothing is held)."""
+    def _features(self, x, h_prev, a_prev, held):
+        """Decoder features of the input (f0) and of its 180 degree rotation (f1), and the new belief state."""
         both = self.encode(torch.cat([x, self.flip(x)]))  # both push directions in one batched pass
         b0, b1 = (self._with_held(b, held) for b in both.chunk(2))
         h = None
         if self.belief == 'recurrent':
             h, ctx = self.update_belief(b0, h_prev, a_prev)
             b0, b1 = b0 + ctx, b1 + self.flip(ctx)
-        f0, f1 = self.decode(b0), self.decode(b1)
-        push = torch.cat([self.push_head(f0), self.flip(self.push_head(f1))], dim=1)
-        return push, self.pick_head(f0), self.place_head(f0) if self.learned_placement else None, h
+        return self.decode(b0), self.decode(b1), h
+
+    @staticmethod
+    def _pooled(f):
+        return torch.cat([f.mean(dim=(2, 3)), f.amax(dim=(2, 3))], dim=1)
+
+    def forward_ext(self, x, h_prev=None, a_prev=None, held=None):
+        """All outputs. x: (B,C,H,W) -> `Outputs`: push (B,2L,H,W) [index = direction*L + length], pick (B,1,H,W), place
+        (B,1,H,W or None) in input orientation, the new hidden state (None unless belief == 'recurrent') and, for the
+        hierarchical network, the push length proposed by the actor (B,2,H,W; 0..1 of the length range) and the value of
+        every primitive (B,3: push, pick, place); push then is the critic evaluated at the proposed length.
+        held: (B,3) one-hot class of the object in the gripper (zeros when nothing is held)."""
+        f0, f1, h = self._features(x, h_prev, a_prev, held)
+        place = self.place_head(f0) if self.learned_placement else None
+        if not self.hierarchical:
+            push = torch.cat([self.push_head(f0), self.flip(self.push_head(f1))], dim=1)
+            return Outputs(push, self.pick_head(f0), place, h, None, None)
+        l0, l1 = torch.sigmoid(self.length_head(f0)), torch.sigmoid(self.length_head(f1))
+        push = torch.cat([self._push_critic(f0, l0), self.flip(self._push_critic(f1, l1))], dim=1)
+        lengths = torch.cat([l0, self.flip(l1)], dim=1)
+        return Outputs(push, self.pick_head(f0), place, h, lengths, self.prim_head(self._pooled(f0.detach())))
+
+    def forward(self, x, h_prev=None, a_prev=None, held=None):
+        """(push, pick, place, hidden) of `forward_ext`."""
+        out = self.forward_ext(x, h_prev, a_prev, held)
+        return out.push, out.pick, out.place, out.hidden
+
+    def _push_critic(self, f, length):
+        return self.push_head(torch.cat([f, length], dim=1))
+
+    def forward_train(self, x, length, h_prev=None, a_prev=None, held=None):
+        """Training outputs of the hierarchical network, from one pass.
+
+        length: (B,) executed push length (0..1). Returns a dict: `push_exec` (B,2,H,W) critic at the *executed* length
+        (for the TD loss), `pick`, `place`, `push_actor` (B,2,H,W) critic at the actor's length with detached features
+        (its gradient reaches the actor only: DDPG), `lengths`, `prim` (B,3) value of every primitive."""
+        f0, f1, _ = self._features(x, h_prev, a_prev, held)
+        fixed = length[:, None, None, None].expand(-1, 1, *f0.shape[2:])
+        push_exec = torch.cat([self._push_critic(f0, fixed), self.flip(self._push_critic(f1, fixed))], dim=1)
+        l0, l1 = torch.sigmoid(self.length_head(f0.detach())), torch.sigmoid(self.length_head(f1.detach()))
+        push_actor = torch.cat([self._push_critic(f0.detach(), l0), self.flip(self._push_critic(f1.detach(), l1))], dim=1)
+        return {'push_exec': push_exec, 'pick': self.pick_head(f0), 'push_actor': push_actor,
+                'place': self.place_head(f0) if self.learned_placement else None,
+                'lengths': torch.cat([l0, self.flip(l1)], dim=1), 'prim': self.prim_head(self._pooled(f0.detach()))}
 
     PICK, PUSH, PLACE = 0, 1, 2
 

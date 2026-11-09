@@ -84,6 +84,8 @@ class RearrangeEnv:
         self.actions = 0
         self.episode_return = 0.0
         self.holding = False
+        self._phi = 0.0  # shaping potential of the current state
+        self._positions = None  # object positions before the action (no-op detection)
 
     # ------------------------------------------------------------------ gym API
     def reset(self, num_obj=None, seed=None):
@@ -100,6 +102,7 @@ class RearrangeEnv:
         self.episode_return = 0.0
         self.holding = False
         self.tracker.reset()
+        self._phi = self._potential()
         self.obs = self._full_obs(None)
         self._relabel_state = self._relabel_status()
         return self.compact(self.obs)
@@ -118,12 +121,16 @@ class RearrangeEnv:
         position = self.ws.px_to_xy(px_x, px_y)
         executed, place_pix, attempted = False, None, False
         stops_before = sim.force_stops
+        if not self.holding:  # the snapshot is taken at the start of the (pick-and-place) action
+            self._positions = sim.scene.positions()
         learned = cfg.placement == 'learned'
         if self.holding and prim != 'place':
             raise ValueError("an object is held: the next action must be 'place'")
 
         if prim == 'push':
             angle, length = decode_push(pix[0], cfg.push_lengths)
+            if cfg.hierarchy:  # continuous length: pix[3] in 0..1 of the range
+                length = cfg.push_length_range[0] + pix[3] * (cfg.push_length_range[1] - cfg.push_length_range[0])
             if check_push(self.ws, obs['depthmap'], px_x, px_y, angle, length):
                 attempted = True
                 executed = sim.push(position, angle, push_length=length)
@@ -168,6 +175,8 @@ class RearrangeEnv:
         else:
             reward = cfg.reward_step
         terminated = sorted_ or not valid
+        base_reward = reward  # hindsight relabelling looks at the unshaped reward
+        reward, shaping = self._shaped(reward, terminated, valid)
         truncated = (not terminated) and self.actions >= cfg.max_actions
         self.episode_return += reward
 
@@ -176,13 +185,37 @@ class RearrangeEnv:
         self._relabel_state = self._relabel_status()
         # Hindsight relabelling (paper Fig. 8): all objects are inside *some* target region but not (all) in
         # their own one; reassigning the classes would make this a sorted state.
-        relabel = (reward == cfg.reward_step and self._relabel_state[0]
+        relabel = (base_reward == cfg.reward_step and self._relabel_state[0]
                    and (not prev_relabel[0] or prev_relabel[1] != self._relabel_state[1]))
         info = {'executed': bool(executed), 'attempted': attempted, 'sorted': bool(sorted_ and valid), 'invalid': not valid,
                 'place_pix': place_pix, 'relabel': bool(relabel), 'episode_return': self.episode_return,
-                'actions': self.actions, 'phase': 'act', 'force_stops': sim.force_stops - stops_before}
+                'actions': self.actions, 'phase': 'act', 'force_stops': sim.force_stops - stops_before,
+                'shaping': shaping}
         self.obs = next_obs
         return self.compact(next_obs), reward, terminated, truncated, info
+
+    # ------------------------------------------------------------------ reward variants
+    def _potential(self):
+        """Shaping potential phi(s) of the current scene (0 for the sparse reward); 0 at a goal state."""
+        cfg = self.cfg
+        if cfg.reward_mode not in ('progress', 'distance'):
+            return 0.0
+        fraction, distance = self.sim.scene.progress()
+        if cfg.reward_mode == 'progress':
+            return cfg.reward_shaping_scale * (fraction - 1.0)
+        return -cfg.reward_shaping_scale * distance / float(self.ws.bounds[1][1] - self.ws.bounds[1][0])
+
+    def _shaped(self, reward, terminated, valid):
+        """Add the reward variant's extra term to the sparse reward; returns (reward, extra term)."""
+        cfg, extra = self.cfg, 0.0
+        if cfg.reward_mode in ('progress', 'distance'):
+            phi_next = self._potential() if (valid and not terminated) else 0.0  # absorbing states have potential 0
+            extra = cfg.gamma * phi_next - self._phi
+            self._phi = phi_next
+        elif cfg.reward_mode == 'noop' and not terminated:
+            moved = np.abs(self.sim.scene.positions() - self._positions).max() if len(self._positions) else 0.0
+            extra = -cfg.noop_penalty if moved < 0.005 else 0.0
+        return reward + extra, extra
 
     # ------------------------------------------------------------------ observations
     def _full_obs(self, last_action, executed=True, place_pix=None):

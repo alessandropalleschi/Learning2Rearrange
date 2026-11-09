@@ -68,6 +68,21 @@ class Scene:
         upright = max(roll) < 1.2 and max(pitch) < 1.2
         return bool(np.all(z > self.ws.bounds[2][0] - 0.1) and upright)
 
+    def progress(self):
+        """Task progress without stepping the simulation: (fraction of the objects inside the region of their class,
+        mean distance in m of the objects to their region, 0 when inside)."""
+        poses = self.poses()
+        inside, distance = 0, []
+        for object_id, (pos, _) in poses.items():
+            low, high = self.regions[self.class_name(object_id)]
+            inside += low <= pos[1] <= high
+            distance.append(max(low - pos[1], pos[1] - high, 0.0))
+        return inside / len(poses), float(np.mean(distance))
+
+    def positions(self):
+        """(N,3) object positions, in the order of `object_ids`."""
+        return np.array([self.p.getBasePositionAndOrientation(i)[0] for i in self.object_ids])
+
     def fraction_sorted(self):
         """Fraction of the objects inside the target region of their own class."""
         self.p.stepSimulation()

@@ -57,6 +57,53 @@ def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg, ws):
     return primitive, tuple(int(i) for i in pix), float(q[primitive][pix])
 
 
+PRIMITIVE_INDEX = {'push': 0, 'grasp': 1, 'place': 2}  # order of the level-1 values of the hierarchical network
+
+
+def select_hierarchical(trainer, obs, push_q, pick_q, prim_q, lengths, explore_prob, cfg, ws):
+    """Hierarchical decision: (1) the primitive from the level-1 values (restricted to feasible primitives), (2) its
+    parameters: the pixel / direction from the dense Q-map of that primitive and, for a push, the continuous length from
+    the actor (plus exploration noise). Exploring: a random feasible primitive, a random feasible pixel and length.
+
+    prim_q (3,) and lengths (2,h,w; 0..1) come from the hierarchical network. Returns (primitive, (a, row, col[, length]), value)."""
+    q = {'push': trainer.preprocessQmaps(push_q, obs['depthmap'], 'push'),
+         'grasp': trainer.preprocessQmaps(pick_q, obs['depthmap'], 'grasp')}
+    options = [name for name in q if (q[name] > -1000).any()] or ['grasp']
+    exploring = explore_prob > 0 and np.random.uniform() < explore_prob
+    if exploring:
+        primitive = options[np.random.randint(len(options))]
+    else:
+        primitive = max(options, key=lambda name: prim_q[PRIMITIVE_INDEX[name]])
+    valid = np.flatnonzero(q[primitive].ravel() > -1000)
+    pick_random = exploring and valid.size > 0
+    pix = np.unravel_index(np.random.choice(valid) if pick_random else np.argmax(q[primitive]), q[primitive].shape)
+    if primitive != 'push':
+        return primitive, tuple(int(i) for i in pix), float(q[primitive][pix])
+    low, high = cfg.push_length_range
+
+    def length_at(pix):
+        if exploring:
+            return float(np.random.uniform())  # explore the whole range
+        noise = cfg.hier_length_noise * explore_prob / cfg.eps_start * np.random.randn()
+        return float(np.clip(lengths[pix] + noise, 0.0, 1.0))
+
+    length = length_at(pix)
+    for _ in range(100 if exploring else 0):  # an explored push should touch something
+        angle = np.deg2rad(pix[0] * 180.0 - 90)
+        if check_push(ws, obs['depthmap'], pix[2], pix[1], angle, low + length * (high - low)):
+            break
+        pix = np.unravel_index(np.random.choice(valid), q[primitive].shape)
+        length = length_at(pix)
+    return 'push', (int(pix[0]), int(pix[1]), int(pix[2]), length), float(q['push'][pix])
+
+
+def select_for(trainer, obs, q, i, explore_prob, cfg, ws):
+    """`select_action` for sample i of a batch of network outputs `q` (QMaps): hierarchical or flat, as configured."""
+    if q.prim is not None and not obs.get('held_class'):
+        return select_hierarchical(trainer, obs, q.push[i], q.pick[i], q.prim[i], q.lengths[i], explore_prob, cfg, ws)
+    return select_action(trainer, obs, q.push[i], q.pick[i], q.place[i], explore_prob, cfg, ws)
+
+
 # ---------------------------------------------------------------------------------------------------
 # Recurrent belief bookkeeping. The hidden state and the last action travel with the observations:
 #   obs_t['h_prev'], obs_t['prev_action']  = the inputs of the belief update at time t (h_{t-1}, a_{t-1}).

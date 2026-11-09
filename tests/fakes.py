@@ -17,12 +17,20 @@ class FakeSim:
 
     def __init__(self, gui=False, num_obj=(1,), params=None, client=None):
         self.num_obj, self.t, self.ws = list(num_obj), 0, Workspace()
-        self.scene = SimpleNamespace(relabel_ids=[1], relabel_classes=[1])
+        self.scene = SimpleNamespace(relabel_ids=[1], relabel_classes=[1], progress=self._progress, positions=self._positions)
+        self.moving = True  # objects move a little with every action
         self.force_events = []
 
     def reset(self):
         self.t = 0
         return True
+
+    def _progress(self):  # (sorted fraction, mean distance to the target region in m): improves with every action
+        fraction = min(self.t / 3, 1.0)
+        return fraction, 0.2 * (1 - fraction)
+
+    def _positions(self):
+        return np.array([[0.0, 0.1 * self.t if self.moving else 0.0, 0.0]])
 
     def observe(self):
         depth = np.zeros((H, W), np.float32)

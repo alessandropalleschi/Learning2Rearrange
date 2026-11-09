@@ -10,7 +10,7 @@ from l2r.config import Config, SimParams
 from l2r.envs.rearrange import make_env
 from l2r.envs.vec import VecEnv
 from l2r.learning.memory import Transition
-from l2r.learning.policy import attach_initial, carry, carry_over, select_action
+from l2r.learning.policy import attach_initial, carry, carry_over, select_for
 from l2r.learning.trainer import Trainer
 from l2r.logger import Logger
 from l2r.sim.workspace import Workspace
@@ -49,10 +49,7 @@ class TrainingLoop:
 
     def __init__(self, args):
         self.args = args
-        self.cfg = Config(start_objects=args.num_obj, max_objects=args.max_obj, max_actions=args.max_actions,
-                          belief=args.belief, placement=args.placement, eps_decay=args.eps_decay,
-                          push_lengths=tuple(args.push_lengths), footprint_placement=args.footprint_placement,
-                          backbone=args.backbone)
+        self.cfg = Config.from_args(args)
         params = SimParams.from_args(args)
         self.ws = Workspace.from_params(params)  # geometry for the main process (the workers build their own)
         seed_everything(args.random_seed)
@@ -83,8 +80,7 @@ class TrainingLoop:
             while True:
                 eps = self.epsilon
                 q = self.trainer.forward_batch(obs)
-                choices = [select_action(self.trainer, obs[i], q.push[i], q.pick[i], q.place[i], eps, self.cfg, self.ws)
-                           for i in range(n)]
+                choices = [select_for(self.trainer, obs[i], q, i, eps, self.cfg, self.ws) for i in range(n)]
                 next_obs, rewards, terminated, truncated, infos = self.venv.step(
                     [{'primitive': c[0], 'pix': c[1]} for c in choices])
                 for i in range(n):
@@ -183,16 +179,7 @@ def add_arguments(parser):
     parser.add_argument('--updates_per_step', type=int, default=1, help='gradient steps per environment step')
     parser.add_argument('--eps_decay', type=float, default=0.9995,
                         help='epsilon multiplier per environment step (0.8 -> 0.01); ~0.998 for runs of a few thousand steps')
-    parser.add_argument('--push_lengths', type=float, nargs='+', default=[0.08],
-                        help='selectable push lengths in m; one value = fixed (paper: 0.08), several = learned')
-    parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic',
-                        help="'learned': a Q-head chooses where to place the held object (default: rule from the paper)")
-    parser.add_argument('--backbone', choices=['conv', 'hybrid'], default='conv',
-                        help="'hybrid': transformer encoder on the 1/8-resolution bottleneck of the conv network")
-    parser.add_argument('--footprint_placement', action='store_true',
-                        help='keep placement targets clear of the back wall by the held object\'s depth')
-    parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
-                        help='belief state ablation: memoryless / spatial memory map / ConvGRU latent')
+    Config.add_arguments(parser)
     SimParams.add_arguments(parser)
     parser.add_argument('--randomize', action='store_true', default=False, help='domain randomisation')
     parser.add_argument('--max_iterations', type=int, default=0, help='stop after this many environment steps (0 = run forever)')
