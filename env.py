@@ -494,7 +494,6 @@ class Environment:
         NO = min(int(np.random.choice(self.num_obj)), 15)  # at most 5 objects per class, 3 classes
         obj = sample(objects,3)
         obj = [x+' '+y for x,y in zip(colors,obj)]
-        print(obj)
 
         obj_names = []
         yellow = 0
