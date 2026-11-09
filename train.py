@@ -22,7 +22,7 @@ from vec_env import VecEnv
 
 def main(args):
     cfg = Config(start_objects=args.num_obj, max_objects=args.max_obj, max_actions=args.max_actions,
-                 belief=args.belief, placement=args.placement)
+                 belief=args.belief, placement=args.placement, eps_decay=args.eps_decay)
     params = SimParams.preset(args.physics, randomize=args.randomize)
     sim_module.configure_cabinet(params)  # the main process needs the same workspace bounds as the workers
     seed_everything(args.random_seed)
@@ -138,6 +138,8 @@ if __name__ == '__main__':
     parser.add_argument('--updates_per_step', type=int, default=1, help='gradient steps per environment step')
     parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy',
                         help="'paper': 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated)")
+    parser.add_argument('--eps_decay', type=float, default=0.9995,
+                        help='epsilon multiplier per environment step (0.8 -> 0.01); use ~0.998 for runs of a few thousand steps')
     parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic',
                         help="'learned': a Q-head chooses where to place the held object (default: rule from the paper)")
     parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
