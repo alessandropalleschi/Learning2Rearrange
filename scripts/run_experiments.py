@@ -69,7 +69,8 @@ def run_one(name, flags, seed, args):
     snapshot = os.path.join(directory, 'models', 'snapshot.pth')
     common = [sys.executable]
     train = common + ['train.py', '--logging_directory', logs, '--random_seed', str(seed), '--num_envs', str(args.num_envs),
-                      '--max_obj', str(args.max_obj), '--max_iterations', str(args.steps),
+                      '--max_obj', str(args.max_obj), '--num_obj', str(args.num_obj), '--max_iterations', str(args.steps),
+                      '--max_episodes', str(args.max_episodes),
                       '--save_every', str(max(args.steps // 4, 100)), *flags, *args.extra]
     if run(train, os.path.join(directory, 'train.log')):
         raise SystemExit(f'training failed: see {directory}/train.log')
@@ -131,8 +132,10 @@ def main(argv=None):
     r.add_argument('--seeds', type=int, nargs='+', default=[0])
     r.add_argument('--steps', type=int, default=20000, help='environment steps per training run')
     r.add_argument('--num_envs', type=int, default=4)
-    r.add_argument('--max_obj', type=int, default=8)
-    r.add_argument('--objects', type=int, nargs='+', default=[3, 5, 8], help='object counts of the evaluation')
+    r.add_argument('--max_obj', type=int, default=5, help='top of the curriculum')
+    r.add_argument('--num_obj', type=int, default=1, help='start of the curriculum (2 objects are easy even for random actions)')
+    r.add_argument('--max_episodes', type=int, default=0, help='cap on finished training episodes per run (0 = only --steps)')
+    r.add_argument('--objects', type=int, nargs='+', default=[3, 4, 5], help='object counts of the evaluation')
     r.add_argument('--episodes', type=int, default=30, help='evaluation episodes per object count')
     r.add_argument('--out', default='runs/experiments')
     r.add_argument('--force', action='store_true')

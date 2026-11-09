@@ -101,6 +101,8 @@ class TrainingLoop:
                         obs[i] = attach_initial(self.trainer, o)
                 if args.max_iterations and self.trainer.iteration >= args.max_iterations:
                     break
+                if args.max_episodes and self.episode >= args.max_episodes:
+                    break
         finally:
             self.venv.close()
             self.logger.close()
@@ -182,6 +184,7 @@ def add_arguments(parser):
     Config.add_arguments(parser)
     SimParams.add_arguments(parser)
     parser.add_argument('--randomize', action='store_true', default=False, help='domain randomisation')
+    parser.add_argument('--max_episodes', type=int, default=0, help='stop after this many finished episodes (0 = no cap)')
     parser.add_argument('--max_iterations', type=int, default=0, help='stop after this many environment steps (0 = run forever)')
     parser.add_argument('--start_method', default='spawn', help='multiprocessing start method of the workers')
     parser.add_argument('--gui', action='store_true', default=False, help='show the PyBullet GUI (first env only)')
