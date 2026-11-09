@@ -38,6 +38,8 @@ VARIANTS = {
     'unet_attn4': dict(arch_decoder='unet_attn4'),
     'unet+hybrid': dict(arch_skips=True, backbone='hybrid'),
     'unet+ppm': dict(arch_skips=True, backbone='ppm'),
+    'unet+convnext+ppm': dict(arch_skips=True, arch_encoder='convnext', backbone='ppm'),
+    'unet+convnext+aspp': dict(arch_skips=True, arch_encoder='convnext', backbone='aspp'),
     'unet+aspp': dict(arch_skips=True, backbone='aspp'),
     'unet+ppm+aspp': dict(arch_skips=True, backbone='ppm_aspp'),
     'unet+os4': dict(arch_skips=True, arch_stride4=True),
