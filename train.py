@@ -409,7 +409,7 @@ def main(args):
             average_score = sum(most_recent_scores) / len(most_recent_scores)
             print("Average Reward", average_score)
             print("Average Success Rate", average_success)
-            rewward = 0
+            reward = 0
             while True:
                 if(env.reset()):
                     if(env.check_sorted()<1):
@@ -453,6 +453,8 @@ def main(args):
 
         if not done:
             reward_value = reward_value if change_detected else -5
+        # count consecutive actions that did not change the scene so stuck episodes get reset
+        no_change_count = 0 if change_detected else no_change_count + 1
 
         if done and ok_status:
             reward_value = 0

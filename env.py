@@ -652,7 +652,7 @@ class Environment:
               object_id = p.createMultiBody(1, object_shape, object_visual, basePosition=object_position)
             elif object_type == 'bowl':
               object_position[2] = 0
-              object_id = p.loadURDF("bowl/bowl.urdf", object_position, useFixedBase=1)
+              object_id = p.loadURDF("assets/ycb_objects/YcbBowl/model.urdf", object_position, useFixedBase=1)
             elif object_type == 'cylinder':
               radius = 0.03+np.random.uniform(-0.005,0.005)
               object_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=radius, height = 2*object_dim[2])
