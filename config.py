@@ -21,6 +21,13 @@ class Config:
     lr_decay: float = 1.0           # exponential LR decay per optimisation step (1.0 = fixed LR as in the paper)
     amp: bool = True                # mixed precision (only used on CUDA)
 
+    # --- Belief state (ablation): 'none' | 'spatial' | 'recurrent' ---
+    # spatial:   persistent per-episode memory map (last seen colour/height/id, age, last action) as extra input channels
+    # recurrent: ConvGRU latent state at the network bottleneck, updated from the encoded observation and last action
+    belief: str = 'none'
+    belief_age_horizon: int = 10    # steps after which a remembered cell counts as fully stale
+    recurrent_hidden: int = 64      # channels of the ConvGRU hidden state
+
     # --- Prioritized experience replay (proportional) ---
     prioritized: bool = True
     per_alpha: float = 0.6

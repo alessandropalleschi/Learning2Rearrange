@@ -45,7 +45,9 @@ class FakeSim:
         d = np.zeros((H, W), np.float32)
         d[40:60, 50:70] = 0.05
         cls = (d > 0).astype(np.uint8)
-        return {'colormap': np.random.randint(0, 255, (H, W, 3), dtype=np.uint8), 'depthmap': d, 'classmap': cls,
+        color = np.random.randint(0, 254, (H, W, 3), dtype=np.uint8)
+        color[:, :30] = 105  # occluded (grey) cells
+        return {'colormap': color, 'depthmap': d, 'classmap': cls,
                 'idmap': cls.astype(np.float32), 'freespace': np.ones((H, W), np.float32)}
 
     add_target_pixels = staticmethod(lambda: ([10, 50, 90], [30, 70, 110], None))
@@ -73,7 +75,40 @@ def test_replay():
     assert w.max() <= 1.0 + 1e-6
 
 
-def test_train_and_evaluate():
+def test_belief_tracker():
+    from belief import BeliefTracker, compact_belief, BELIEF_CHANNELS
+    tr = BeliefTracker(age_horizon=5)
+    sim = FakeSim()
+    o1 = sim.get_observation()
+    b1 = tr.update(o1)
+    o2 = sim.get_observation()
+    o2['colormap'][:, 60:] = 105  # cells seen before become occluded
+    b2 = tr.update(o2, {'primitive': 'push', 'pix': (0, 50, 60), 'place_pix': None})
+    assert (b2['rgb'][:, 60:] == o1['colormap'][:, 60:]).all()  # remembered
+    assert (b2['age'][:, 60:] == 1).all() and (b2['age'][:, 40:50] == 0).all()
+    assert b2['push'].sum() > 0
+    c = compact_belief(b2, 5)
+    assert c.shape == (BELIEF_CHANNELS, H, W) and c.dtype == np.uint8
+
+
+def test_models():
+    import torch
+    from models import QNet
+    x = torch.randn(2, 4, 160, 160)
+    for belief, ch in (('none', 4), ('spatial', 11), ('recurrent', 4)):
+        net = QNet(ch, belief, 8)
+        x_ = torch.randn(2, ch, 160, 160)
+        h = net.initial_hidden(2, 160) if belief == 'recurrent' else None
+        a = torch.zeros(2, 4, 20, 20) if belief == 'recurrent' else None
+        push, pick, h_new = net(x_, h, a)
+        assert push.shape == (2, 2, 160, 160) and pick.shape == (2, 1, 160, 160)
+        out = net.forward_selected(x_, torch.tensor([True, False]), torch.tensor([1, 0]), h, a)
+        assert torch.allclose(out[0], push[0, 1:2], atol=1e-4) and torch.allclose(out[1], pick[1], atol=1e-4)
+        if belief == 'recurrent':
+            assert h_new.shape == h.shape
+
+
+def test_train_and_evaluate(belief='none'):
     rearrange_env.Environment = FakeSim  # forked workers inherit the patch
     out = tempfile.mkdtemp()
     os.chdir(out)
@@ -81,7 +116,7 @@ def test_train_and_evaluate():
         num_obj=1, max_obj=3, max_actions=5, random_seed=0, logging_directory='t', num_envs=2, gui=False,
         is_testing=False, load_snapshot=False, snapshot=None, snapshot_target=None, save_every=8,
         save_visualizations=False, updates_per_step=1, physics='legacy', randomize=False, max_iterations=24,
-        start_method='fork')
+        start_method='fork', belief=belief)
     import config
     orig = config.Config
     # tiny batch so the buffer is large enough to optimise within a few steps
@@ -92,7 +127,7 @@ def test_train_and_evaluate():
     models = os.listdir('logs/t/models')
     assert any(m.startswith('snapshot') for m in models), models
 
-    cfg = Config(max_actions=5)
+    cfg = Config(max_actions=5, belief=belief)
     trainer = Trainer(cfg, is_testing=True)
     venv = VecEnv([partial(rearrange_env.make_env, cfg, False, 1, None, r) for r in range(2)], start_method='fork')
     try:
@@ -100,9 +135,12 @@ def test_train_and_evaluate():
     finally:
         venv.close()
     assert res['episodes'] == 5, res
-    print('ok:', res)
+    print('ok (belief=%s):' % belief, res)
 
 
 if __name__ == '__main__':
     test_replay()
-    test_train_and_evaluate()
+    test_belief_tracker()
+    test_models()
+    for mode in ('none', 'spatial', 'recurrent'):
+        test_train_and_evaluate(mode)

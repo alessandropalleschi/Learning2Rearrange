@@ -23,8 +23,17 @@ Useful flags:
 | `--num_obj` / `--max_obj` | curriculum start / end (paper: 1 -> 8 objects) |
 | `--max_actions` | actions per episode |
 | `--physics paper` | 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated; default `legacy`) |
+| `--belief none\|spatial\|recurrent` | belief-state ablation (see below); `evaluate.py` needs the same value |
 | `--randomize` | domain randomisation: object friction/mass, camera pose, sensor noise |
 | `--gui` | PyBullet GUI for the first simulator |
+
+### Belief-state ablation
+* `none` - memoryless policy on the current observation (the paper).
+* `spatial` - `belief.py` keeps a per-episode memory map (last seen colour/height/object id of every cell, its age, and the
+  location of the last action) and feeds it as 7 extra input channels. Occluded cells are the grey ones of the colormap.
+* `recurrent` - a ConvGRU at the network bottleneck keeps a latent belief, updated from the encoded latest observation and the
+  encoded latest action. The hidden state is stored with every transition (stored-state replay, one-step gradient): it can be
+  stale w.r.t. the current weights, and hindsight-relabelled transitions reuse the original hidden state.
 
 Logs go to `logs/<logging_directory>/` (`episodes.csv`, TensorBoard in `tb/`, snapshots in `models/`):
 
@@ -50,6 +59,7 @@ Tests (no PyBullet needed, uses a fake simulator): `python tests/test_training_l
 | `env.py` | PyBullet scene: UR5, cabinet, objects, suction, camera, heightmaps (physics constants at the top) |
 | `rearrange_env.py` | Gym-style `reset()/step()` wrapper: action execution, reward, termination, relabelling |
 | `models.py` | `QNet`: 4-channel input, GroupNorm, global-context block, shared backbone + push/pick heads |
+| `belief.py` | spatial belief tracker |
 | `trainer.py` | batched double DQN: prioritized replay, Huber loss on the taken pixel, clipped targets, mixed precision, Polyak target update |
 | `policy.py` | epsilon-greedy action selection shared by training and evaluation |
 | `vec_env.py` | parallel simulators in worker processes |

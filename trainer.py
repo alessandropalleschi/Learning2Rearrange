@@ -7,7 +7,8 @@ from scipy import ndimage
 
 from config import Config
 from memory import ReplayMemory, PrioritizedReplay
-from models import QNet, DEVICE
+from belief import BELIEF_CHANNELS
+from models import QNet, DEVICE, ACTION_CHANNELS
 
 
 class Trainer(object):
@@ -33,8 +34,10 @@ class Trainer(object):
         self.push_length_px = self.cfg.push_length_px
         self.future_reward_discount = self.cfg.gamma
 
-        self.model = QNet().to(DEVICE)
-        self.model_target = QNet().to(DEVICE)
+        self.belief = self.cfg.belief
+        in_channels = 4 + (BELIEF_CHANNELS if self.belief == 'spatial' else 0)
+        self.model = QNet(in_channels, self.belief, self.cfg.recurrent_hidden).to(DEVICE)
+        self.model_target = QNet(in_channels, self.belief, self.cfg.recurrent_hidden).to(DEVICE)
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
             self.model_target.load_state_dict(torch.load(snapshot_target or snapshot, map_location=DEVICE))
@@ -60,14 +63,52 @@ class Trainer(object):
         top, left = (self.max_dim - h) // 2, (self.max_dim - w) // 2
         return top, left
 
-    def prepare(self, color, depth):
-        """RGB (H,W,3 uint8) + height (H,W, m) -> (4,max_dim,max_dim) float tensor, zero padded."""
+    def prepare(self, obs):
+        """Observation dict -> (C,max_dim,max_dim) float tensor, zero padded.
+        Channels: RGB, height (/0.4 m) and, for the spatial belief, the 7 belief channels."""
+        color, depth = obs['colormap'], obs['depthmap']
         h, w = depth.shape[:2]
-        x = np.zeros((4, self.max_dim, self.max_dim), np.float32)
+        c = 4 + (BELIEF_CHANNELS if self.belief == 'spatial' else 0)
+        x = np.zeros((c, self.max_dim, self.max_dim), np.float32)
         top, left = self._pads(h, w)
         x[:3, top:top + h, left:left + w] = np.asarray(color, np.float32).transpose(2, 0, 1) / 255.0
         x[3, top:top + h, left:left + w] = np.asarray(depth, np.float32) / 0.4
+        if self.belief == 'spatial':
+            x[4:, top:top + h, left:left + w] = np.asarray(obs['belief'], np.float32) / 255.0
         return torch.from_numpy(x)
+
+    # ------------------------------------------------------------------ recurrent belief inputs
+    def _cells(self):
+        return self.max_dim // 8
+
+    def zero_hidden(self):
+        return np.zeros((self.cfg.recurrent_hidden, self._cells(), self._cells()), np.float16)
+
+    def encode_action(self, action, h, w):
+        """Last action -> (ACTION_CHANNELS, cells, cells): push 0deg, push 180deg, pick, place (one-hot cells)."""
+        a = np.zeros((ACTION_CHANNELS, self._cells(), self._cells()), np.float32)
+        if action is None:
+            return a
+        top, left = self._pads(h, w)
+        o = self.offset_px
+
+        def cell(row, col):
+            return (min((row + o + top) // 8, self._cells() - 1), min((col + o + left) // 8, self._cells() - 1))
+
+        rot, row, col = action['pix']
+        a[rot if action['primitive'] == 'push' else 2][cell(row, col)] = 1.0
+        if action.get('place_pix') is not None:
+            a[3][cell(action['place_pix'][1], action['place_pix'][0])] = 1.0
+        return a
+
+    def _recurrent_inputs(self, obs_list):
+        """Stacked (h_prev, a_prev) tensors of a list of observations (None unless the belief is recurrent)."""
+        if self.belief != 'recurrent':
+            return None, None
+        h, w = obs_list[0]['depthmap'].shape[:2]
+        hp = torch.from_numpy(np.stack([o['h_prev'] for o in obs_list]).astype(np.float32)).to(DEVICE)
+        ap = torch.from_numpy(np.stack([self.encode_action(o.get('prev_action'), h, w) for o in obs_list])).to(DEVICE)
+        return hp, ap
 
     def _crop(self, q, h, w):
         """(...,P,P) padded Q-map -> (...,h-2*off,w-off) in the coordinates used by the action indices."""
@@ -94,18 +135,23 @@ class Trainer(object):
 
     # ------------------------------------------------------------------ acting
     def forward(self, color_input, depth_input, is_volatile=True, specific_rotation=-1, network='policy'):
-        """Q-maps of one observation: push (2,h,w), pick (1,h,w) as numpy, cropped to action coordinates."""
-        push, pick = self.forward_batch([color_input], [depth_input], network)
+        """Q-maps of one memoryless observation: push (2,h,w), pick (1,h,w) as numpy (belief 'none' only)."""
+        push, pick, _ = self.forward_batch([{'colormap': color_input, 'depthmap': depth_input}], network)
         return push[0], pick[0]
 
-    def forward_batch(self, colors, depths, network='policy'):
-        """Q-maps of several observations at once: push (B,2,h,w), pick (B,1,h,w) as numpy."""
+    def forward_batch(self, obs_list, network='policy'):
+        """Q-maps of several observations at once: push (B,2,h,w), pick (B,1,h,w) as numpy, cropped to the action
+        coordinates, and (recurrent belief) the new hidden states (B,hid,cells,cells) float16, else None.
+        With the recurrent belief every observation must carry 'h_prev' and 'prev_action'."""
         net = self.model if network == 'policy' else self.model_target
-        x = torch.stack([self.prepare(c, d) for c, d in zip(colors, depths)]).to(DEVICE)
+        x = torch.stack([self.prepare(o) for o in obs_list]).to(DEVICE)
+        hp, ap = self._recurrent_inputs(obs_list)
         with torch.no_grad(), torch.autocast(device_type=DEVICE.type, enabled=self.amp):
-            push, pick = net(x)
-        h, w = depths[0].shape[:2]
-        return (self._crop(push.float(), h, w).cpu().numpy(), self._crop(pick.float(), h, w).cpu().numpy())
+            push, pick, h_new = net(x, hp, ap)
+        h, w = obs_list[0]['depthmap'].shape[:2]
+        push = self._crop(push.float(), h, w).cpu().numpy()
+        pick = self._crop(pick.float(), h, w).cpu().numpy()
+        return push, pick, (None if h_new is None else h_new.float().cpu().numpy().astype(np.float16))
 
     # ------------------------------------------------------------------ learning
     def _soft_update(self, alpha):
@@ -140,8 +186,10 @@ class Trainer(object):
         h, w = states[0]['depthmap'].shape[:2]
         top, left = self._pads(h, w)
 
-        x = torch.stack([self.prepare(s['colormap'], s['depthmap']) for s in states]).to(DEVICE)
-        xn = torch.stack([self.prepare(s['colormap'], s['depthmap']) for s in nexts]).to(DEVICE)
+        x = torch.stack([self.prepare(s) for s in states]).to(DEVICE)
+        xn = torch.stack([self.prepare(s) for s in nexts]).to(DEVICE)
+        hp, ap = self._recurrent_inputs(states)
+        hpn, apn = self._recurrent_inputs(nexts)
         reward = torch.tensor([float(t.reward) for t in transitions], device=DEVICE)
         done = torch.tensor([float(t.done) for t in transitions], device=DEVICE)
         is_push = torch.tensor([t.primitive_action == 'push' for t in transitions], device=DEVICE)
@@ -153,12 +201,12 @@ class Trainer(object):
         with torch.no_grad(), torch.autocast(device_type=DEVICE.type, enabled=self.amp):
             push_mask, pick_mask = self._masks_padded([s['depthmap'] for s in nexts], h, w)
             neg = -1e9
-            pp, pk = self.model(xn)
+            pp, pk, _ = self.model(xn, hpn, apn)
             pp, pk = pp.float(), pk.float()
             pol = torch.cat([torch.where(push_mask.expand_as(pp), pp, torch.full_like(pp, neg)).flatten(1),
                              torch.where(pick_mask, pk, torch.full_like(pk, neg)).flatten(1)], dim=1)
             if self.double:
-                tp, tk = self.model_target(xn)
+                tp, tk, _ = self.model_target(xn, hpn, apn)
                 tp, tk = tp.float(), tk.float()
                 tgt = torch.cat([torch.where(push_mask.expand_as(tp), tp, torch.full_like(tp, neg)).flatten(1),
                                  torch.where(pick_mask, tk, torch.full_like(tk, neg)).flatten(1)], dim=1)
@@ -173,7 +221,7 @@ class Trainer(object):
 
         # ---- prediction at the taken pixel only
         with torch.autocast(device_type=DEVICE.type, enabled=self.amp):
-            out = self.model.forward_selected(x, is_push, rot)
+            out = self.model.forward_selected(x, is_push, rot, hp, ap)
         pred = out.float()[torch.arange(B, device=DEVICE), 0, rows, cols]
         per_sample = F.smooth_l1_loss(pred, label, reduction='none')  # Huber loss (paper Eq. 3)
         if weights is not None:  # importance-sampling correction of prioritized replay

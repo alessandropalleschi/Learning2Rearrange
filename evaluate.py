@@ -13,7 +13,7 @@ import numpy as np
 
 import env as sim_module
 from config import Config, SimParams
-from policy import select_action
+from policy import attach_initial, carry, select_action
 from rearrange_env import make_env
 from trainer import Trainer
 from utils import seed_everything
@@ -26,12 +26,13 @@ def evaluate(trainer, venv, cfg, num_obj, episodes, base_seed):
     seeds = list(range(base_seed, base_seed + episodes))
     results, active = [], [None] * n  # active[i] = seed running in env i
     obs = [None] * n
+    reset = lambda i: attach_initial(trainer, venv.reset(num_obj, seeds=[active[i]], indices=[i])[0])
     for i in range(min(n, len(seeds))):
         active[i] = seeds.pop(0)
-        obs[i] = venv.reset(num_obj, seeds=[active[i]], indices=[i])[0]
+        obs[i] = reset(i)
     while any(a is not None for a in active):
         idx = [i for i in range(n) if active[i] is not None]
-        push_q, pick_q = trainer.forward_batch([obs[i]['colormap'] for i in idx], [obs[i]['depthmap'] for i in idx])
+        push_q, pick_q, h_new = trainer.forward_batch([obs[i] for i in idx])
         actions = [None] * n
         for k, i in enumerate(idx):
             p, pix, _ = select_action(trainer, obs[i], push_q[k], pick_q[k], 0.0, cfg)
@@ -41,14 +42,15 @@ def evaluate(trainer, venv, cfg, num_obj, episodes, base_seed):
             if actions[i] is None:
                 actions[i] = {'primitive': 'push', 'pix': (0, 0, 0)}
         next_obs, rewards, term, trunc, infos = venv.step(actions)
-        for i in idx:
-            obs[i] = next_obs[i]
+        for k, i in enumerate(idx):
+            obs[i] = carry(trainer, next_obs[i], None if h_new is None else h_new[k], actions[i]['primitive'],
+                           actions[i]['pix'], infos[i]['place_pix'])
             if term[i] or trunc[i]:
                 results.append({'seed': active[i], 'success': bool(infos[i]['sorted']),
                                 'actions': infos[i]['actions'], 'return': infos[i]['episode_return']})
                 if seeds:
                     active[i] = seeds.pop(0)
-                    obs[i] = venv.reset(num_obj, seeds=[active[i]], indices=[i])[0]
+                    obs[i] = reset(i)
                 else:
                     active[i] = None
     ok = [r for r in results if r['success']]
@@ -58,7 +60,7 @@ def evaluate(trainer, venv, cfg, num_obj, episodes, base_seed):
 
 
 def main(args):
-    cfg = Config(max_actions=args.max_actions)
+    cfg = Config(max_actions=args.max_actions, belief=args.belief)
     params = SimParams.preset(args.physics)
     sim_module.configure_cabinet(params)
     seed_everything(args.seed)
@@ -85,6 +87,8 @@ if __name__ == '__main__':
     parser.add_argument('--episodes', type=int, default=20, help='episodes per object count')
     parser.add_argument('--num_envs', type=int, default=1)
     parser.add_argument('--max_actions', type=int, default=40)
+    parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
+                        help='must match the belief the snapshot was trained with')
     parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--logging_directory', default='eval')

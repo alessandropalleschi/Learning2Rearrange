@@ -13,7 +13,7 @@ import env as sim_module
 from config import Config, SimParams
 from logger import Logger
 from memory import Transition
-from policy import select_action
+from policy import attach_initial, carry, carry_over, select_action
 from rearrange_env import make_env
 from trainer import Trainer
 from utils import seed_everything
@@ -21,7 +21,8 @@ from vec_env import VecEnv
 
 
 def main(args):
-    cfg = Config(start_objects=args.num_obj, max_objects=args.max_obj, max_actions=args.max_actions)
+    cfg = Config(start_objects=args.num_obj, max_objects=args.max_obj, max_actions=args.max_actions,
+                 belief=args.belief)
     params = SimParams.preset(args.physics, randomize=args.randomize)
     sim_module.configure_cabinet(params)  # the main process needs the same workspace bounds as the workers
     seed_everything(args.random_seed)
@@ -38,12 +39,12 @@ def main(args):
     num_obj = cfg.start_objects
     successes, scores = deque(maxlen=cfg.success_window), deque(maxlen=cfg.success_window)
     stage_iteration, episode = 0, 0
-    obs = venv.reset(num_obj, seeds=[args.random_seed + 1000 * r for r in range(n)])
+    obs = [attach_initial(trainer, o) for o in venv.reset(num_obj, seeds=[args.random_seed + 1000 * r for r in range(n)])]
     try:
         while True:
             # epsilon-greedy: 0.8 annealed to 0.01 for each curriculum stage (paper)
             eps = 0.0 if args.is_testing else max(cfg.eps_start * cfg.eps_decay ** stage_iteration, cfg.eps_end)
-            push_q, pick_q = trainer.forward_batch([o['colormap'] for o in obs], [o['depthmap'] for o in obs])
+            push_q, pick_q, h_new = trainer.forward_batch(obs)
             choices = [select_action(trainer, obs[i], push_q[i], pick_q[i], eps, cfg) for i in range(n)]
             next_obs, rewards, terminated, truncated, infos = venv.step(
                 [{'primitive': c[0], 'pix': c[1]} for c in choices])
@@ -51,6 +52,7 @@ def main(args):
             batch = []
             for i in range(n):
                 primitive, pix, _ = choices[i]
+                carry(trainer, next_obs[i], None if h_new is None else h_new[i], primitive, pix, infos[i]['place_pix'])
                 if args.save_visualizations and i == 0:
                     place = infos[i]['place_pix']
                     vis = trainer.get_prediction_vis((push_q if primitive == 'push' else pick_q)[i], obs[i]['colormap'],
@@ -63,6 +65,8 @@ def main(args):
                 batch.append(t)
                 if infos[i]['relabel']:  # hindsight experience replay (paper Fig. 8)
                     obs_r, next_r = infos[i]['relabel_pair']
+                    carry_over(trainer, obs[i], obs_r)
+                    carry_over(trainer, next_obs[i], next_r)
                     trainer.buffer.push(obs_r, pix, next_r, cfg.reward_goal, primitive, True)
 
             if batch:
@@ -108,7 +112,7 @@ def main(args):
                 break
             if finished:
                 for i, o in zip(finished, venv.reset(num_obj, indices=finished)):
-                    obs[i] = o
+                    obs[i] = attach_initial(trainer, o)
     finally:
         venv.close()
         logger.close()
@@ -132,6 +136,8 @@ if __name__ == '__main__':
     parser.add_argument('--updates_per_step', type=int, default=1, help='gradient steps per environment step')
     parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy',
                         help="'paper': 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated)")
+    parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
+                        help='belief state ablation: memoryless / spatial memory map / ConvGRU latent')
     parser.add_argument('--randomize', action='store_true', default=False, help='domain randomisation')
     parser.add_argument('--max_iterations', type=int, default=0, help='stop after this many environment steps (0 = run forever)')
     parser.add_argument('--start_method', default='spawn', help='multiprocessing start method of the workers')

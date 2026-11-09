@@ -827,7 +827,6 @@ class Environment:
 
           color_mask = Color_Mask[id_mask]
           object_pixels = np.where((cmask[:,:,0] == color_mask[0]) & (cmask[:,:,1] == color_mask[1]) & (cmask[:,:,2] == color_mask[2]))
-          print(object_pixels)
           mask = np.zeros(heightmap_mask.shape[:2], np.uint8)
           mask[object_pixels] = 1
           M = cv2.moments(mask,binaryImage = True)

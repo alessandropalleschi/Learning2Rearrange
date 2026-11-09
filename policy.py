@@ -32,3 +32,31 @@ def select_action(trainer, obs, push_q, pick_q, explore_prob, cfg):
     else:
         pix = np.unravel_index(np.argmax(q[primitive]), q[primitive].shape)
     return primitive, tuple(int(i) for i in pix), float(q[primitive][pix])
+
+
+# ---------------------------------------------------------------------------------------------------
+# Recurrent belief bookkeeping. The hidden state and the last action travel with the observations:
+#   obs_t['h_prev'], obs_t['prev_action']  = the inputs of the belief update at time t (h_{t-1}, a_{t-1}).
+# After acting at time t the network returns h_t, which becomes obs_{t+1}['h_prev'] (with a_t).
+# ---------------------------------------------------------------------------------------------------
+def attach_initial(trainer, obs):
+    """Episode start: empty belief, no previous action."""
+    if trainer.belief == 'recurrent':
+        obs['h_prev'] = trainer.zero_hidden()
+        obs['prev_action'] = None
+    return obs
+
+
+def carry(trainer, next_obs, h_new, primitive, pix, place_pix):
+    """Attach the updated belief and the executed action to the observation that follows the action."""
+    if trainer.belief == 'recurrent':
+        next_obs['h_prev'] = h_new
+        next_obs['prev_action'] = {'primitive': primitive, 'pix': pix, 'place_pix': place_pix}
+    return next_obs
+
+
+def carry_over(trainer, src, dst):
+    """Copy the belief inputs of `src` to the (relabelled) copy `dst`."""
+    if trainer.belief == 'recurrent':
+        dst['h_prev'], dst['prev_action'] = src['h_prev'], src['prev_action']
+    return dst

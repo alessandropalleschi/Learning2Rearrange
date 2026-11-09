@@ -8,6 +8,14 @@ Improvements over the original two independent networks:
   * Shared backbone: the push (rotation 0) and pick Q-maps reuse the same features of the un-rotated
     input, so one forward pass serves both primitives.
 
+Belief state (ablation, `belief` argument of QNet):
+  * 'none'       memoryless policy on the current observation (the paper).
+  * 'spatial'    extra input channels with a persistent memory map (see belief.py): in_channels = 4 + 7.
+  * 'recurrent'  ConvGRU at the bottleneck. Its hidden state is the latent belief; it is updated from the
+                 encoded latest observation and the encoded latest action, and fed back into the features
+                 of both pushing directions. The state is computed in the un-rotated frame; the 180 degree
+                 branch receives it flipped.
+
 Pushing directions: the paper models two (left/right) = 0 and 180 degree rotations of the input. A 180
 degree rotation of a square image is an exact double flip, so no interpolation is needed.
 """
@@ -55,14 +63,39 @@ class GlobalContext(nn.Module):
         return x + self.mlp(g)[:, :, None, None]
 
 
+ACTION_CHANNELS = 4  # last action encoding at bottleneck resolution: push 0deg, push 180deg, pick, place
+
+
+class ConvGRUCell(nn.Module):
+    """Convolutional GRU: h' = (1-z)*h + z*tanh(W[x, r*h])."""
+
+    def __init__(self, in_ch, hid_ch, k=3):
+        super().__init__()
+        self.hid_ch = hid_ch
+        self.gates = nn.Conv2d(in_ch + hid_ch, 2 * hid_ch, k, padding=k // 2)
+        self.cand = nn.Conv2d(in_ch + hid_ch, hid_ch, k, padding=k // 2)
+
+    def forward(self, x, h):
+        z, r = torch.sigmoid(self.gates(torch.cat([x, h], 1))).chunk(2, dim=1)
+        n = torch.tanh(self.cand(torch.cat([x, r * h], 1)))
+        return (1 - z) * h + z * n
+
+
 class QNet(nn.Module):
     nr_rotations = 2  # push left / right (0 and 180 degrees)
 
-    def __init__(self, in_channels=IN_CHANNELS):
+    def __init__(self, in_channels=IN_CHANNELS, belief='none', hidden=64):
         super().__init__()
+        self.belief, self.hidden = belief, hidden
         self.stem = nn.Sequential(nn.Conv2d(in_channels, 64, 3, padding=1, bias=False), norm(64), nn.ReLU(inplace=True))
         self.rb1, self.rb2, self.rb3 = ResidualBlock(64, 128), ResidualBlock(128, 256), ResidualBlock(256, 512)
         self.context = GlobalContext(512)
+        if belief == 'recurrent':
+            self.rec_in = nn.Conv2d(512 + ACTION_CHANNELS, hidden, 1)
+            self.gru = ConvGRUCell(hidden, hidden)
+            self.rec_out = nn.Conv2d(hidden, 512, 1)
+            nn.init.zeros_(self.rec_out.weight)  # start as a memoryless network, learn to use the belief
+            nn.init.zeros_(self.rec_out.bias)
         self.rb4, self.rb5, self.rb6 = ResidualBlock(512, 256), ResidualBlock(256, 128), ResidualBlock(128, 64)
         self.push_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
         self.pick_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
@@ -71,35 +104,59 @@ class QNet(nn.Module):
     def _up(x):
         return F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=True)
 
-    def features(self, x):
+    def encode(self, x):
+        """Input -> bottleneck features (B,512,H/8,W/8)."""
         x = self.stem(x)
         x = self.rb1(F.max_pool2d(x, 2))
         x = self.rb2(F.max_pool2d(x, 2))
-        x = self.rb3(F.max_pool2d(x, 2))
-        x = self.context(x)
-        x = self.rb4(x)
+        return self.rb3(F.max_pool2d(x, 2))
+
+    def decode(self, b):
+        """Bottleneck features (with context) -> full-resolution features (B,64,H,W)."""
+        x = self.rb4(self.context(b))
         x = self.rb5(self._up(x))
         x = self.rb6(self._up(x))
         return self._up(x)
+
+    def features(self, x):
+        return self.decode(self.encode(x))
 
     @staticmethod
     def flip(x):
         """180 degree rotation of the (square, zero-padded) image."""
         return torch.flip(x, dims=(2, 3))
 
-    def forward(self, x):
-        """All Q-maps. x: (B,4,H,W) -> push (B,2,H,W) [0deg,180deg], pick (B,1,H,W). Maps are in input orientation."""
-        f0 = self.features(x)
-        f1 = self.features(self.flip(x))
-        push = torch.cat([self.push_head(f0), self.flip(self.push_head(f1))], dim=1)
-        return push, self.pick_head(f0)
+    def initial_hidden(self, batch, size, device=None):
+        return torch.zeros(batch, self.hidden, size // 8, size // 8, device=device)
 
-    def forward_selected(self, x, is_push, rotation):
-        """Training path: one backbone pass per sample on the input actually needed.
-        is_push (B,) bool, rotation (B,) long in {0,1} (only used where is_push).
-        Returns the Q-map of the taken primitive, in input orientation: (B,1,H,W)."""
+    def update_belief(self, b0, h_prev, a_prev):
+        """Latent belief update from the encoded observation (rotation 0) and the encoded last action.
+        Returns (new hidden state, context to add to the bottleneck features)."""
+        h = self.gru(self.rec_in(torch.cat([b0, a_prev], 1)), h_prev)
+        return h, self.rec_out(h)
+
+    def forward(self, x, h_prev=None, a_prev=None):
+        """All Q-maps. x: (B,C,H,W) -> push (B,2,H,W) [0deg,180deg], pick (B,1,H,W) in input orientation,
+        and the new hidden state (None unless belief == 'recurrent')."""
+        b0, b1 = self.encode(x), self.encode(self.flip(x))
+        h = None
+        if self.belief == 'recurrent':
+            h, ctx = self.update_belief(b0, h_prev, a_prev)
+            b0, b1 = b0 + ctx, b1 + self.flip(ctx)
+        f0, f1 = self.decode(b0), self.decode(b1)
+        push = torch.cat([self.push_head(f0), self.flip(self.push_head(f1))], dim=1)
+        return push, self.pick_head(f0), h
+
+    def forward_selected(self, x, is_push, rotation, h_prev=None, a_prev=None):
+        """Training path: the Q-map of the taken primitive only, in input orientation: (B,1,H,W).
+        is_push (B,) bool, rotation (B,) long in {0,1} (only used where is_push)."""
         flip = is_push & (rotation == 1)
-        x = torch.where(flip[:, None, None, None], self.flip(x), x)
-        f = self.features(x)
+        fl = flip[:, None, None, None]
+        b = self.encode(torch.where(fl, self.flip(x), x))
+        if self.belief == 'recurrent':
+            b0 = self.encode(x)  # belief is always computed in the un-rotated frame
+            _, ctx = self.update_belief(b0, h_prev, a_prev)
+            b = b + torch.where(fl, self.flip(ctx), ctx)
+        f = self.decode(b)
         out = torch.where(is_push[:, None, None, None], self.push_head(f), self.pick_head(f))
-        return torch.where(flip[:, None, None, None], self.flip(out), out)
+        return torch.where(fl, self.flip(out), out)

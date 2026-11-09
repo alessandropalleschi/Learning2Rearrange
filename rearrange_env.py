@@ -12,6 +12,7 @@ import random
 import numpy as np
 from skimage.draw import line
 
+from belief import BeliefTracker, compact_belief
 from config import Config
 from env import Environment, BOUNDS, PIXEL_SIZE
 
@@ -64,7 +65,8 @@ class RearrangeEnv:
         self.cfg = cfg or Config()
         self.num_obj = num_obj
         self.sim = Environment(gui=gui, num_obj=[num_obj], params=params)
-        self.obs = None
+        self.obs = None  # full (internal) observation of the current state
+        self.tracker = BeliefTracker(self.cfg.belief_age_horizon)
         self.actions = 0
         self.episode_return = 0.0
 
@@ -81,9 +83,10 @@ class RearrangeEnv:
                 break
         self.actions = 0
         self.episode_return = 0.0
-        self.obs = self.sim.get_observation()
+        self.tracker.reset()
+        self.obs = self._full_obs(None)
         self._relabel_state = self._relabel_status()
-        return self.obs
+        return self.compact(self.obs)
 
     def step(self, action):
         """action: {'primitive': 'push'|'grasp', 'pix': (rotation_index, row, col)} in Q-map coordinates."""
@@ -119,7 +122,7 @@ class RearrangeEnv:
         truncated = (not terminated) and self.actions >= cfg.max_actions
         self.episode_return += reward
 
-        next_obs = sim.get_observation() if not terminated else obs
+        next_obs = self._full_obs(action, executed, place_pix) if not terminated else obs
         prev_relabel = self._relabel_state
         self._relabel_state = self._relabel_status()
         # Hindsight relabelling (paper Fig. 8): all objects are inside *some* target region but not (all) in
@@ -130,7 +133,25 @@ class RearrangeEnv:
                 'place_pix': place_pix, 'relabel': bool(relabel), 'episode_return': self.episode_return,
                 'actions': self.actions}
         self.obs = next_obs
-        return next_obs, reward, terminated, truncated, info
+        return self.compact(next_obs), reward, terminated, truncated, info
+
+    # ------------------------------------------------------------------ observations
+    def _full_obs(self, last_action, executed=True, place_pix=None):
+        """Simulator observation plus (if enabled) the spatial belief. Internal use only (large)."""
+        obs = self.sim.get_observation()
+        if self.cfg.belief == 'spatial':
+            if last_action is not None:
+                last_action = dict(last_action, place_pix=place_pix)
+            obs['belief_full'] = self.tracker.update(obs, last_action)
+        return obs
+
+    def compact(self, obs):
+        """What leaves the environment and is stored in the replay buffer (a few 100 KB instead of ~4 MB:
+        the raw camera images and the auxiliary maps are dropped)."""
+        out = {'colormap': obs['colormap'], 'depthmap': obs['depthmap']}
+        if 'belief_full' in obs:
+            out['belief'] = compact_belief(obs['belief_full'], self.cfg.belief_age_horizon)
+        return out
 
     # ------------------------------------------------------------------ hindsight relabelling
     def _relabel_status(self):
@@ -138,12 +159,19 @@ class RearrangeEnv:
         return possible, list(self.sim.new_class) if possible else None
 
     def relabel(self, obs, next_obs):
-        """Copies of (obs, next_obs) whose colormaps use the post-hoc class assignment of the current scene."""
+        """Compact copies of (obs, next_obs) -- full internal observations -- whose colours (including the
+        remembered colours of the spatial belief) use the post-hoc class assignment of the current scene."""
         sim = self.sim
-        new_obs, new_next = dict(obs), dict(next_obs)
-        new_obs['colormap'] = sim.relabel_image([obs['colormap']], [obs['idmap']], sim.id_list, sim.new_class)[0]
-        new_next['colormap'] = sim.relabel_image([next_obs['colormap']], [next_obs['idmap']], sim.id_list, sim.new_class)[0]
-        return new_obs, new_next
+        pair = []
+        for o in (obs, next_obs):
+            new = self.compact(o)
+            new['colormap'] = sim.relabel_image([o['colormap']], [o['idmap']], sim.id_list, sim.new_class)[0]
+            if 'belief_full' in o:
+                b = dict(o['belief_full'])
+                b['rgb'] = sim.relabel_image([b['rgb']], [b['id']], sim.id_list, sim.new_class)[0]
+                new['belief'] = compact_belief(b, self.cfg.belief_age_horizon)
+            pair.append(new)
+        return tuple(pair)
 
 
 def make_env(cfg, gui, num_obj, params, seed=None):

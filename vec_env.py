@@ -14,7 +14,7 @@ def _worker(conn, env_fn):
                 prev = env.obs
                 obs, reward, terminated, truncated, info = env.step(data)
                 if info['relabel']:  # hindsight pair is built in the worker, where the simulator state lives
-                    info['relabel_pair'] = env.relabel(prev, obs)
+                    info['relabel_pair'] = env.relabel(prev, env.obs)
                 conn.send(('ok', (obs, reward, terminated, truncated, info)))
             elif cmd == 'close':
                 conn.send(('ok', None))
