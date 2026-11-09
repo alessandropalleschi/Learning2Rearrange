@@ -72,3 +72,22 @@ def test_expert_aims_at_a_cell_of_the_object_even_when_its_front_is_notched():
     thin = {(r, c) for r in range(3, 5) for c in range(10, 13)}  # an object only 3 cells deep
     row, col = ScriptedExpert._aim_cell(np.array([r for r, c in thin]), np.array([c for r, c in thin]))
     assert (row, col) in thin
+
+
+def test_expert_pushes_objects_that_are_one_push_from_their_region_and_checks_the_blade_strip():
+    from types import SimpleNamespace
+    from l2r.demos import ScriptedExpert
+    scene = SimpleNamespace(regions={'blue': [0.10, 0.25]}, class_name=lambda i: 'blue',
+                            poses=lambda: {7: ((0.0, 0.06, 0.4), None), 8: ((0.0, -0.20, 0.4), None), 9: ((0.0, 0.15, 0.4), None)})
+    expert = ScriptedExpert(SimpleNamespace(sim=SimpleNamespace(scene=scene)))
+    assert expert._near_region(7)  # 4 cm from the region: one push
+    assert not expert._near_region(8)  # 30 cm away: pick and place
+    assert not expert._near_region(9)  # already inside
+    expert.pushes[7] = 1
+    assert not expert._near_region(7)  # a push that did not finish it is followed by a grasp
+    depth = np.zeros((128, 104), np.float32)
+    depth[4 + 60:4 + 70, 4 + 40:4 + 60] = 0.05  # an object at rows 60..69, columns 40..59 (cropped coordinates)
+    obs = {'depthmap': depth}
+    assert ScriptedExpert._blade_touches(obs, 55, 50, 1, 0.08)  # in its column, pushing towards it
+    assert not ScriptedExpert._blade_touches(obs, 55, 70, 1, 0.08)  # beside it: check_push would accept, the blade would miss
+    assert not ScriptedExpert._blade_touches(obs, 75, 50, 1, 0.08)  # the object is behind the blade

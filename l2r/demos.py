@@ -22,10 +22,13 @@ class ScriptedExpert:
     """Chooses (primitive, pix) for a `RearrangeEnv` from its full observation and the simulator state."""
 
     MAX_FAILURES = 2  # grasp attempts on one object that did not hold before the expert tries something else
+    NEAR_REGION = 0.06  # m: a misplaced object this close to its region is pushed into it (a push moves ~8 cm)
+    MAX_EXPOSE_PUSHES = 2  # pushes of one object to uncover hidden ones
 
     def __init__(self, env):
         self.env = env
         self.failures = {}  # object id -> failed grasps
+        self.pushes = {}  # object id -> pushes made on it
 
     def object_at(self, pix):
         return int(self.env.obs['idmap'][pix[1], pix[2]])
@@ -70,14 +73,44 @@ class ScriptedExpert:
         misplaced = self._misplaced_visible()
         candidates = [c for c in misplaced if self.failures.get(c[1], 0) < self.MAX_FAILURES]
         if candidates:
-            _, _, row, col = candidates[0]
+            _, object_id, row, col = candidates[0]
+            if self._near_region(object_id):  # one push finishes it: no pick and place
+                action = self._push_towards_target(object_id, cfg)
+                if action:
+                    self.pushes[object_id] = self.pushes.get(object_id, 0) + 1
+                    return action
             return 'grasp', (0, row, col)
         # nothing can be grasped: push a misplaced object (the one that resisted most) towards its target region
         for _, object_id, _, _ in sorted(misplaced, key=lambda c: -self.failures.get(c[1], 0)):
             action = self._push_towards_target(object_id, cfg)
             if action:
                 return action
-        return self._push_blocker(cfg)
+        # every misplaced object is hidden behind others: push the front-most object aside to expose them
+        action = self._expose_hidden(cfg)
+        return action or self._push_blocker(cfg)
+
+    def _near_region(self, object_id):
+        """True if the object lies outside its target region but within one push (NEAR_REGION m) of it, and was not pushed
+        before (a push that did not work is followed by a grasp)."""
+        scene = self.env.sim.scene
+        low, high = scene.regions[scene.class_name(object_id)]
+        y = scene.poses()[object_id][0][1]
+        distance = max(low - y, y - high, 0.0)
+        return 0.0 < distance <= self.NEAR_REGION and self.pushes.get(object_id, 0) < 1
+
+    def _expose_hidden(self, cfg):
+        """Push the front-most visible object (at most MAX_EXPOSE_PUSHES times each) towards the middle of its target region."""
+        scene, obs = self.env.sim.scene, self.env.obs
+        visible = []
+        for object_id, (pos, _) in scene.poses().items():
+            if (obs['idmap'] == object_id).sum() >= 6 and self.pushes.get(object_id, 0) < self.MAX_EXPOSE_PUSHES:
+                visible.append((pos[0], object_id))
+        for _, object_id in sorted(visible, reverse=True):
+            action = self._push_towards_target(object_id, cfg)
+            if action:
+                self.pushes[object_id] = self.pushes.get(object_id, 0) + 1
+                return action
+        return None
 
     def _push_towards_target(self, object_id, cfg):
         """Blade next to the object on the side away from its target region, moving towards the region."""
@@ -94,9 +127,17 @@ class ScriptedExpert:
         for gap in (3, 4, 2, 5):
             row = int(np.clip(rows.min() - gap if direction == 1 else rows.max() + gap, 0, height - 1))
             col = int(np.median(cols))
-            if check_push(env.ws, obs['depthmap'], col, row, angle, length):
+            if check_push(env.ws, obs['depthmap'], col, row, angle, length) and self._blade_touches(obs, row, col, direction, length):
                 return 'push', (index, row, col)
         return None
+
+    @staticmethod
+    def _blade_touches(obs, row, col, direction, length):
+        """The blade's own strip (+-2 cells around its column) has object cells in its path (not only somewhere in front of it)."""
+        from l2r.learning.masks import BLADE_HALF_WIDTH_CELLS, PUSH_OBJECT_HEIGHT, push_path_cells
+        crop = obs['depthmap'][4:-4, 4:]
+        cells = push_path_cells(crop > PUSH_OBJECT_HEIGHT, int(round(length / 0.005)), direction == 1, BLADE_HALF_WIDTH_CELLS)
+        return bool(cells[row, col])
 
     def _push_blocker(self, cfg):
         """Nothing misplaced is visible: push the front-most object sideways towards free space (a feasible push)."""
