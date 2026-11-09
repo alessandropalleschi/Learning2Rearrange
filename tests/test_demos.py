@@ -102,7 +102,22 @@ def test_equivalent_cells_cover_the_front_band_of_the_grasped_object():
     band = cells[0].cpu().numpy() > 0
     rr, cc = np.nonzero(band)
     # canvas coordinates: the object spans rows 14..25 and (padded) columns 12..23 = canvas columns 14..25 (left offset 2); its front
-    # face is column 25 and the band is the 3 cells just inside it
-    assert sorted(set(rr)) == list(range(14, 26)) and sorted(set(cc)) == [22, 23, 24] and band.sum() == 36
+    # face is column 25 and the band is the 3 cells just inside it, over the central 70% of the width (rows 16..23): the 15% at each
+    # edge are excluded because suction grasps there fail (scripts/grasp_profile.py)
+    assert sorted(set(rr)) == list(range(16, 24)) and sorted(set(cc)) == [22, 23, 24] and band.sum() == 24
+    wide = make_trainer(equiv_targets=True, grasp_edge_margin=0.0)._equivalent_cells(
+        [s], torch.tensor([QNet.PICK]), torch.tensor([20]), torch.tensor([20 + left]), H, W, top, left)[0].cpu().numpy() > 0
+    assert sorted(set(np.nonzero(wide)[0])) == list(range(14, 26)) and wide.sum() == 36  # margin 0: the whole band
     push = cells[1].cpu().numpy() > 0
     assert push.sum() == 25  # 5x5 around the taken start cell
+
+
+def test_gaussian_equivalence_weights_fade_with_the_distance_from_the_taken_cell():
+    trainer = make_trainer(equiv_targets=True, equiv_sigma=1.5)
+    s = state()
+    top, left = trainer._pads(H, W)
+    row, col = 20 + top, 20 + left
+    cells = trainer._equivalent_cells([s], torch.tensor([QNet.PUSH]), torch.tensor([row]), torch.tensor([col]), H, W, top, left)[0].cpu().numpy()
+    assert cells[row, col] == 1.0  # full weight at the taken cell
+    assert 0 < cells[row, col + 1] < 1 and cells[row, col + 2] < cells[row, col + 1] and cells[row, col + 3] == 0  # fades, then stops at 2 cells
+    assert np.isclose(cells[row, col + 1], np.exp(-1 / (2 * 1.5 ** 2)))

@@ -10,6 +10,7 @@
   objects in every column from the start cell to the front.)
 """
 import numpy as np
+from scipy import ndimage
 
 OBJECT_HEIGHT = 0.008  # m: height map cells above this belong to an object (same as the basic masks)
 PUSH_OBJECT_HEIGHT = 0.02  # m: `check_push` counts cells above this
@@ -17,11 +18,18 @@ MIN_PUSH_CELLS = 3  # `check_push` requires more than 2 object cells in the blad
 BLADE_HALF_WIDTH_CELLS = 2  # the tip has a 1 cm radius = 2 cells of 5 mm: the strip the blade sweeps is +-2 cells around its column
 
 
-def front_grasp_cells(object_cells, depth_cells=(1, 3)):
+GRASP_EDGE_MARGIN = 0.15  # fraction of an object's width at each side that is excluded (measured: suction grasps within ~15% of
+                          # the edge fail far more often: scripts/grasp_profile.py)
+
+
+def front_grasp_cells(object_cells, depth_cells=(1, 3), edge_margin=GRASP_EDGE_MARGIN):
     """Cells within `depth_cells` (min, max) behind the front-most cell of every run of object cells along x (columns).
 
     Larger column = nearer the opening, so a run's front is its largest column. Adjacent objects in one row form one run, which
-    keeps only the front-most of them: the others are occluded from the cup anyway."""
+    keeps only the front-most of them: the others are occluded from the cup anyway.
+
+    edge_margin: the cells in the outermost `edge_margin` of each object's width (its row extent) are dropped: a cup on the edge of a
+    curved or irregular object does not seal. 0 keeps the whole front band."""
     mask = np.zeros_like(object_cells, dtype=bool)
     lo, hi = depth_cells
     for row in range(object_cells.shape[0]):
@@ -35,6 +43,15 @@ def front_grasp_cells(object_cells, depth_cells=(1, 3)):
             if last < first:  # a run too short to have cells that deep: its last cell
                 first = last = end
             mask[row, first:last + 1] = True
+    if edge_margin > 0:
+        labels, _ = ndimage.label(object_cells, structure=np.ones((3, 3)))
+        for k, extent in enumerate(ndimage.find_objects(labels), 1):
+            first, last = extent[0].start, extent[0].stop - 1
+            if last == first:
+                continue
+            for row in range(first, last + 1):
+                if not first + edge_margin * (last - first) - 1e-9 <= row <= last - edge_margin * (last - first) + 1e-9:
+                    mask[row, labels[row] == k] = False
     return mask
 
 
@@ -60,10 +77,10 @@ def push_path_cells(objects, length_cells, towards_increasing_rows, half_width=N
     return (stacked[high + 1] - stacked[low]) >= MIN_PUSH_CELLS
 
 
-def structured_masks(crop, push_lengths_px):
+def structured_masks(crop, push_lengths_px, edge_margin=GRASP_EDGE_MARGIN):
     """(grasp (h,w) bool, push (2L,h,w) bool) from the cropped height map. Push index = direction * L + length; direction 0 moves
     towards decreasing rows (angle -90 degrees), direction 1 towards increasing rows."""
-    grasp = front_grasp_cells(crop > OBJECT_HEIGHT)
+    grasp = front_grasp_cells(crop > OBJECT_HEIGHT, edge_margin=edge_margin)
     near = crop > PUSH_OBJECT_HEIGHT
     push = [push_path_cells(near, k, direction == 1, BLADE_HALF_WIDTH_CELLS) & ~(crop > OBJECT_HEIGHT)
             for direction in (0, 1) for k in push_lengths_px]

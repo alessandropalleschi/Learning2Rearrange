@@ -163,7 +163,7 @@ class Trainer(object):
         crop = depth[o:depth.shape[0] - o, o:depth.shape[1]]
         if self.cfg.mask_level == 'structured':
             from l2r.learning.masks import structured_masks
-            grasp, push = structured_masks(crop, self.push_lengths_px)
+            grasp, push = structured_masks(crop, self.push_lengths_px, self.cfg.grasp_edge_margin)
             return grasp if primitive == 'grasp' else push
         object_pixels = (crop > 0.008).astype(np.uint8)
         if primitive == 'grasp':
@@ -350,7 +350,7 @@ class Trainer(object):
         if self.cfg.equiv_targets and not self.cfg.hierarchy:
             cells = self._equivalent_cells(states, prim, rows, cols, h, w, top, left)
             huber = F.smooth_l1_loss(q_map, label[:, None, None].expand_as(q_map), reduction='none')
-            per_sample = (huber * cells).sum((1, 2)) / cells.sum((1, 2)).clamp(min=1)
+            per_sample = (huber * cells).sum((1, 2)) / cells.sum((1, 2)).clamp(min=1e-6)
         self.last_td_loss = float(per_sample.detach().mean())
         if weights is not None:  # importance-sampling correction of prioritized replay
             per_sample = per_sample * torch.as_tensor(weights, device=DEVICE)
@@ -392,7 +392,7 @@ class Trainer(object):
             cells = np.zeros(canvas, bool)
             if prim_np[i] == QNet.PICK:
                 depth = state['depthmap']
-                band = front_grasp_cells(depth[o:depth.shape[0] - o, o:depth.shape[1]] > 0.008)
+                band = front_grasp_cells(depth[o:depth.shape[0] - o, o:depth.shape[1]] > 0.008, edge_margin=self.cfg.grasp_edge_margin)
                 labels, _ = ndimage.label(band, structure=np.ones((3, 3)))
                 if 0 <= cr < labels.shape[0] and 0 <= cc < labels.shape[1] and labels[cr, cc] > 0:
                     rr, ccs = np.nonzero(labels == labels[cr, cc])
@@ -404,7 +404,11 @@ class Trainer(object):
                     free[top + o:top + h - o, left + o:left + w] = self.place_valid(state)
                     cells &= free
             cells[r, c] = True
-            out[i] = cells
+            weights = cells.astype(np.float32)
+            if self.cfg.equiv_sigma > 0:  # the weight, not the label, fades with the distance from the taken cell
+                rr, cc = np.nonzero(cells)
+                weights[rr, cc] = np.exp(-((rr - r) ** 2 + (cc - c) ** 2) / (2 * self.cfg.equiv_sigma ** 2))
+            out[i] = weights
         return torch.from_numpy(out).to(DEVICE)
 
     def _margin_loss(self, x, states, prim, rot, rows, cols, demo, inputs, h, w):

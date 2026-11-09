@@ -40,12 +40,14 @@ class Config:
     # --- Network architecture (ablation): U-Net skip connections; explicit task-geometry input channels (target-region bands per
     #     class + row / column coordinates) ---
     arch_skips: bool = False
+    equiv_sigma: float = 0.0  # 0: equivalent cells all weigh 1 (hard); s > 0: weight exp(-d^2 / 2 s^2) by distance (cells) to the taken cell
     equiv_targets: bool = False  # TD target applied to all cells equivalent to the taken one (an object's front band, a 5x5 neighbourhood)
     region_channels: bool = False
 
     # --- Action masks on the dense Q-maps: 'basic' = grasp on any object cell, push near objects (original);
     #     'structured' = grasp only at the front face of an object, push only where the blade has something in its path ---
     mask_level: str = 'basic'
+    grasp_edge_margin: float = 0.15  # structured masks / equivalence bands: skip this fraction of an object's width at each edge
 
     # --- Hierarchical agent (ablation): level 1 chooses the primitive from global features, level 2 its parameters:
     #     the pixel from the dense Q-map and, for pushes, a *continuous* length from an actor head (DDPG-style) ---
@@ -123,7 +125,9 @@ class Config:
                    footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
                    hierarchy=get('hierarchy', False), arch_skips=get('arch_skips', False),
-                   region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False), mask_level=get('mask_level', 'basic'), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
+                   region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
+                   equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
+                   grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
 
@@ -155,9 +159,15 @@ class Config:
         parser.add_argument('--equiv_targets', action='store_true',
                             help='regress the TD target at every cell equivalent to the taken action (the whole front band of the '
                                  'grasped object; a 5x5 neighbourhood for pushes / places) instead of one pixel')
+        parser.add_argument('--equiv_sigma', type=float, default=0.0,
+                            help='with --equiv_targets: Gaussian weight (cells) around the taken cell instead of weight 1 on all '
+                                 'equivalent cells (0 = hard)')
         parser.add_argument('--region_channels', action='store_true',
                             help='input channels with the target region of each class and row / column coordinates (needs observations '
                                  'that carry the regions: demonstrations must be re-recorded)')
+        parser.add_argument('--grasp_edge_margin', type=float, default=0.15,
+                            help="structured masks and equivalence bands skip this fraction of an object's width at each edge "
+                                 '(suction on an edge fails: scripts/grasp_profile.py); 0 = whole front band')
         parser.add_argument('--mask_level', choices=['basic', 'structured'], default='basic',
                             help="'structured': mask the Q-maps to grasps at an object's front face and pushes with something in the "
                                  "blade's path")
