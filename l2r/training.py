@@ -5,6 +5,7 @@ from collections import deque
 from functools import partial
 
 import cv2
+import numpy as np
 
 from l2r.config import Config, SimParams
 from l2r.envs.rearrange import make_env
@@ -69,6 +70,7 @@ class TrainingLoop:
         self.logger = Logger(self.log_dir)
         self.curriculum = Curriculum(self.cfg, frozen=args.is_testing, validated=bool(args.curriculum_eval))
         self.validations = 0
+        self.episode_objects = [self.curriculum.num_obj] * args.num_envs  # objects of each simulator's running episode
         self.stage_iteration = 0  # steps since the last curriculum change (epsilon is annealed per stage)
         self.episode = 0
 
@@ -82,7 +84,8 @@ class TrainingLoop:
     def run(self):
         args, n = self.args, self.args.num_envs
         seeds = [args.random_seed + 1000 * r for r in range(n)]
-        obs = [attach_initial(self.trainer, o) for o in self.venv.reset(self.curriculum.num_obj, seeds=seeds)]
+        self.episode_objects = self._draw_objects(n, mix=False)
+        obs = [attach_initial(self.trainer, o) for o in self.venv.reset(self.episode_objects, seeds=seeds)]
         try:
             while True:
                 eps = self.epsilon
@@ -101,13 +104,15 @@ class TrainingLoop:
                 self.stage_iteration += n
                 finished = [i for i in range(n) if terminated[i] or truncated[i]]
                 for i in finished:
-                    self._finish_episode(infos[i], eps)
+                    self._finish_episode(infos[i], eps, self.episode_objects[i])
                 obs = list(next_obs)
                 if self._validation_due(finished):
                     obs = self._validate_and_reset(n)
                 elif finished:
-                    for i, o in zip(finished, self.venv.reset(self.curriculum.num_obj, indices=finished)):
+                    counts = self._draw_objects(len(finished))
+                    for i, count, o in zip(finished, counts, self.venv.reset(counts, indices=finished)):
                         obs[i] = attach_initial(self.trainer, o)
+                        self.episode_objects[i] = count
                 if args.max_iterations and self.trainer.iteration >= args.max_iterations:
                     break
                 if args.max_episodes and self.episode >= args.max_episodes:
@@ -149,13 +154,23 @@ class TrainingLoop:
         self.logger.scalar('train/buffer', len(t.buffer), step)
         print('Iteration %d  loss %.4f  eps %.3f' % (step, loss, eps))
 
-    def _finish_episode(self, info, eps):
+    def _draw_objects(self, k, mix=True):
+        """Object counts of k new episodes: the current stage, or (probability --stage_mix) a uniformly drawn earlier
+        stage, so the replay buffer keeps states of the easier stages and forgetting shows up in training."""
+        current = self.curriculum.num_obj
+        counts = [current] * k
+        if mix and self.args.stage_mix > 0 and current > self.cfg.start_objects:
+            counts = [int(np.random.randint(self.cfg.start_objects, current)) if np.random.rand() < self.args.stage_mix
+                      else current for _ in range(k)]
+        return counts
+
+    def _finish_episode(self, info, eps, objects):
         self.episode += 1
         advanced = self.curriculum.record(info['sorted'], info['episode_return'])
         c = self.curriculum
         print('Episode %d: return %.0f, success %s, avg success %.2f, avg return %.1f'
               % (self.episode, info['episode_return'], info['sorted'], c.success_rate, c.mean_return))
-        self.logger.episode(self.episode, self.trainer.iteration, c.num_obj - advanced, info['episode_return'],
+        self.logger.episode(self.episode, self.trainer.iteration, objects, info['episode_return'],
                             info['actions'], info['sorted'], eps)
         if advanced:
             self.stage_iteration = 0  # restart exploration annealing for the new stage
@@ -187,7 +202,8 @@ class TrainingLoop:
             self.stage_iteration = 0
             self.logger.scalar('curriculum/num_obj', c.num_obj, self.trainer.iteration)
             print('Curriculum: now using %d objects' % c.num_obj)
-        return [attach_initial(self.trainer, o) for o in self.venv.reset(c.num_obj)]
+        self.episode_objects = [c.num_obj] * self.args.num_envs
+        return [attach_initial(self.trainer, o) for o in self.venv.reset(self.episode_objects)]
 
     def _save_visualization(self, q, obs, choice, info):
         primitive, pix, _ = choice
@@ -220,6 +236,9 @@ def add_arguments(parser):
     Config.add_arguments(parser)
     SimParams.add_arguments(parser)
     parser.add_argument('--randomize', action='store_true', default=False, help='domain randomisation')
+    parser.add_argument('--stage_mix', type=float, default=0.0,
+                        help='probability that a new training episode uses a uniformly drawn EARLIER curriculum stage '
+                             '(keeps easier states in the replay buffer; 0 = current stage only)')
     parser.add_argument('--curriculum_eval', type=int, default=0,
                         help='advance the curriculum after a greedy validation on this many fresh random configurations '
                              '(success >= threshold) instead of the epsilon-greedy training window (0 = training window)')

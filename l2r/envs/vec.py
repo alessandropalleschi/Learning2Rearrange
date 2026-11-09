@@ -47,9 +47,11 @@ class VecEnv:
         return data
 
     def reset(self, num_obj, seeds=None, indices=None):
+        """num_obj: one object count for all, or a list with one per reset environment."""
         indices = list(range(self.num_envs)) if indices is None else list(indices)
+        counts = list(num_obj) if hasattr(num_obj, '__len__') else [num_obj] * len(indices)
         for k, i in enumerate(indices):
-            self.conns[i].send(('reset', {'num_obj': num_obj, 'seed': None if seeds is None else seeds[k]}))
+            self.conns[i].send(('reset', {'num_obj': counts[k], 'seed': None if seeds is None else seeds[k]}))
         return [self._recv(i) for i in indices]
 
     def step(self, actions):

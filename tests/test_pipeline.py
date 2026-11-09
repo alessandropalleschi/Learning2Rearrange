@@ -141,3 +141,22 @@ def test_curriculum_advances_after_a_greedy_validation(fake_simulator, tmp_path,
     assert 'Validation 1 (1 objects, 3 greedy episodes): success 1.00' in out and 'Curriculum: now using 2 objects' in out
     rows = (tmp_path / 'logs/v/validation.csv').read_text().strip().splitlines()
     assert rows[0].split(',')[2:] == ['1', '1.000']
+
+
+def test_stage_mixing_draws_earlier_stages_and_logs_the_actual_object_count(fake_simulator, tmp_path, monkeypatch):
+    from l2r.training import TrainingLoop
+    monkeypatch.chdir(tmp_path)
+    parser = argparse.ArgumentParser()
+    add_arguments(parser)
+    args = parser.parse_args(['--num_envs', '2', '--start_method', 'fork', '--logging_directory', 'm', '--stage_mix', '0.5'])
+    loop = TrainingLoop(args)
+    try:
+        loop.curriculum.num_obj = 4
+        counts = loop._draw_objects(400)
+        assert set(counts) == {1, 2, 3, 4} and 0.35 < np.mean([c < 4 for c in counts]) < 0.65
+        assert loop._draw_objects(400, mix=False) == [4] * 400  # the first reset uses the current stage only
+        loop.curriculum.num_obj = 1
+        assert set(loop._draw_objects(50)) == {1}  # nothing earlier to mix in
+    finally:
+        loop.venv.close()
+        loop.logger.close()
