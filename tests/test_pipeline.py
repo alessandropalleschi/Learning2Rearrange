@@ -160,3 +160,13 @@ def test_stage_mixing_draws_earlier_stages_and_logs_the_actual_object_count(fake
     finally:
         loop.venv.close()
         loop.logger.close()
+
+
+def test_environment_and_fake_follow_the_simulator_boundary():
+    from l2r.sim.backend import SimBackend
+    from l2r.sim.environment import Environment
+    methods = [n for n, v in vars(SimBackend).items() if callable(v) and not n.startswith('_')]
+    assert {'reset', 'observe', 'push', 'pick', 'place', 'wait_static', 'is_valid'} <= set(methods)
+    for cls in (Environment, FakeSim):
+        missing = [n for n in methods if not hasattr(cls, n)]
+        assert not missing, (cls.__name__, missing)
