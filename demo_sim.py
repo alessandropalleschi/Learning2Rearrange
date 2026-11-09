@@ -1,6 +1,6 @@
 """Manual check of the simulator: spawn objects, execute the three primitives, show a Q-map.
 
-    xvfb-run -a python test.py        # inside the dev container
+    python demo_sim.py                # needs a display (PyBullet GUI + matplotlib window)
 """
 import numpy as np
 import matplotlib.pyplot as plt

@@ -44,3 +44,27 @@ the code and **has not been validated on the real robot** (the opt-in options al
 * Motor forces are not passed (`pd_motor_forces='urdf'` uses the URDF efforts; the base slide declares 1 N, a placeholder).
 * Cabinet is 0.5 x 0.35 m vs 40 x 60 x 27 cm in the paper (`--physics paper`), blocks weigh 1 kg vs 0.2-0.4 kg YCB objects.
 * The base slide (prismatic joint along y) makes this a gantry-like UR5e; the paper describes a UR5.
+
+## Second audit: rendering, observation and networks
+Found and fixed:
+| issue | fix |
+|---|---|
+| `get_observation` relabelled the segmentation image in place while still looping over the ids found in it (labels 1/3/5 are also valid object ids) | separate label map, logic moved to `_class_masks` (unit-tested with colliding ids) |
+| segmentation was cast to `uint8`: object ids truncated to 8 bits and link indices dropped | decode the 24-bit object uid (`& 0xFFFFFF`) |
+| `ndimage.interpolation.shift` (deprecated namespace) | `ndimage.shift` |
+| depth noise of 3 mm vs. the 8 mm "object" threshold of the heightmap: ~0.4% false object cells with `--randomize` | `depth_noise_std = 1.5 mm` |
+| push orientation quaternion `(0.7, 0, -0.7, 0)` has norm 0.99 | exact unit quaternion |
+| dead code: unused methods (`step`, `seed`, `log_video`, ...), unused constants, unreachable branches, unused attributes / parameters | removed (`vulture` clean at 100% confidence) |
+
+Checked, no error found (kept): camera model and depth conversion, point-cloud transform, z-buffered heightmap, padding / crop
+offsets of all maps (colormap and depthmap are padded by 4 px, idmap / classmap / freespace are not), the 180 degree flip (the 160x160 canvas is
+symmetric around the cabinet, tested for equality with the explicit forward pass), the double-DQN target (policy net selects, target
+net evaluates, masked actions, clipped to the reachable range), prioritised replay (sampling with replacement, importance weights,
+priority update order), the GroupNorm / residual blocks, hindsight relabelling.
+
+Open (design limits, not bugs):
+* The global-context pooling includes the zero-padded border (about half of the 160x160 canvas); a masked pooling would be cleaner.
+* A greedy push is not checked for feasibility before it is executed (exploration is); an infeasible push is a no-op with reward -1
+  and the network learns a low value for it.
+* `classmap` (exact object pixels) is used by the environment to validate a grasp while the policy mask uses `height > 8 mm`.
+* Weight decay is also applied to normalisation parameters and biases.

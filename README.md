@@ -101,6 +101,8 @@ Tests (no PyBullet needed, uses a fake simulator): `pytest -q` (or `python tests
 | `models.py` | `QNet`: 4-channel input, GroupNorm, global-context block, shared backbone + push/pick heads |
 | `belief.py` | spatial belief tracker |
 | `force_sensing.py` | tared / filtered / debounced force-torque contact detection |
+| `demo_sim.py` | manual check of the simulator with the GUI (spawn objects, run the primitives, show a Q-map) |
+| `SIMULATION_NOTES.md` | review of the simulator, rendering and networks: errors fixed, findings, open issues |
 | `profile_sim.py` | timing breakdown of the simulator (where does the time go?) |
 | `trainer.py` | batched double DQN: prioritized replay, Huber loss on the taken pixel, clipped targets, mixed precision, Polyak target update |
 | `policy.py` | epsilon-greedy action selection shared by training and evaluation |

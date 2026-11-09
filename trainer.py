@@ -161,7 +161,7 @@ class Trainer(object):
         return np.where(mask, map, -1000.0)
 
     # ------------------------------------------------------------------ acting
-    def forward(self, color_input, depth_input, is_volatile=True, specific_rotation=-1, network='policy'):
+    def forward(self, color_input, depth_input, network='policy'):
         """Q-maps of one memoryless observation: push (2,h,w), pick (1,h,w) as numpy (belief 'none' only)."""
         q = self.forward_batch([{'colormap': color_input, 'depthmap': depth_input}], network)
         return q.push[0], q.pick[0]
@@ -186,12 +186,6 @@ class Trainer(object):
         with torch.no_grad():
             for pt, p in zip(self.model_target.parameters(), self.model.parameters()):
                 pt.data.copy_(alpha * p.data + (1 - alpha) * pt.data)
-
-    @staticmethod
-    def _soft_update_q_network_parameters(q_network_1, q_network_2, alpha):
-        """In-place soft update of q_network_1 with the parameters of q_network_2."""
-        for p1, p2 in zip(q_network_1.parameters(), q_network_2.parameters()):
-            p1.data.copy_(alpha * p2.data + (1 - alpha) * p1.data)
 
     def _masks_padded(self, obs_list, h, w):
         """Feasible-action masks of a batch of observations in padded coordinates, each (B,1,P,P) bool:

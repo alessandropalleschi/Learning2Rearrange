@@ -121,6 +121,8 @@ class SimParams:
     cam_pos_jitter: float = 0.01            # m
     cam_rot_jitter_deg: float = 1.0
     sensor_noise: bool = False              # RGB-D noise of the simulated camera
+    depth_noise_std: float = 0.0015         # m; the heightmap treats cells above 8 mm as objects, 3 mm noise (2.7 sigma)
+                                            # produced ~0.4% false object cells
 
     @staticmethod
     def preset(name, randomize=False):

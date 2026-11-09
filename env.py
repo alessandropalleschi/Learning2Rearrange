@@ -2,7 +2,6 @@ import pybullet as p
 import pybullet_data
 import numpy as np
 
-import os
 import random
 from scipy import ndimage
 from copy import deepcopy
@@ -24,19 +23,6 @@ config_camera = {'position': (0.52, 0, BOUNDS[2][0]+0.38),
 
 
 
-
-PICK_TARGETS = {
-  'blue block': None,
-  'red block': None,
-  'green block': None,
-  'orange block': None,
-  'yellow block': None,
-  'purple block': None,
-  'pink block': None,
-  'cyan block': None,
-  'brown block': None,
-  'gray block': None,
-}
 
 COLORS = {
   'blue':   (78/255,  121/255, 167/255, 255/255),
@@ -98,24 +84,7 @@ PLACE_TARGETS_COLORS = {
 
 
 PLACE_TARGETS_LIST = [ [ BOUNDS[1][0]+0.01, BOUNDS[1][0]+0.16 ], [ (BOUNDS[1][1]-0.18), BOUNDS[1][1]-0.01 ], [ -0.075, 0.085 ]]
-PLACE_TARGETS_LIST_1 = [ [ BOUNDS[1][0]+0.04, BOUNDS[1][0]+0.15 ], [ (BOUNDS[1][1]-0.15), BOUNDS[1][1]-0.04 ], [ -0.055, 0.055 ]]
-PLACE_TARGETS_LIST_2 = [ [ BOUNDS[1][0]+0.01, BOUNDS[1][0]+0.14 ], [ (BOUNDS[1][1]-0.14), BOUNDS[1][1]-0.03 ], [ -0.065, 0.057 ]]
-PLACE_TARGETS_LIST_3 = [ [ BOUNDS[1][0]+0.02, BOUNDS[1][0]+0.16 ], [ (BOUNDS[1][1]-0.16), BOUNDS[1][1]-0.02 ], [ -0.065, 0.037 ]]
-
 PLACE_CHOICES = [PLACE_TARGETS_LIST]
-
-COLORS_CLASS = {
-  '1':   (78/255,  121/255, 167/255, 255/255),
-  '2':    (255/255,  87/255,  89/255, 255/255),
-  '4':  (89/255,  169/255,  79/255, 255/255),
-  '3': (242/255, 142/255,  43/255, 255/255),
-  '5': (237/255, 201/255,  72/255, 255/255),
-  '6': (176/255, 122/255, 161/255, 255/255),
-  '7':   (255/255, 157/255, 167/255, 255/255),
-  '8':   (118/255, 183/255, 178/255, 255/255),
-  '9':  (156/255, 117/255,  95/255, 255/255),
-  '10':   (186/255, 176/255, 172/255, 255/255),
-}
 
 colors = ['blue GelatinBox','green MustardBottle', 'yellow PottedMeatCan']
 colors = ['blue TomatoSoupCan','green MasterChefCan', 'yellow PottedMeatCan']
@@ -151,9 +120,6 @@ class Environment:
         self.gui = gui
         self.pixel_size = PIXEL_SIZE
         self.obj_ids = {"fixed": [], "rigid": []}
-        self.cam_intrinsics = config_camera['intrinsics']
-        self.cam_pos = config_camera['position']
-        self.cam_rot = config_camera['rotation']
         self.bounds = BOUNDS
         self.home_joints = np.array([0,1, -1, 0.5, 0.5, 0.5, 1]) * np.pi
         self.ik_rest_joints = np.array([0,1, -1, 0.5, 0.5, 0.5, 1]) * np.pi
@@ -177,7 +143,6 @@ class Environment:
         self.offset_x = 0
 
         self.activated = False
-        self.config = []
         # target regions are per-environment state (randomised in randomize()), not module globals
         self.place_targets = deepcopy(PLACE_TARGETS_ORG)
     @property
@@ -200,23 +165,6 @@ class Environment:
                 #dist_sort = np.norm(pos[:2]-) 
                 info[obj_id] = (pos, rot, dim, obj_class)
         return info
-
-    def log_video(self, start,base_directory,task_name=0):
-        """
-        Logs video of each task being executed
-        """
-        path = os.path.join(base_directory,"video_logs")
-        if not os.path.exists(path):
-            os.makedirs(path)
-        try:
-            p.stopStateLogging(self.curr_recording)
-            self.video_log_key = task_name
-        except Exception:
-            print("No Video Currently Being Logged")
-        if(start):
-            self.curr_recording = p.startStateLogging(p.STATE_LOGGING_VIDEO_MP4,
-                                                  path +
-                                                  str(task_name) + ".mp4") 
 
     def add_object_id(self, obj_id, category="rigid"):
         """List of (fixed, rigid) objects in env."""
@@ -242,9 +190,7 @@ class Environment:
       If suction off, detect contact between gripper and objects.
       If suction on, detect contact between picked object and other objects.
       To handle deformables, simply remove constraints (i.e., anchors).
-      Also reset any relevant variables, e.g., if releasing a rigid, we
-      should reset init_grip values back to None, which will be re-assigned
-      in any subsequent grasps.
+      Also forget the grasped object (see `_remember_grip`).
       """
       if self.activated:
         self.activated = False
@@ -256,10 +202,7 @@ class Environment:
             self.contact_constraint = None
           except:  # pylint: disable=bare-except
             pass
-          self.init_grip_distance = None
           self._grip_body = self._grip_offset = None
-          self.init_grip_item = None
-
 
 
     def _remember_grip(self, obj_id, obj_to_body):
@@ -403,25 +346,6 @@ class Environment:
                 self.offset_y = obj_to_body[0][1]
 
 
-    def get_target_px(self): 
-      info_scene = self.info
-      name_color = []
-      Y_up = []
-      Y_down = []
-      Color = []
-      for id in info_scene:
-        BOUND_TARG_UP = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][1]
-        BOUND_TARG_DOWN = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][0]
-        Yup = int(np.round((BOUND_TARG_UP-BOUNDS[1,0]) / PIXEL_SIZE))
-        Ydown = int(np.round((BOUND_TARG_DOWN-BOUNDS[1,0])  / PIXEL_SIZE))
-        color = PLACE_TARGETS_COLORS[self.obj_id_to_name[id].split(' ')[0]]
-        if(not self.obj_id_to_name[id].split(' ')[0] in name_color):
-          name_color.append(self.obj_id_to_name[id].split(' ')[0])
-          Color.append(color)
-          Y_up.append(Yup)
-          Y_down.append(Ydown)
-      return Y_down, Y_up, Color
-
     def add_target_pixels(self):
        Y_up = []
        Y_down = []
@@ -491,37 +415,6 @@ class Environment:
                 sorted+=1
         return sorted/len(info_scene)
 
-    def get_distance_to_goal(self):
-        for _ in range(5):
-            p.stepSimulation(self.client_id)
-        d = 0
-        info_scene = self.info
-        d = 0
-        for id in info_scene:
-            Y_pos = info_scene[id][0][1]
-            Y_pos = min(Y_pos,BOUNDS[1][1])
-            Y_pos = max(Y_pos,BOUNDS[1][0])
-            BOUND_TARG_UP = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][1]
-            BOUND_TARG_DOWN = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][0]
-            if(BOUND_TARG_DOWN<=Y_pos<=BOUND_TARG_UP):
-              d = max(d,0)
-            else:
-              d = max(min(abs(Y_pos - BOUND_TARG_UP), abs(Y_pos - BOUND_TARG_DOWN)),d)
-        return d
-
-    def check_sort_status(self):
-        info_scene = self.info
-        sorted = 0
-        for id in info_scene:
-            Y_pos = info_scene[id][0][1]
-            Y_pos = min(Y_pos,BOUNDS[1][1])
-            Y_pos = max(Y_pos,BOUNDS[1][0])
-            BOUND_TARG_UP = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][1]
-            BOUND_TARG_DOWN = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][0]
-            if(BOUND_TARG_DOWN<=Y_pos<=BOUND_TARG_UP):
-                sorted+=1
-        return sorted
-
     def add_objects(self):
         """List of (fixed, rigid) objects in env."""
         NO = min(int(np.random.choice(self.num_obj)), 15)  # at most 5 objects per class, 3 classes
@@ -544,7 +437,6 @@ class Environment:
             green +=1
             obj_names.append(col)
         self.randomize()
-        self.obj_name_to_id = {}
         self.obj_id_to_color = {}
         self.obj_id_to_name = {}
         self.obj_id_to_class = {}
@@ -553,74 +445,69 @@ class Environment:
         obj_xyz = np.zeros((0, 2))
         ind = 0
         for obj_name in obj_names:
-          if (1):
  
-            # Random position at least min_dist from the other objects (spacing shrinks if the cabinet is too full).
-            min_dist, attempts = 0.1, 0
-            while True:
-              attempts += 1
-              if attempts % 100 == 0:
-                min_dist *= 0.8
-              rand_x = np.random.uniform(BOUNDS[0, 0] +0.05, BOUNDS[0, 1] - 0.1)
-              rand_y = np.random.uniform(BOUNDS[1, 0] + 0.02, BOUNDS[1,1] - 0.02)
+          # Random position at least min_dist from the other objects (spacing shrinks if the cabinet is too full).
+          min_dist, attempts = 0.1, 0
+          while True:
+            attempts += 1
+            if attempts % 100 == 0:
+              min_dist *= 0.8
+            rand_x = np.random.uniform(BOUNDS[0, 0] +0.05, BOUNDS[0, 1] - 0.1)
+            rand_y = np.random.uniform(BOUNDS[1, 0] + 0.02, BOUNDS[1,1] - 0.02)
 
 
-              rand_xyz = np.float32([rand_x, rand_y, BOUNDS[2][0]+0.0]).reshape(1, 3)
-              rand_xy = np.float32([rand_x, rand_y]).reshape(1, 2)
-              if len(obj_xyz) == 0:
+            rand_xyz = np.float32([rand_x, rand_y, BOUNDS[2][0]+0.0]).reshape(1, 3)
+            rand_xy = np.float32([rand_x, rand_y]).reshape(1, 2)
+            if len(obj_xyz) == 0:
+              obj_xyz = np.concatenate((obj_xyz, rand_xy), axis=0)
+              break
+            else:
+              nn_dist = np.min(np.linalg.norm(obj_xyz - rand_xy, axis=1)).squeeze()
+              if nn_dist > min_dist:
                 obj_xyz = np.concatenate((obj_xyz, rand_xy), axis=0)
                 break
-              else:
-                nn_dist = np.min(np.linalg.norm(obj_xyz - rand_xy, axis=1)).squeeze()
-                if nn_dist > min_dist:
-                  obj_xyz = np.concatenate((obj_xyz, rand_xy), axis=0)
-                  break
 
-            object_color = deepcopy(COLORS[obj_name.split(' ')[0]])
-            object_dim = deepcopy(DIMENSIONS[obj_name.split(' ')[0]])
-            object_dim[0] += np.random.uniform(-0.005,0.01)
-            object_dim[1] += np.random.uniform(-0.005,0.01)
+          object_color = deepcopy(COLORS[obj_name.split(' ')[0]])
+          object_dim = deepcopy(DIMENSIONS[obj_name.split(' ')[0]])
+          object_dim[0] += np.random.uniform(-0.005,0.01)
+          object_dim[1] += np.random.uniform(-0.005,0.01)
 
-            object_dim[2] += np.random.uniform(-0.01,0.01)
-            object_dim[2] = max(object_dim[2],0.03)
+          object_dim[2] += np.random.uniform(-0.01,0.01)
+          object_dim[2] = max(object_dim[2],0.03)
 
-            object_type = obj_name.split(' ')[1]
-            object_position = rand_xyz.squeeze()
-            if object_type == 'block':
-              object_position[2] += object_dim[2] + 0.002  # rest on the floor instead of starting half inside it
-              object_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=object_dim)
-              object_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=object_dim)
-              object_id = p.createMultiBody(self.params.block_mass, object_shape, object_visual, basePosition=object_position)
-            elif object_type == 'bowl':
-              object_position[2] = 0
-              object_id = p.loadURDF("assets/ycb_objects/YcbBowl/model.urdf", object_position, useFixedBase=1)
-            elif object_type == 'cylinder':
-              radius = 0.03+np.random.uniform(-0.005,0.005)
-              object_position[2] += object_dim[2] + 0.002
-              object_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=radius, height = 2*object_dim[2])
-              object_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=radius, length = 2*object_dim[2])
-              object_id = p.createMultiBody(self.params.cylinder_mass, object_shape, object_visual, basePosition=object_position)
-            else:
-                path = "assets/ycb_objects/Ycb"+object_type+"/model.urdf"
-                object_id = p.loadURDF(path, basePosition=object_position,baseOrientation=p.getQuaternionFromEuler([0,0,np.random.uniform(-3.14,3.14)]))
-            if self.params.randomize:
-                mass = p.getDynamicsInfo(object_id, -1)[0]
-                p.changeDynamics(object_id, -1, lateralFriction=np.random.uniform(*self.params.friction_range),
-                                 mass=mass * np.random.uniform(*self.params.mass_scale_range))
-            self.obj_id_to_name[object_id] = obj_name
-            self.obj_id_to_color[object_id] = object_color
-            self.obj_id_to_class[object_id] = LABELS[self.obj_id_to_name[object_id].split(' ')[0]]
-            self.obj_id_to_target[object_id] = self.place_targets[self.obj_id_to_name[object_id].split(' ')[0]]
-            for _ in range(20):
-                p.stepSimulation(self.client_id)
+          object_type = obj_name.split(' ')[1]
+          object_position = rand_xyz.squeeze()
+          if object_type == 'block':
+            object_position[2] += object_dim[2] + 0.002  # rest on the floor instead of starting half inside it
+            object_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=object_dim)
+            object_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=object_dim)
+            object_id = p.createMultiBody(self.params.block_mass, object_shape, object_visual, basePosition=object_position)
+          elif object_type == 'bowl':
+            object_position[2] = 0
+            object_id = p.loadURDF("assets/ycb_objects/YcbBowl/model.urdf", object_position, useFixedBase=1)
+          elif object_type == 'cylinder':
+            radius = 0.03+np.random.uniform(-0.005,0.005)
+            object_position[2] += object_dim[2] + 0.002
+            object_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=radius, height = 2*object_dim[2])
+            object_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=radius, length = 2*object_dim[2])
+            object_id = p.createMultiBody(self.params.cylinder_mass, object_shape, object_visual, basePosition=object_position)
+          else:
+              path = "assets/ycb_objects/Ycb"+object_type+"/model.urdf"
+              object_id = p.loadURDF(path, basePosition=object_position,baseOrientation=p.getQuaternionFromEuler([0,0,np.random.uniform(-3.14,3.14)]))
+          if self.params.randomize:
+              mass = p.getDynamicsInfo(object_id, -1)[0]
+              p.changeDynamics(object_id, -1, lateralFriction=np.random.uniform(*self.params.friction_range),
+                               mass=mass * np.random.uniform(*self.params.mass_scale_range))
+          self.obj_id_to_name[object_id] = obj_name
+          self.obj_id_to_color[object_id] = object_color
+          self.obj_id_to_class[object_id] = LABELS[self.obj_id_to_name[object_id].split(' ')[0]]
+          self.obj_id_to_target[object_id] = self.place_targets[self.obj_id_to_name[object_id].split(' ')[0]]
+          for _ in range(20):
+              p.stepSimulation(self.client_id)
 
-            self.body_ids.append(object_id)
-            self.add_object_id(object_id, category="rigid")
-            ind +=1
-
-    def remove_object_id(self, obj_id, category="rigid"):
-        """List of (fixed, rigid) objects in env."""
-        self.obj_ids[category].remove(obj_id)
+          self.body_ids.append(object_id)
+          self.add_object_id(object_id, category="rigid")
+          ind +=1
 
     def detect_contact(self):
         """Detects a contact with a rigid object."""
@@ -637,36 +524,9 @@ class Environment:
         points = p.getContactPoints(bodyA=body, linkIndexA=link)
         if self.activated:
           points = [point for point in points if point[2] != self.ur5e]  # ignore contacts with the robot itself
-        if points:
+        return bool(points)
 
-          return True
-        else:
-            return False
-            closest = []
-            min_dist = 1000
-            points = []
-            body_pose = p.getLinkState(self.ur5e, self.ur5e_ee_id)
-
-            for i in self.body_ids:
-              close = p.getClosestPoints(bodyA=self.ur5e, linkIndexA=self.ur5e_ee_id,distance=0.01,bodyB=i)
-              if close:
-                points_2 = close
-                close = close[0]
-                obj_pose = p.getBasePositionAndOrientation(i)
-                world_to_body = p.invertTransform(body_pose[0], body_pose[1])
-                obj_to_body = p.multiplyTransforms(world_to_body[0],
-                                                world_to_body[1],
-                                                obj_pose[0], obj_pose[1])
-                closest = close[2] if (np.linalg.norm(np.asarray(obj_to_body[0])) < min_dist and abs(obj_to_body[0][0])>0) else closest
-                points = points_2 if (np.linalg.norm(np.asarray(obj_to_body[0])) < min_dist and abs(obj_to_body[0][0])>0) else points
-                min_dist = np.linalg.norm(np.asarray(obj_to_body[0])) if (np.linalg.norm(np.asarray(obj_to_body[0])) < min_dist and abs(obj_to_body[0][0])>0) else min_dist
-
-            if closest:
-              return True
-
-        return False
-
-    def wait_static(self, timeout=1):
+    def wait_static(self):
         """Step simulator asynchronously until objects settle."""
         p.stepSimulation(self.client_id)
         for _ in range(self.WAIT_STATIC_MAX_STEPS):  # simulation steps, not wall-clock => machine independent
@@ -694,7 +554,6 @@ class Environment:
 
     def reset(self):
         self.obj_ids = {"fixed": [], "rigid": []}
-        self.use_gripper = False
         self._randomize_camera()
         p.resetSimulation()
         p.setTimeStep(self.time_step)  # resetSimulation restores the default 1/240 s
@@ -719,10 +578,6 @@ class Environment:
             joint_type = info[2]
             if joint_name == "fixFrame":
                 self.ur5e_ee_id = joint_id
-            if joint_name == "wrist_3_joint":
-                self.wrist_id = joint_id
-            if joint_name == "wrist_2_joint":
-                self.wrist_2_id = joint_id
 
             if joint_type == p.JOINT_REVOLUTE or joint_type == p.JOINT_PRISMATIC:
                 self.ur5e_joints.append(joint_id)
@@ -740,7 +595,7 @@ class Environment:
 
         if not success:
             print("Simulation is wrong!")
-        self.plane = p.loadURDF("plane.urdf", basePosition=(0, 0, -0.00), useFixedBase=True)
+        p.loadURDF("plane.urdf", basePosition=(0, 0, -0.00), useFixedBase=True)
 
         self.createCabinet()
 
@@ -750,35 +605,6 @@ class Environment:
         p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
         return self.check_sim()
 
-
-    def step(self, act):
-        """Execute action with specified primitive.
-
-        Args:
-            action: action to execute.
-
-        Returns:
-            obs, done
-        """
-        if act['name']=='push':
-            pose0 = act['pose0']
-            pose1 = act['pose1']
-            success = self.push(pose0, pose1)
-            # Exit early if action times out.
-        if act['name']=='pick':
-            pose0 = act['pose0']
-            success = self.pick(pose0)
-        # Step simulator asynchronously until objects settle.
-        if act['name']=='place':
-            pose0 = act['pose0']
-            success = self.place(pose0)
-
-        while not self.is_static:
-            p.stepSimulation(self.client_id)
-
-        # Get RGB-D camera image observations.
-        obs = self.get_observation()
-        return obs, success
 
     def _randomize_camera(self):
         """Domain randomisation of the camera pose and sensor noise (no-op unless params.randomize)."""
@@ -797,9 +623,37 @@ class Environment:
             cfg['intrinsics'] = (fx * s, 0, cx * s, 0, fy * s, cy * s, 0, 0, 1)
         self.camera_config = cfg
 
-    def seed(self, seed=None):
-        self._random = np.random.RandomState(seed)
-        return seed
+    def _class_masks(self, color, segm):
+      """Recolour the camera image by object class and build the per-object masks.
+
+      Args:
+        color: HxWx3 uint8 image (modified in place). segm: HxW int object id of every pixel.
+      Returns:
+        color, segm_plane (white background / black objects), label_map (HxW uint8 class label, 0 = not an object),
+        masks (NxHxWx3 uint8, one class-coloured image per object, None if there is none), and the class label,
+        colour and object id of each mask.
+      The label map is a separate array, so relabelling can never alias with ids that are still to be processed.
+      """
+      known = np.isin(segm, self.body_ids)
+      color[~known] = 255
+      segm_plane = np.zeros_like(color)
+      segm_plane[~known] = 255
+      label_map = np.zeros(segm.shape, np.uint8)
+      masks, class_labels, mask_colors, obj_ids = [], [], [], []
+      for sid in np.unique(segm[known]):
+        name = self.obj_id_to_name[sid].split(' ')[0]
+        rgb = np.multiply(COLORS[name][:3], 255)
+        region = segm == sid
+        color[region] = rgb
+        mask_image = np.zeros_like(color)
+        mask_image[region] = rgb
+        masks.append(mask_image)
+        class_labels.append(LABELS[name])
+        mask_colors.append(rgb)
+        obj_ids.append(sid)
+        label_map[region] = LABELS[name]
+      masks = np.stack(masks) if masks else None
+      return (color, segm_plane, label_map, masks, np.array(class_labels), np.array(mask_colors), np.array(obj_ids))
 
     def get_observation(self):
       observation = {}
@@ -808,44 +662,8 @@ class Environment:
       color, depth, segm, position, orientation, intrinsics = self.render_camera(self.camera_config)
       observation['color'] = color.copy()
       observation['depth'] = depth.copy()
-      # Get heightmaps and colormaps.
-      masks = None
-      ID_Mask = None
-      segm_ids = np.unique(segm)
-      sgms_binary = segm.copy()
-      segm_plane = np.zeros_like(color)
-      Color_Mask = None
-      Obj_ID = None
-      for sid in segm_ids:
-        if sid not in self.body_ids:
-          color[segm==sid] = [[255,255,255]]
-          segm_plane[segm==sid] = [[255,255,255]]
-          segm[segm == sid] = 0
-          sgms_binary[sgms_binary==sid] = 0
-        else:
-          color[segm==sid] = [np.multiply(COLORS[self.obj_id_to_name[sid].split(' ')[0]][:3],255)]
-          segm_obj = np.zeros_like(color)
-          segm_obj[segm==sid] = [np.multiply(COLORS[self.obj_id_to_name[sid].split(' ')[0]][:3],255)]
-          segm_obj = np.expand_dims(segm_obj, axis=0)
-          obj_class = None
-          obj_class = LABELS[self.obj_id_to_name[sid].split(' ')[0]]
-          obj_class  = np.expand_dims(obj_class,axis=0)
-          obj_id  = np.expand_dims(sid,axis=0)
-          obj_color = [np.multiply(COLORS[self.obj_id_to_name[sid].split(' ')[0]][:3],255)]
-          if(masks is None):
-            masks = segm_obj
-            ID_Mask = obj_class
-            Color_Mask = obj_color
-            Obj_ID = obj_id
-          else:
-            masks = np.concatenate((masks,segm_obj), axis = 0)
-            ID_Mask = np.concatenate((ID_Mask,obj_class),axis=0)
-            Color_Mask = np.concatenate((Color_Mask,obj_color),axis=0)
-            Obj_ID = np.concatenate((Obj_ID,obj_id),axis=0)
-          
-          segm[segm==sid] = LABELS[self.obj_id_to_name[sid].split(' ')[0]]
-          sgms_binary[sgms_binary==sid] = 1
-      observation['mask'] = segm
+      color, segm_plane, label_map, masks, ID_Mask, Color_Mask, Obj_ID = self._class_masks(color, segm)
+      observation['mask'] = label_map
       
       
       points = self.get_pointcloud(depth, intrinsics)
@@ -909,9 +727,9 @@ class Environment:
       binary_mask_map[object_pixels[0],:] = 1
       object_pixels = np.where( (binary_mask_map==1) & (heightmap_on_target==-1))
 
-      res_R = ndimage.interpolation.shift(binary_mask_map, [-2,0], order=0)
+      res_R = ndimage.shift(binary_mask_map, [-2,0], order=0)
       binary_mask_map = cv2.bitwise_or(binary_mask_map, res_R)
-      res_L = ndimage.interpolation.shift(binary_mask_map, [2,0], order=0)
+      res_L = ndimage.shift(binary_mask_map, [2,0], order=0)
 
       binary_mask_map = cv2.bitwise_or(binary_mask_map, res_L)
       for i in range(4):
@@ -1021,10 +839,11 @@ class Environment:
         depth = zfar + znear - (2.0 * zbuffer - 1.0) * (zfar - znear)
         depth = (2.0 * znear * zfar) / depth
         if config_camera["noise"]:
-            depth += np.random.normal(0, 0.003, depth_image_size)
+            depth += np.random.normal(0, self.params.depth_noise_std, depth_image_size)
 
         # Get segmentation image.
-        segm = np.uint8(segm).reshape(depth_image_size)
+        # object uid in the low 24 bits, link index + 1 above them (background = -1): keep the object uid only
+        segm = np.asarray(segm, dtype=np.int64).reshape(depth_image_size) & 0xFFFFFF
         return color, depth, segm, config_camera["position"], quaternion, intrinsics 
 
     def __del__(self):
@@ -1074,7 +893,7 @@ class Environment:
             p.stepSimulation(self.client_id)
         return False
 
-    def move_joints(self, target_joints, speed=0.02, timeout=0.5):
+    def move_joints(self, target_joints, speed=0.02):
         """Move UR5e to target joint configuration."""
         if self.params.controller == 'pd':
             return self._move_joints_pd(target_joints)
@@ -1234,7 +1053,7 @@ class Environment:
         # Align against push direction.
         grasp_location_margin = 0.1
         angle = 0
-        quat = (0.7,0,-0.7,0)
+        quat = (np.sqrt(0.5), 0, -np.sqrt(0.5), 0)  # unit quaternion (0.7, 0, -0.7, 0 has norm 0.99)
         pos, ori = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
         pos = np.asarray(pos)
 
@@ -1349,7 +1168,7 @@ class Environment:
 
       return success
     
-    def place(self, pos, heightmap_rotation_angle=0, speed=0.01):
+    def place(self, pos, speed=0.01):
       
       
       position = np.zeros((3))
@@ -1468,7 +1287,6 @@ class Environment:
           baseOrientation=ori)
       
 
-      self.scene_height = bottom_width
 
 
 
@@ -1612,33 +1430,6 @@ class Environment:
       
       return heightmap, colormap
 
-    def xyz_to_pix(self,position):
-      """Convert from 3D position to pixel location on heightmap."""
-      u = int(np.round((position[1] - BOUNDS[1, 0]) / PIXEL_SIZE))
-      v = int(np.round((position[0] - BOUNDS[0, 0]) / PIXEL_SIZE))
-      return (u, v)
-
-    def px_to_xyz(self,px,py,depth_map):
-      """Convert from 3D position to pixel location on heightmap."""
-      height = int(np.round((self.bounds[1, 1] - self.bounds[1, 0]) / PIXEL_SIZE))
-      width = int(np.round((self.bounds[0, 1] - self.bounds[0, 0]) / PIXEL_SIZE))
-      if px>width:
-        px = width
-     
-      
-      local_patch_width = 0.03
-      local_patch_width = int(np.round((local_patch_width/2)/PIXEL_SIZE)) 
-      local_region = depth_map[max(py-local_patch_width,0):min(py+local_patch_width+1,height),max(px-local_patch_width,0):min(px+local_patch_width+1,width)]      
-      if(local_region.size==0):
-        z_safe = self.bounds[2][0]
-      else:
-        z_safe = np.max(local_region) + self.bounds[2][0]   
-
-      xyz = [px * PIXEL_SIZE + self.bounds[0][0],
-                    py * PIXEL_SIZE + self.bounds[1][0],
-                    z_safe]
-      return xyz
-    
     def px_to_xy(self,px,py):
       """Convert from 3D position to pixel location on heightmap."""
      

@@ -236,6 +236,28 @@ def test_rate_limited_arm_controller():
         real_env.p = old
 
 
+def test_class_masks():
+    """Recolouring/labelling of the camera image: robust against ids that look like class labels."""
+    import env as real_env
+    sim = real_env.Environment.__new__(real_env.Environment)
+    # object ids 3 and 5 are *also* class labels (green = 3, yellow = 5): the old in-place relabelling could confuse them
+    sim.body_ids = [3, 5, 9]
+    sim.obj_id_to_name = {3: 'yellow CrackerBox', 5: 'blue ChipsCan', 9: 'green MustardBottle'}
+    segm = np.zeros((6, 8), np.int64)
+    segm[0:2, 0:2] = 3
+    segm[2:4, 2:4] = 5
+    segm[4:6, 4:6] = 9
+    segm[0:2, 6:8] = 1          # robot / cabinet: not an object
+    color = np.zeros((6, 8, 3), np.uint8)
+    color, plane, labels, masks, classes, colors, ids = sim._class_masks(color, segm)
+    L = real_env.LABELS
+    assert labels[0, 0] == L['yellow'] and labels[2, 2] == L['blue'] and labels[4, 4] == L['green']
+    assert labels[0, 6] == 0 and (plane[0, 6] == 255).all() and (plane[0, 0] == 0).all()
+    assert list(ids) == [3, 5, 9] and list(classes) == [L['yellow'], L['blue'], L['green']]
+    assert masks.shape == (3, 6, 8, 3) and (masks[1][2, 2] == color[2, 2]).all() and (masks[1][0, 0] == 0).all()
+    assert sim._class_masks(np.zeros((2, 2, 3), np.uint8), np.zeros((2, 2), np.int64))[3] is None  # no objects
+
+
 def test_belief_tracker():
     from belief import BeliefTracker, compact_belief, BELIEF_CHANNELS
     tr = BeliefTracker(age_horizon=5)
@@ -335,6 +357,7 @@ if __name__ == '__main__':
     test_force_monitor()
     test_suction_and_ik_helpers()
     test_waypoints()
+    test_class_masks()
     test_rate_limited_arm_controller()
     test_belief_tracker()
     test_models()
