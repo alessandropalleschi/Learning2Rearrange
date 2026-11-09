@@ -144,6 +144,7 @@ class Environment:
         configure_cabinet(self.params)
         self.camera_config = dict(config_camera)
         self.force_stops = 0  # motions aborted because the contact force exceeded the limit (diagnostics)
+        self.force_events = []  # (tool x, force) of every abort; consumed by profile_sim.py
         self.num_obj = num_obj
         self.time_step = time_step
         self.gui = gui
@@ -1100,31 +1101,45 @@ class Environment:
         joints = np.array(joints, dtype=np.float32)
         return joints, success
 
-    def straight_move(self, pose0, pose1, rot, speed=0.01, max_force=300, detect_force=False, detect_contact=False):
-        """Move every 1 cm, keep the move in a straight line instead of a curve. Keep level with rot"""
-        step_distance = self.params.step_distance  # distance between IK waypoints
-        vec = np.float32(pose1) - np.float32(pose0)
-        length = np.linalg.norm(vec)
-        if(length==0):
+    def _waypoints(self, pose0, pose1, monitored=True):
+        """IK waypoints of a straight move. Legacy: one every params.step_distance. With params.adaptive_step the
+        spacing is 5x larger where no contact has to be detected: outside the cabinet front, and on moves that do
+        not monitor the force (retreats)."""
+        pose0, pose1 = np.asarray(pose0, dtype=float), np.asarray(pose1, dtype=float)
+        length = float(np.linalg.norm(pose1 - pose0))
+        direction, step = (pose1 - pose0) / length, self.params.step_distance
+        if not self.params.adaptive_step:
+            return [pose0 + n * direction * step for n in range(int(np.floor(length / step)))]
+        front, points, d = self.bounds[0][1] + 0.02, [], 0.0
+        while d < length:
+            point = pose0 + d * direction
+            points.append(point)
+            d += step * (5 if (not monitored or point[0] > front) else 1)
+        return points
+
+    def straight_move(self, pose0, pose1, rot, speed=0.01, max_force=None, detect_force=False, detect_contact=False):
+        """Move along a straight line through IK waypoints (see _waypoints), keeping the orientation `rot`."""
+        max_force = self.params.contact_force_limit if max_force is None else max_force
+        if np.linalg.norm(np.float32(pose1) - np.float32(pose0)) == 0:
             return True
-        vec = vec / length
-        n_push = np.int32(np.floor(np.linalg.norm(pose1 - pose0) / step_distance))  # every 1 cm
+        waypoints = self._waypoints(pose0, pose1, monitored=detect_force or detect_contact)
 
         success = True
         if detect_force and self.params.filtered_force:
             self.force_monitor.tare(step=lambda: p.stepSimulation(self.client_id))  # zero at the start of the motion
-        for n in range(n_push):
-            target = pose0 + n * vec * step_distance
+        for n, target in enumerate(waypoints):
             success &= self.move_ee_pose((target, rot), speed)
             for _ in range(1):
               p.stepSimulation(self.client_id)
 
             if not success:
                  return success
-            if self.activated:
+            if self.params.force_sense_x is not None:
+              start_sensing = self.params.force_sense_x
+            elif self.activated:
               start_sensing = 0.2
             else:
-              start_sensing = 0.5 
+              start_sensing = 0.5
 
             if detect_force and target[0]<start_sensing:
                 if self.params.filtered_force:
@@ -1136,9 +1151,10 @@ class Environment:
                     force = max(forces)
                     exceeded = force > max_force
                 if exceeded:
-                    target = pose0 +(n-1)* vec * step_distance
+                    self.force_events.append((float(target[0]), float(force)))
+                    target = waypoints[max(n - 1, 0)]  # back off one waypoint
                     self.move_ee_pose((target, rot), speed)
-                    print(f"Force is {force}, exceed the max force {max_force}")
+                    print(f"Force is {force:.0f} N at x={self.force_events[-1][0]:.3f}, exceeds the limit {max_force}")
                     self.force_stops += 1
                     return False
             if detect_contact:

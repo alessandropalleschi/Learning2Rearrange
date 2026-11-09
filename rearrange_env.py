@@ -108,7 +108,7 @@ class RearrangeEnv:
         prim, pix = action['primitive'], action['pix']
         px_x, px_y = pix[2], pix[1]
         position = sim.px_to_xy(px_x, px_y)
-        executed, place_pix = False, None
+        executed, place_pix, attempted = False, None, False
         stops_before = sim.force_stops
         learned = cfg.placement == 'learned'
         if self.holding and prim != 'place':
@@ -117,12 +117,15 @@ class RearrangeEnv:
         if prim == 'push':
             angle, length = decode_push(pix[0], cfg.push_lengths)
             if check_push(obs['depthmap'], px_x, px_y, angle, length):
+                attempted = True
                 executed = sim.push(position, angle, push_length=length)
         elif prim == 'place':
+            attempted = True
             place_pix = (px_x, px_y)  # (col, row) of the free cell
             executed = sim.place(position)
             self.holding = False
         elif prim == 'grasp' and obs['classmap'][px_y, px_x] != 0:
+            attempted = True
             held_class, held_id = obs['classmap'][px_y, px_x], obs['idmap'][px_y, px_x]
             executed = sim.pick(position)
             if executed and learned and sim.check_sim():  # hold the object, ask for the placement
@@ -131,7 +134,7 @@ class RearrangeEnv:
                 mid['held_class'], mid['held_id'] = int(held_class), float(held_id)
                 mid['heuristic_place'] = get_place_pose(sim, held_class, mid['freespace'])
                 self.obs = mid
-                info = {'executed': True, 'sorted': False, 'invalid': False, 'place_pix': None, 'relabel': False,
+                info = {'executed': True, 'attempted': True, 'sorted': False, 'invalid': False, 'place_pix': None, 'relabel': False,
                         'episode_return': self.episode_return, 'actions': self.actions, 'phase': 'place'}
                 return self.compact(mid), 0.0, False, False, info
             if executed and not learned:
@@ -161,7 +164,7 @@ class RearrangeEnv:
         # their own one; reassigning the classes would make this a sorted state.
         relabel = (reward == cfg.reward_step and self._relabel_state[0]
                    and (not prev_relabel[0] or prev_relabel[1] != self._relabel_state[1]))
-        info = {'executed': bool(executed), 'sorted': bool(sorted_ and valid), 'invalid': not valid,
+        info = {'executed': bool(executed), 'attempted': attempted, 'sorted': bool(sorted_ and valid), 'invalid': not valid,
                 'place_pix': place_pix, 'relabel': bool(relabel), 'episode_return': self.episode_return,
                 'actions': self.actions, 'phase': 'act', 'force_stops': sim.force_stops - stops_before}
         self.obs = next_obs

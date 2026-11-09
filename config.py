@@ -95,6 +95,9 @@ class SimParams:
     move_joints_max_steps: int = 1000       # simulation-step budget of one joint move
 
     # simulation quality options ('improved' preset). All default to the original behaviour.
+    contact_force_limit: float = 300.0      # N: a motion is aborted when the joint reaction force exceeds this
+    force_sense_x: object = None            # m: only check forces where the tool x < this (None = legacy: 0.5, or 0.2 holding)
+    adaptive_step: bool = False             # coarse IK waypoints (5x) while the tool is outside the cabinet front
     ik_iterations: object = None            # IK solver iterations (None = PyBullet default; 100 made IK ~7x slower)
     camera_scale: float = 1.0               # scale of the rendered image (0.5 = 4x fewer pixels; check the heightmaps)
     ik_limits: bool = False                 # IK with joint limits, rest pose and tighter solver tolerances
@@ -126,6 +129,9 @@ class SimParams:
         params = cls.preset(args.physics, randomize=getattr(args, 'randomize', False))
         params.step_distance, params.move_joints_max_steps = args.step_distance, args.move_budget
         params.camera_scale = getattr(args, 'camera_scale', 1.0)
+        params.contact_force_limit = getattr(args, 'force_limit', 300.0)
+        params.force_sense_x = getattr(args, 'force_sense_x', None)
+        params.adaptive_step = getattr(args, 'adaptive_step', False)
         if getattr(args, 'sim_quality', 'legacy') == 'improved':
             params.ik_limits = params.filtered_force = params.suction_verify = True
             params.suction_min_alignment = 0.8
@@ -139,6 +145,13 @@ class SimParams:
         parser.add_argument('--sim_quality', choices=['legacy', 'improved'], default='legacy',
                             help="'improved': IK with joint limits, filtered force contact detection, verified suction "
                                  "grasps (opt-in, not yet validated against the legacy behaviour)")
+        parser.add_argument('--force_limit', type=float, default=300.0,
+                            help='N: abort a motion when the joint reaction force exceeds this (legacy 300; ~50%% of the '
+                                 'actions hit it, see profile_sim.py)')
+        parser.add_argument('--force_sense_x', type=float, default=None,
+                            help='m: only check the force near/inside the cabinet (x below this); the cabinet front is 0.25')
+        parser.add_argument('--adaptive_step', action='store_true',
+                            help='5x coarser IK waypoints while the tool is outside the cabinet (faster, same contact physics)')
         parser.add_argument('--camera_scale', type=float, default=1.0,
                             help='scale of the simulated camera image; <1 renders faster but gives sparser heightmaps')
         parser.add_argument('--step_distance', type=float, default=0.002,

@@ -166,6 +166,25 @@ def test_push_lengths():
     assert trainer.preprocessQmaps(np.zeros((4, H - 8, W - 4), np.float32), depth, 'push').shape == (4, H - 8, W - 4)
 
 
+def test_waypoints():
+    """Straight-move waypoints: legacy spacing is unchanged, adaptive spacing is coarse only where nothing is touched."""
+    import env as real_env
+    from config import SimParams
+    sim = real_env.Environment.__new__(real_env.Environment)
+    sim.bounds, sim.params = real_env.BOUNDS, SimParams()
+    a, b = np.array([0.35, 0.0, 0.45]), np.array([-0.1, 0.0, 0.45])
+    legacy = sim._waypoints(a, b)
+    assert len(legacy) == int(np.floor(np.linalg.norm(b - a) / 0.002))  # same count as the original loop
+    assert np.allclose(legacy[1] - legacy[0], [-0.002, 0, 0], atol=1e-9)
+    sim.params = SimParams(adaptive_step=True)
+    monitored = sim._waypoints(tuple(a), tuple(b), monitored=True)
+    retreat = sim._waypoints(tuple(a), tuple(b), monitored=False)
+    xs = np.array([p[0] for p in monitored])
+    gaps = np.abs(np.diff(xs))
+    assert gaps[xs[:-1] > 0.27].max() > 0.0099 and gaps[xs[:-1] < 0.25].max() < 0.0021  # fine inside the cabinet
+    assert len(retreat) <= len(legacy) // 5 + 1 and len(monitored) < len(legacy)
+
+
 def test_belief_tracker():
     from belief import BeliefTracker, compact_belief, BELIEF_CHANNELS
     tr = BeliefTracker(age_horizon=5)
@@ -264,6 +283,7 @@ if __name__ == '__main__':
     test_replay()
     test_force_monitor()
     test_suction_and_ik_helpers()
+    test_waypoints()
     test_belief_tracker()
     test_models()
     for mode in ('none', 'spatial', 'recurrent'):
