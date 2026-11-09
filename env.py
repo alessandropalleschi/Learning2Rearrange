@@ -14,6 +14,15 @@ from random import sample
 #PIXEL_SIZE = 0.00267857
 PIXEL_SIZE = 0.005
 
+# --- Physics parameters (kept in one place; defaults reproduce the previous behaviour) ---
+SUCTION_MAX_FORCE = 1000   # N, max force of the fixed constraint that simulates the suction cup
+SUCTION_ERP = 0.1          # constraint error reduction of the suction constraint
+CABINET_MASS = 0           # 0 = static walls (they used to be 100 kg bodies pinned with constraints)
+CABINET_FRICTION = 0.8     # lateral friction of the cabinet floor
+BLOCK_MASS, CYLINDER_MASS = 1.0, 0.7   # kg, heavier than the YCB objects (0.2-0.4 kg)
+MOVE_JOINTS_MAX_STEPS = 1000   # simulation-step budget of move_joints (was 0.5 s of *wall-clock* time)
+WAIT_STATIC_MAX_STEPS = 480    # simulation-step budget of wait_static (was 1 s of wall-clock time)
+
 BOUNDS = np.float32([[-0.25, 0.25], [-0.3, 0.3], [0.4, 0.75]])  # (X, Y, Z)
 image_size = (480,640)
 config_camera = {'position': (0.52, 0, BOUNDS[2][0]+0.38),
@@ -362,7 +371,7 @@ class Environment:
             childFrameOrientation=((0, 0, 0)),)
             self.offset_y = obj_to_body[0][1]
             self.offset_x = -pos_constrs[0]
-            p.changeConstraint(self.contact_constraint,gearRatio=-1, erp=0.1,maxForce=1000)
+            p.changeConstraint(self.contact_constraint,gearRatio=-1, erp=SUCTION_ERP,maxForce=SUCTION_MAX_FORCE)
             self.activated = True
         else:
              closest = []
@@ -420,7 +429,7 @@ class Environment:
                  # childFrameOrientation=((0, 0, 0)),)
             childFramePosition=(0, 0, 0),
             childFrameOrientation=((0,0,0)),)
-                p.changeConstraint(self.contact_constraint,gearRatio=-1, erp=0.1,maxForce=1000)
+                p.changeConstraint(self.contact_constraint,gearRatio=-1, erp=SUCTION_ERP,maxForce=SUCTION_MAX_FORCE)
                 self.offset_x = -obj_to_body[0][0]
 
                 self.activated = True              
@@ -643,18 +652,20 @@ class Environment:
             object_type = obj_name.split(' ')[1]
             object_position = rand_xyz.squeeze()
             if object_type == 'block':
+              object_position[2] += object_dim[2] + 0.002  # rest on the floor instead of starting half inside it
               object_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=object_dim)
               object_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=object_dim)
               # object_id = p.loadURDF("assets/block.urdf", object_position, useFixedBase=0)
-              object_id = p.createMultiBody(1, object_shape, object_visual, basePosition=object_position)
+              object_id = p.createMultiBody(BLOCK_MASS, object_shape, object_visual, basePosition=object_position)
             elif object_type == 'bowl':
               object_position[2] = 0
               object_id = p.loadURDF("assets/ycb_objects/YcbBowl/model.urdf", object_position, useFixedBase=1)
             elif object_type == 'cylinder':
               radius = 0.03+np.random.uniform(-0.005,0.005)
+              object_position[2] += object_dim[2] + 0.002
               object_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=radius, height = 2*object_dim[2])
               object_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=radius, length = 2*object_dim[2])
-              object_id = p.createMultiBody(0.7, object_shape, object_visual, basePosition=object_position)
+              object_id = p.createMultiBody(CYLINDER_MASS, object_shape, object_visual, basePosition=object_position)
             else:
                 path = "assets/ycb_objects/Ycb"+object_type+"/model.urdf"
                 object_id = p.loadURDF(path, basePosition=object_position,baseOrientation=p.getQuaternionFromEuler([0,0,np.random.uniform(-3.14,3.14)]))
@@ -691,7 +702,7 @@ class Environment:
         # Get all contact points between the suction and a rigid body.
         points = p.getContactPoints(bodyA=body, linkIndexA=link)
         if self.activated:
-          points = [point for point in points if point[2] != self.ur5e_ee_id]
+          points = [point for point in points if point[2] != self.ur5e]  # ignore contacts with the robot itself
           # print(points)
         if points:
 
@@ -728,8 +739,7 @@ class Environment:
     def wait_static(self, timeout=1):
         """Step simulator asynchronously until objects settle."""
         p.stepSimulation(self.client_id)
-        t0 = time.time()
-        while (time.time() - t0) < timeout:
+        for _ in range(WAIT_STATIC_MAX_STEPS):  # simulation steps, not wall-clock => machine independent
             if self.is_static:
                 return True
             p.stepSimulation(self.client_id)
@@ -1200,8 +1210,7 @@ class Environment:
 
     def move_joints(self, target_joints, speed=0.02, timeout=0.5):
         """Move UR5e to target joint configuration."""
-        t0 = time.time()
-        while (time.time()-t0 < timeout):
+        for _ in range(MOVE_JOINTS_MAX_STEPS):  # simulation steps, not wall-clock
             current_joints = np.array([p.getJointState(self.ur5e, i)[0] for i in self.ur5e_joints])
             # print(current_joints)
             # pos, _ = self.get_link_pose(self.ee, self.ee_tip_id)
@@ -1261,7 +1270,7 @@ class Environment:
         newPos = ls[4]
         diff = [targetPos[0] - newPos[0], targetPos[1] - newPos[1], targetPos[2] - newPos[2]]
         diff = np.array(diff)
-        closeEnough = np.max(diff) < threshold
+        closeEnough = np.linalg.norm(diff) < threshold
         dist2 = closeEnough
         iter = iter + 1
       return jointPoses, True
@@ -1306,7 +1315,6 @@ class Environment:
             success &= self.move_ee_pose((target, rot), speed)
             for _ in range(1):
               p.stepSimulation(self.client_id)
-              time.sleep(0.0001)
 
             if not success:
                  return success
@@ -1629,7 +1637,7 @@ class Environment:
     def createCabinet(self): 
       ori = [0,0,0,1]
       color= [186/255, 176/255, 172/255, 1]
-      mass = 100
+      mass = CABINET_MASS
       width = 0.2
       height = BOUNDS[2][1]-BOUNDS[2][0]
       bottom_width = BOUNDS[2][0]
@@ -1643,7 +1651,7 @@ class Environment:
           basePosition=[0,0, bottom_width/2],
           baseOrientation=ori)
 
-      p.changeDynamics(self.bottom_wall_id, -1, lateralFriction=0.8)
+      p.changeDynamics(self.bottom_wall_id, -1, lateralFriction=CABINET_FRICTION)
       # p.changeDynamics(
       #       self.bottom_wall_id,
       #       -1,
@@ -1686,15 +1694,10 @@ class Environment:
       half_extent = [self.final_scene_size[0]/2 + width/2, self.final_scene_size[1]/2 + width, top_width/2]
       wall_cid = p.createCollisionShape(shapeType=p.GEOM_BOX, halfExtents=half_extent)
       wall_vid = p.createVisualShape(shapeType=p.GEOM_BOX, halfExtents=half_extent, rgbaColor=color)
-      self.top_wall_id = p.createMultiBody(10,baseCollisionShapeIndex=wall_cid, baseVisualShapeIndex=wall_vid, 
+      self.top_wall_id = p.createMultiBody(CABINET_MASS,baseCollisionShapeIndex=wall_cid, baseVisualShapeIndex=wall_vid, 
           basePosition=[-width/2,0, height + bottom_width+top_width/2],
           baseOrientation=ori)
       
-      p.createConstraint(self.bottom_wall_id, -1, -1, -1, p.JOINT_FIXED, [0, 0, 0], [0, 0, 0], [0,0, bottom_width/2])
-      p.createConstraint(self.top_wall_id, -1, -1, -1, p.JOINT_FIXED, [0, 0, 0], [0, 0, 0], [-width/2,0, height + bottom_width+top_width/2])
-      p.createConstraint(self.right_wall_id, -1, -1, -1, p.JOINT_FIXED, [0, 0, 0], [0, 0, 0], [0,width/2+self.final_scene_size[1]/2+0.001,height/2.0 + bottom_width/2])
-      p.createConstraint(self.left_wall_id, -1, -1, -1, p.JOINT_FIXED, [0, 0, 0], [0, 0, 0], [0,-width/2-self.final_scene_size[1]/2-.001,height/2.0 + bottom_width/2])
-      p.createConstraint(self.back_wall_id, -1, -1, -1, p.JOINT_FIXED, [0, 0, 0], [0, 0, 0], [-self.final_scene_size[0]/2-width/2-0.001,0,height/2+bottom_width/2])
 
       self.scene_height = bottom_width
 
