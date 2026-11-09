@@ -23,7 +23,7 @@ def fake_simulator(monkeypatch):
 
 
 def test_learned_placement_is_a_two_step_action(fake_simulator):
-    cfg = Config(placement='learned', max_actions=5)
+    cfg = Config(placement='learned', max_actions=5, reward_mode='sparse')  # the step reward of the paper
     env = rearrange.RearrangeEnv(cfg)
     assert 'held_class' not in env.reset()
     mid, reward, terminated, _, info = env.step({'primitive': 'grasp', 'pix': (0, 50, 60)})
