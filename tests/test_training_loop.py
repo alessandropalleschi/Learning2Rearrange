@@ -44,7 +44,7 @@ class FakeSim:
     def get_observation(self):
         d = np.zeros((H, W), np.float32)
         d[40:60, 50:70] = 0.05
-        cls = (d > 0).astype(np.uint8)
+        cls = (d > 0).astype(np.uint8)[4:-4, 4:]  # idmap/classmap/freespace are NOT padded (colormap/depthmap are)
         color = np.random.randint(0, 254, (H, W, 3), dtype=np.uint8)
         color[:, :30] = 105  # occluded (grey) cells
         return {'colormap': color, 'depthmap': d, 'classmap': cls,
@@ -61,7 +61,8 @@ class FakeSim:
         self.t += 1
 
     def relabel_image(self, colors, ids, id_list, new_class):
-        return [c.copy() for c in colors]
+        import env as real_env  # the real implementation, so the padded/un-padded shapes are exercised
+        return real_env.Environment.relabel_image(self, colors, ids, id_list, new_class)
 
 
 def test_replay():

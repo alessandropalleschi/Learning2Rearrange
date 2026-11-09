@@ -435,10 +435,14 @@ class Environment:
         # Work on a copy: the original (un-relabeled) transition is stored in the replay
         # buffer and shares these arrays, so it must not be modified in place.
         image = images.copy()
+        # colormap/depthmap are padded by 4 px (rows: top+bottom, columns: left) while idmap/classmap/freespace
+        # are not: recolour the un-padded window of the image.
+        hi, wi = id_images.shape[:2]
+        window = image if image.shape[:2] == (hi, wi) else image[4:4 + hi, 4:4 + wi]
         for (id, class_new) in zip(id_lists, new_class_list):
           if class_new not in class_to_color:
             continue
-          image[id_images == id] = class_to_color[class_new]
+          window[id_images == id] = class_to_color[class_new]
         relabeled.append(image)
       return relabeled
 

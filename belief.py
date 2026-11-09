@@ -34,10 +34,16 @@ class BeliefTracker:
                           'id': np.zeros((h, w), np.float32),
                           'age': np.full((h, w), self.age_horizon, np.float32)}
         s = self.state
+        idmap = obs['idmap']
+        if idmap.shape != (h, w):  # idmap is not padded like colormap/depthmap: align it
+            full = np.zeros((h, w), np.float32)
+            o = self.offset_px
+            full[o:o + idmap.shape[0], o:o + idmap.shape[1]] = idmap
+            idmap = full
         observed = ~np.all(color == OCCLUDED, axis=-1)
         s['rgb'][observed] = color[observed]
         s['height'][observed] = depth[observed]
-        s['id'][observed] = obs['idmap'][observed]
+        s['id'][observed] = idmap[observed]
         s['age'] = np.where(observed, 0.0, np.minimum(s['age'] + 1, self.age_horizon)).astype(np.float32)
 
         push = np.zeros((h, w), np.float32)
