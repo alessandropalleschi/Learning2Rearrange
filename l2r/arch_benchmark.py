@@ -217,9 +217,8 @@ class ObjectVariant:
         return ('grasp' if slot == 0 else 'push'), (rot, row, col)
 
 
-def rollout(variant, episodes, num_obj, max_actions=20, base_seed=7000):
-    """Closed-loop evaluation of a trained variant in the simulator (greedy): success rate and actions per episode. This is the real
-    test: it does not care WHICH valid strategy the policy uses (other objects, push or grasp, other order), only whether it sorts."""
+def make_env(cfg, num_obj, max_actions=20):
+    """A simulator environment with the benchmark's (legacy, fast) physics."""
     from types import SimpleNamespace
 
     from l2r.config import SimParams
@@ -227,9 +226,14 @@ def rollout(variant, episodes, num_obj, max_actions=20, base_seed=7000):
     flags = SimpleNamespace(physics='legacy', randomize=False, step_distance=0.002, move_budget=1000, sim_quality='legacy',
                             camera_scale=1.0, force_limit=300.0, force_sense_x=None, adaptive_step=True, velocity_scale=1.0,
                             joint_tolerance=3e-3)
-    cfg = variant.cfg
     cfg.max_actions = max_actions
-    env = RearrangeEnv(cfg, num_obj=num_obj, params=SimParams.from_args(flags))
+    return RearrangeEnv(cfg, num_obj=num_obj, params=SimParams.from_args(flags))
+
+
+def rollout(variant, episodes, num_obj, max_actions=20, base_seed=7000, env=None):
+    """Closed-loop evaluation of a trained variant in the simulator (greedy): success rate and actions per episode. This is the real
+    test: it does not care WHICH valid strategy the policy uses (other objects, push or grasp, other order), only whether it sorts."""
+    env = env or make_env(variant.cfg, num_obj, max_actions)
     outcomes = []
     for episode in range(episodes):
         obs = env.reset(num_obj=num_obj, seed=base_seed + episode)
