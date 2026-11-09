@@ -228,6 +228,8 @@ class Environment:
 
         self.activated = False
         self.config = []
+        # target regions are per-environment state (randomised in randomize()), not module globals
+        self.place_targets = deepcopy(PLACE_TARGETS_ORG)
     @property
     def is_static(self):
         """Return true if objects are no longer moving."""
@@ -445,8 +447,8 @@ class Environment:
       Y_down = []
       Color = []
       for id in info_scene:
-        BOUND_TARG_UP = PLACE_TARGETS[self.obj_id_to_name[id].split(' ')[0]][1]
-        BOUND_TARG_DOWN = PLACE_TARGETS[self.obj_id_to_name[id].split(' ')[0]][0]
+        BOUND_TARG_UP = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][1]
+        BOUND_TARG_DOWN = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][0]
         Yup = int(np.round((BOUND_TARG_UP-BOUNDS[1,0]) / PIXEL_SIZE))
         Ydown = int(np.round((BOUND_TARG_DOWN-BOUNDS[1,0])  / PIXEL_SIZE))
         color = PLACE_TARGETS_COLORS[self.obj_id_to_name[id].split(' ')[0]]
@@ -461,10 +463,10 @@ class Environment:
        Y_up = []
        Y_down = []
        Color = []
-       for key in PLACE_TARGETS:
+       for key in self.place_targets:
         # print(key)
-        BOUND_TARG_UP = PLACE_TARGETS[key][1]
-        BOUND_TARG_DOWN = PLACE_TARGETS[key][0]
+        BOUND_TARG_UP = self.place_targets[key][1]
+        BOUND_TARG_DOWN = self.place_targets[key][0]
         # print(BOUND_TARG_UP)
         Yup = int(np.round((BOUND_TARG_UP-BOUNDS[1,0]) / PIXEL_SIZE))
         Ydown = int(np.round((BOUND_TARG_DOWN-BOUNDS[1,0])  / PIXEL_SIZE))
@@ -482,11 +484,11 @@ class Environment:
       for id in info_scene:
         Y_pos = info_scene[id][0][1]
         skip = False
-        for key in PLACE_TARGETS:
+        for key in self.place_targets:
           if(skip):
             break
-          BOUND_TARG_UP = PLACE_TARGETS[key][1]
-          BOUND_TARG_DOWN = PLACE_TARGETS[key][0]
+          BOUND_TARG_UP = self.place_targets[key][1]
+          BOUND_TARG_DOWN = self.place_targets[key][0]
           Yup = int(np.round((BOUND_TARG_UP-BOUNDS[1,0]) / PIXEL_SIZE))
           Ydown = int(np.round((BOUND_TARG_DOWN-BOUNDS[1,0])  / PIXEL_SIZE))
           if(BOUND_TARG_DOWN<=Y_pos<=BOUND_TARG_UP):
@@ -533,8 +535,8 @@ class Environment:
         sorted = 0
         for id in info_scene:
             Y_pos = info_scene[id][0][1]
-            BOUND_TARG_UP = PLACE_TARGETS[self.obj_id_to_name[id].split(' ')[0]][1]
-            BOUND_TARG_DOWN = PLACE_TARGETS[self.obj_id_to_name[id].split(' ')[0]][0]
+            BOUND_TARG_UP = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][1]
+            BOUND_TARG_DOWN = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][0]
             if(BOUND_TARG_DOWN<=Y_pos<=BOUND_TARG_UP):
                 sorted+=1
         return sorted/len(info_scene)
@@ -553,8 +555,8 @@ class Environment:
             Y_pos = info_scene[id][0][1]
             Y_pos = min(Y_pos,BOUNDS[1][1])
             Y_pos = max(Y_pos,BOUNDS[1][0])
-            BOUND_TARG_UP = PLACE_TARGETS[self.obj_id_to_name[id].split(' ')[0]][1]
-            BOUND_TARG_DOWN = PLACE_TARGETS[self.obj_id_to_name[id].split(' ')[0]][0]
+            BOUND_TARG_UP = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][1]
+            BOUND_TARG_DOWN = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][0]
             if(BOUND_TARG_DOWN<=Y_pos<=BOUND_TARG_UP):
               d = max(d,0)
             else:
@@ -571,8 +573,8 @@ class Environment:
             Y_pos = info_scene[id][0][1]
             Y_pos = min(Y_pos,BOUNDS[1][1])
             Y_pos = max(Y_pos,BOUNDS[1][0])
-            BOUND_TARG_UP = PLACE_TARGETS[self.obj_id_to_name[id].split(' ')[0]][1]
-            BOUND_TARG_DOWN = PLACE_TARGETS[self.obj_id_to_name[id].split(' ')[0]][0]
+            BOUND_TARG_UP = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][1]
+            BOUND_TARG_DOWN = self.place_targets[self.obj_id_to_name[id].split(' ')[0]][0]
             if(BOUND_TARG_DOWN<=Y_pos<=BOUND_TARG_UP):
                 sorted+=1
         return sorted
@@ -673,7 +675,7 @@ class Environment:
             self.obj_id_to_name[object_id] = obj_name
             self.obj_id_to_color[object_id] = object_color
             self.obj_id_to_class[object_id] = LABELS[self.obj_id_to_name[object_id].split(' ')[0]]
-            self.obj_id_to_target[object_id] = PLACE_TARGETS[self.obj_id_to_name[object_id].split(' ')[0]]
+            self.obj_id_to_target[object_id] = self.place_targets[self.obj_id_to_name[object_id].split(' ')[0]]
             for _ in range(20):
                 p.stepSimulation(self.client_id)
 
@@ -798,19 +800,18 @@ class Environment:
 
 
     def randomize(self):
-        global PLACE_TARGETS
         # object_name = list(self.config['objects'])
         # num_class = len(list(np.unique(np.array(object_name))))
         rand_int = np.random.randint(0,len(PLACE_CHOICES))
         PLACE_TARGETS_RAND = PLACE_CHOICES[rand_int]
         PLACE_SELECT = random.sample(PLACE_TARGETS_RAND,3)
 
-        PLACE_TARGETS = deepcopy(PLACE_TARGETS_ORG)
+        self.place_targets = deepcopy(PLACE_TARGETS_ORG)
         # print(PLACE_TARGETS)
         n_obj = 0
-        for key in PLACE_TARGETS:
-            PLACE_TARGETS[key][0] = PLACE_SELECT[n_obj][0]
-            PLACE_TARGETS[key][1] = PLACE_SELECT[n_obj][1]
+        for key in self.place_targets:
+            self.place_targets[key][0] = PLACE_SELECT[n_obj][0]
+            self.place_targets[key][1] = PLACE_SELECT[n_obj][1]
             n_obj+=1
           # print(key)
           # while True:
@@ -826,7 +827,7 @@ class Environment:
           #    PLACE_TARGETS[key][1] = k
           #    PLACE_TARGETS[key][0] = kd
           #    break
-        return PLACE_TARGETS  
+        return self.place_targets  
 
         # print(PLACE_TARGETS)
 

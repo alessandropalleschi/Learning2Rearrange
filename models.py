@@ -1,241 +1,105 @@
+"""Q-network: one shared fully-convolutional backbone with a push head and a pick head.
+
+Improvements over the original two independent networks:
+  * 4-channel input (RGB + height), as described in the paper (was 6 channels, depth repeated 3x).
+  * GroupNorm instead of BatchNorm: statistics do not depend on the (tiny, correlated) batch.
+  * Global-context block at the bottleneck: pooled features of the whole cabinet are fed back to every
+    pixel, so each Q value can depend on the full scene (fully convolutional nets only see a local window).
+  * Shared backbone: the push (rotation 0) and pick Q-maps reuse the same features of the un-rotated
+    input, so one forward pass serves both primitives.
+
+Pushing directions: the paper models two (left/right) = 0 and 180 degree rotations of the input. A 180
+degree rotation of a square image is an exact double flip, so no interpolation is needed.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
-import numpy as np
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+IN_CHANNELS = 4  # R, G, B, height
 
 
-def conv3x3(in_planes, out_planes, stride=1):
-    """3x3 convolution with padding"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3,
-                     stride=stride, padding=1, bias=False)
+def norm(channels, groups=8):
+    return nn.GroupNorm(min(groups, channels), channels)
+
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_planes, out_planes, stride=1, downsample=None):
-        super(ResidualBlock, self).__init__()
-
-        self.conv1 = conv3x3(in_planes, out_planes, stride)
-        self.bn1 = nn.BatchNorm2d(out_planes)
-
-        self.conv2 = conv3x3(out_planes, out_planes)
-        self.bn2 = nn.BatchNorm2d(out_planes)
-
-        self.downsample = downsample
-
-        # Initialize weights
+    def __init__(self, in_planes, out_planes):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_planes, out_planes, 3, padding=1, bias=False)
+        self.norm1 = norm(out_planes)
+        self.conv2 = nn.Conv2d(out_planes, out_planes, 3, padding=1, bias=False)
+        self.norm2 = norm(out_planes)
+        self.shortcut = None if in_planes == out_planes else nn.Conv2d(in_planes, out_planes, 1, bias=False)
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.xavier_uniform_(m.weight)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        identity = x
+        identity = x if self.shortcut is None else self.shortcut(x)
+        out = F.relu(self.norm1(self.conv1(x)))
+        out = self.norm2(self.conv2(out))
+        return F.relu(out + identity)
 
-        out = self.conv1(x)
-        out = nn.functional.relu(self.bn1(out))
-        out = nn.functional.relu(out)
 
-        out = self.conv2(out)
-        out = self.bn2(out)
+class GlobalContext(nn.Module):
+    """Pools the feature map (avg + max) into a vector and adds a learned projection back to every pixel."""
 
-        if self.downsample:
-            identity = self.downsample(identity)
+    def __init__(self, channels):
+        super().__init__()
+        self.mlp = nn.Sequential(nn.Linear(2 * channels, channels), nn.ReLU(inplace=True),
+                                 nn.Linear(channels, channels))
 
-        out += identity
-        out = nn.functional.relu(out)
+    def forward(self, x):
+        g = torch.cat([x.mean(dim=(2, 3)), x.amax(dim=(2, 3))], dim=1)
+        return x + self.mlp(g)[:, :, None, None]
 
-        return out
 
-class PushFCN(nn.Module):
-    def __init__(self):
-        super(PushFCN, self).__init__()
-        self.device = DEVICE
-        self.nr_rotations = 2
-        self.conv1 = nn.Conv2d(6, 64, kernel_size=3, stride=1, padding=1, bias=False, groups=2)
-        self.rb1 = self.make_layer(64, 128)
-        self.rb2 = self.make_layer(128, 256)
-        self.rb3 = self.make_layer(256, 512)
-        self.rb4 = self.make_layer(512, 256)
-        self.rb5 = self.make_layer(256, 128)
-        self.rb6 = self.make_layer(128, 64)
-        self.final_conv = nn.Conv2d(64, 1, kernel_size=1, stride=1, padding=0, bias=False)
-        self.push_prob = []
-        
-    def make_layer(self, in_channels, out_channels, blocks=1, stride=1):
-        downsample = None
-        if (stride != 1) or (in_channels != out_channels):
-            # downsample = nn.Sequential(conv3x3(in_channels, out_channels, stride=stride),
-            #                            nn.BatchNorm2d(out_channels))
-            downsample = nn.Sequential(conv3x3(in_channels, out_channels, stride=stride))
+class QNet(nn.Module):
+    nr_rotations = 2  # push left / right (0 and 180 degrees)
 
-        layers = [ResidualBlock(in_channels, out_channels, stride, downsample)]
-        for i in range(1, blocks):
-            layers.append(ResidualBlock(out_channels, out_channels))
-        return nn.Sequential(*layers)
+    def __init__(self, in_channels=IN_CHANNELS):
+        super().__init__()
+        self.stem = nn.Sequential(nn.Conv2d(in_channels, 64, 3, padding=1, bias=False), norm(64), nn.ReLU(inplace=True))
+        self.rb1, self.rb2, self.rb3 = ResidualBlock(64, 128), ResidualBlock(128, 256), ResidualBlock(256, 512)
+        self.context = GlobalContext(512)
+        self.rb4, self.rb5, self.rb6 = ResidualBlock(512, 256), ResidualBlock(256, 128), ResidualBlock(128, 64)
+        self.push_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
+        self.pick_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
 
-    def predict(self, input):
-        x = nn.functional.relu(self.conv1(input)) # ReLu is needed?
-        x = nn.functional.max_pool2d(x, kernel_size=2, stride=2)
-        x = self.rb1(x)
-        x = nn.functional.max_pool2d(x, kernel_size=2, stride=2)
-        x = self.rb2(x)
-        x = nn.functional.max_pool2d(x, kernel_size=2, stride=2)
-        x = self.rb3(x)
+    @staticmethod
+    def _up(x):
+        return F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=True)
+
+    def features(self, x):
+        x = self.stem(x)
+        x = self.rb1(F.max_pool2d(x, 2))
+        x = self.rb2(F.max_pool2d(x, 2))
+        x = self.rb3(F.max_pool2d(x, 2))
+        x = self.context(x)
         x = self.rb4(x)
-        
-        x = nn.functional.upsample(x, scale_factor=2, mode='bilinear', align_corners=True)
-        x = self.rb5(x)
-        x = nn.functional.upsample(x, scale_factor=2, mode='bilinear', align_corners=True)
-        x = self.rb6(x)
-        x = nn.functional.upsample(x, scale_factor=2, mode='bilinear', align_corners=True)
-        out = self.final_conv(x) # activation function?
-        return out
+        x = self.rb5(self._up(x))
+        x = self.rb6(self._up(x))
+        return self._up(x)
 
-    def forward(self,input,specific_rotation=-1,is_volatile=[]):
-        self.push_prob = []
+    @staticmethod
+    def flip(x):
+        """180 degree rotation of the (square, zero-padded) image."""
+        return torch.flip(x, dims=(2, 3))
 
-        if is_volatile:
-            batch_rot_input = torch.zeros((self.nr_rotations,input.shape[1],input.shape[2],input.shape[3])).to(self.device)
-            for rot_id in range(self.nr_rotations):
-                theta = np.radians(rot_id*(360/self.nr_rotations))
-                affine_mat_before = np.array([[np.cos(theta), np.sin(theta), 0.0],
-                                                [-np.sin(theta), np.cos(theta), 0.0]])
-                affine_mat_before.shape = (2, 3, 1)
-                affine_mat_before = torch.from_numpy(affine_mat_before).permute(2, 0, 1).float()
+    def forward(self, x):
+        """All Q-maps. x: (B,4,H,W) -> push (B,2,H,W) [0deg,180deg], pick (B,1,H,W). Maps are in input orientation."""
+        f0 = self.features(x)
+        f1 = self.features(self.flip(x))
+        push = torch.cat([self.push_head(f0), self.flip(self.push_head(f1))], dim=1)
+        return push, self.pick_head(f0)
 
-                flow_grid_before = F.affine_grid(
-                    Variable(affine_mat_before, requires_grad=False).to(self.device),
-                    input.size(),
-                    align_corners=True)
-
-                rotate_input = F.grid_sample(
-                        Variable(input, requires_grad=False).to(self.device),
-                        flow_grid_before,
-                        mode='nearest',
-                        align_corners=True,
-                        padding_mode="border")
-                batch_rot_input[rot_id] = rotate_input[0]
-
-            prob = self.predict(batch_rot_input)
-
-                # Undo rotation
-            affine_after = torch.zeros((self.nr_rotations, 2, 3))
-            for rot_id in range(self.nr_rotations):
-                    # Compute sample grid for rotation before neural network
-                theta = np.radians(rot_id * (360 / self.nr_rotations))
-                affine_mat_after = np.array([[np.cos(-theta), np.sin(-theta), 0.0],
-                                                [-np.sin(-theta), np.cos(-theta), 0.0]])
-                affine_mat_after.shape = (2, 3, 1)
-                affine_mat_after = torch.from_numpy(affine_mat_after).permute(2, 0, 1).float()
-                affine_after[rot_id] = affine_mat_after
-
-            flow_grid_after = F.affine_grid(Variable(affine_after, requires_grad=False).to(self.device),
-                                                prob.size(), align_corners=True)
-            out_prob = F.grid_sample(prob, flow_grid_after, mode='nearest', align_corners=True)
-
-            return out_prob
-        else:
-            thetas = [np.radians(specific_rotation * (360 / self.nr_rotations))]
-            affine_before = torch.zeros((input.shape[0], 2, 3))
-            for i in range(len(thetas)):
-                # Compute sample grid for rotation before neural network
-                theta = thetas[i]
-                affine_mat_before = np.array([[np.cos(theta), np.sin(theta), 0.0],
-                                              [-np.sin(theta), np.cos(theta), 0.0]])
-                affine_mat_before.shape = (2, 3, 1)
-                affine_mat_before = torch.from_numpy(affine_mat_before).permute(2, 0, 1).float()
-                affine_before[i] = affine_mat_before
-
-            flow_grid_before = F.affine_grid(Variable(affine_before, requires_grad=False).to(self.device),
-                                             input.size(), align_corners=True)
-
-            # Rotate image clockwise_
-            rotate_depth = F.grid_sample(Variable(input, requires_grad=False).to(self.device),
-                                         flow_grid_before, mode='nearest', align_corners=True, padding_mode="border")
-
-            # Compute intermediate features
-            prob = self.predict(rotate_depth)
-
-            # Compute sample grid for rotation after branches
-            affine_after = torch.zeros((input.shape[0], 2, 3))
-            for i in range(len(thetas)):
-                theta = thetas[i]
-                affine_mat_after = np.array([[np.cos(-theta), np.sin(-theta), 0.0],
-                                             [-np.sin(-theta), np.cos(-theta), 0.0]])
-                affine_mat_after.shape = (2, 3, 1)
-                affine_mat_after = torch.from_numpy(affine_mat_after).permute(2, 0, 1).float()
-                affine_after[i] = affine_mat_after
-
-            flow_grid_after = F.affine_grid(Variable(affine_after, requires_grad=False).to(self.device),
-                                            prob.size(), align_corners=True)
-
-            # Forward pass through branches, undo rotation on output predictions, upsample results
-            out_prob = F.grid_sample(prob, flow_grid_after, mode='nearest', align_corners=True)
-            self.push_prob = out_prob
-
-            return out_prob
-
-class PickFCN(nn.Module):
-    def __init__(self):
-        super(PickFCN, self).__init__()
-        self.device = DEVICE
-
-        self.conv1 = nn.Conv2d(6, 64, kernel_size=3, stride=1, padding=1, bias=False, groups=2)
-        self.rb1 = self.make_layer(64, 128)
-        self.rb2 = self.make_layer(128, 256)
-        self.rb3 = self.make_layer(256, 512)
-        self.rb4 = self.make_layer(512, 256)
-        self.rb5 = self.make_layer(256, 128)
-        self.rb6 = self.make_layer(128, 64)
-        self.final_conv = nn.Conv2d(64, 1, kernel_size=1, stride=1, padding=0, bias=False)
-        self.pick_prob = []
-
-    def make_layer(self, in_channels, out_channels, blocks=1, stride=1):
-        downsample = None
-        if (stride != 1) or (in_channels != out_channels):
-            # downsample = nn.Sequential(conv3x3(in_channels, out_channels, stride=stride),
-            #                            nn.BatchNorm2d(out_channels))
-            downsample = nn.Sequential(conv3x3(in_channels, out_channels, stride=stride))
-
-        layers = [ResidualBlock(in_channels, out_channels, stride, downsample)]
-        for i in range(1, blocks):
-            layers.append(ResidualBlock(out_channels, out_channels))
-        return nn.Sequential(*layers)
-
-    def predict(self, input):
-        
-        
-        x = nn.functional.relu(self.conv1(input)) # ReLu is needed?
-        
-        #Encoder
-        x = nn.functional.max_pool2d(x, kernel_size=2, stride=2)
-        x = self.rb1(x)
-        x = nn.functional.max_pool2d(x, kernel_size=2, stride=2)
-        x = self.rb2(x)
-        x = nn.functional.max_pool2d(x, kernel_size=2, stride=2)
-        x = self.rb3(x)
-
-        #Decoder
-        x = self.rb4(x)
-        x = nn.functional.upsample(x, scale_factor=2, mode='bilinear', align_corners=True)
-        x = self.rb5(x)
-        x = nn.functional.upsample(x, scale_factor=2, mode='bilinear', align_corners=True)
-        x = self.rb6(x)
-        x = nn.functional.upsample(x, scale_factor=2, mode='bilinear', align_corners=True)
-        out = self.final_conv(x) # activation function?
-        return out
-
-    def forward(self,input,is_volatile=[]):
-        self.pick_prob = []
-        if is_volatile:
-            with torch.no_grad():
-                prob = self.predict(input.to(self.device))
-            return prob
-        else:
-           prob = self.predict(input.to(self.device))
-           self.pick_prob = prob
-           return prob 
+    def forward_selected(self, x, is_push, rotation):
+        """Training path: one backbone pass per sample on the input actually needed.
+        is_push (B,) bool, rotation (B,) long in {0,1} (only used where is_push).
+        Returns the Q-map of the taken primitive, in input orientation: (B,1,H,W)."""
+        flip = is_push & (rotation == 1)
+        x = torch.where(flip[:, None, None, None], self.flip(x), x)
+        f = self.features(x)
+        out = torch.where(is_push[:, None, None, None], self.push_head(f), self.pick_head(f))
+        return torch.where(flip[:, None, None, None], self.flip(out), out)

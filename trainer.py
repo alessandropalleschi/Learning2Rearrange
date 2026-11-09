@@ -1,191 +1,176 @@
+"""Trainer: batched double-DQN on the shared Q-network (see models.py)."""
 import numpy as np
 import cv2
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
-from models import PushFCN, PickFCN, DEVICE
-from memory import *
 from scipy import ndimage
-import matplotlib.pyplot as plt
+
+from config import Config
+from memory import ReplayMemory
+from models import QNet, DEVICE
+
 
 class Trainer(object):
-    def __init__(self, is_testing=False, load_snapshot=False, snapshot_push=[], snapshot_pick=[],snapshot_push_target=[],snapshot_pick_target=[]):
-        
-        self.buffer = ReplayMemory(8000)
+    def __init__(self, cfg=None, is_testing=False, load_snapshot=False, snapshot=None, snapshot_target=None):
+        self.cfg = cfg or Config()
+        self.buffer = ReplayMemory(self.cfg.buffer_size)
         self.episode = ReplayMemory(50)
         self.double = True
         self.iteration = 0
-        self.model_push = PushFCN()
-        self.model_push_target = PushFCN()        
-        self.model_pick = PickFCN()
-        self.model_pick_target = PickFCN()  
-        self.push_length_px = 16  # 8 cm push length / 0.005 m pixel size
-        self.future_reward_discount = 0.9
-        self.max_dim = 160
-        self.offset_px = 4
+        self.is_testing = is_testing
+        self.max_dim = self.cfg.max_dim
+        self.offset_px = self.cfg.offset_px
+        self.push_length_px = self.cfg.push_length_px
+        self.future_reward_discount = self.cfg.gamma
+
+        self.model = QNet().to(DEVICE)
+        self.model_target = QNet().to(DEVICE)
         if load_snapshot:
-            self.model_push.load_state_dict(torch.load(snapshot_push, map_location=DEVICE))
-            self.model_pick.load_state_dict(torch.load(snapshot_pick, map_location=DEVICE))
-            self.model_push_target.load_state_dict(torch.load(snapshot_push_target, map_location=DEVICE))
-            self.model_pick_target.load_state_dict(torch.load(snapshot_pick_target, map_location=DEVICE))
-
+            self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
+            self.model_target.load_state_dict(torch.load(snapshot_target or snapshot, map_location=DEVICE))
             print('Pre-trained model snapshot')
-        # if torch.cuda.is_available():
-        #     torch.backends.cudnn.deterministic = True
-        #     torch.backends.cudnn.benchmark = True
-        if not load_snapshot:
-            self._synchronize_q_networks(self.model_push_target, self.model_push)        
-            self._synchronize_q_networks(self.model_pick_target, self.model_pick)        
-        
-        
-        self.model_push = self.model_push.to(DEVICE)
-        self.model_pick = self.model_pick.to(DEVICE)
-        self.model_push_target = self.model_push_target.to(DEVICE)
-        self.model_pick_target = self.model_pick_target.to(DEVICE)
+        else:
+            self.model_target.load_state_dict(self.model.state_dict())
+        self.model_target.eval()
+        for p in self.model_target.parameters():
+            p.requires_grad_(False)
 
-        # Set model to training mode (evaluation mode when testing, so BatchNorm stats are frozen)
-        for m in (self.model_push, self.model_pick, self.model_push_target, self.model_pick_target):
-            m.eval() if is_testing else m.train()
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.learning_rate,
+                                          weight_decay=self.cfg.weight_decay)
 
-        l_r = 1e-4
+    # ------------------------------------------------------------------ persistence
+    def save(self, snapshot_path, snapshot_target_path=None):
+        torch.save(self.model.state_dict(), snapshot_path)
+        if snapshot_target_path:
+            torch.save(self.model_target.state_dict(), snapshot_target_path)
 
-        self.criterion_push = torch.nn.SmoothL1Loss(reduction='none').to(DEVICE) # Huber loss
-        self.criterion_grasp = torch.nn.SmoothL1Loss(reduction='none').to(DEVICE) # Huber loss
-        
-        self.optimizer_push = torch.optim.Adam(self.model_push.parameters(), lr=l_r, weight_decay=2e-5)
-        self.optimizer_pick = torch.optim.Adam(self.model_pick.parameters(), lr=l_r, weight_decay=2e-5)
+    # ------------------------------------------------------------------ input / output geometry
+    def _pads(self, h, w):
+        top, left = (self.max_dim - h) // 2, (self.max_dim - w) // 2
+        return top, left
+
+    def prepare(self, color, depth):
+        """RGB (H,W,3 uint8) + height (H,W, m) -> (4,max_dim,max_dim) float tensor, zero padded."""
+        h, w = depth.shape[:2]
+        x = np.zeros((4, self.max_dim, self.max_dim), np.float32)
+        top, left = self._pads(h, w)
+        x[:3, top:top + h, left:left + w] = np.asarray(color, np.float32).transpose(2, 0, 1) / 255.0
+        x[3, top:top + h, left:left + w] = np.asarray(depth, np.float32) / 0.4
+        return torch.from_numpy(x)
+
+    def _crop(self, q, h, w):
+        """(...,P,P) padded Q-map -> (...,h-2*off,w-off) in the coordinates used by the action indices."""
+        top, left = self._pads(h, w)
+        q = q[..., top:top + h, left:left + w]
+        return q[..., self.offset_px:h - self.offset_px, self.offset_px:w]
+
+    def valid_mask(self, depth, primitive):
+        """Boolean mask (cropped coordinates) of pixels where the primitive is feasible."""
+        o = self.offset_px
+        crop = depth[o:depth.shape[0] - o, o:depth.shape[1]]
+        object_pixels = (crop > 0.008).astype(np.uint8)
+        if primitive == 'grasp':
+            return object_pixels.astype(bool)
+        kernel = np.ones((self.push_length_px, self.push_length_px), np.uint8)
+        contactable = cv2.dilate(object_pixels, kernel, iterations=1)
+        contactable[np.nonzero(object_pixels)] = 0
+        return contactable.astype(bool)
+
+    def preprocessQmaps(self, map, depth, primitve):
+        """Set infeasible pixels to -1000 (numpy Q-maps in cropped coordinates)."""
+        mask = self.valid_mask(depth, primitve)
+        return np.where(mask[None], map, -1000.0)
+
+    # ------------------------------------------------------------------ acting
+    def forward(self, color_input, depth_input, is_volatile=True, specific_rotation=-1, network='policy'):
+        """Q-maps of one observation: push (2,h,w), pick (1,h,w) as numpy, cropped to action coordinates."""
+        net = self.model if network == 'policy' else self.model_target
+        x = self.prepare(color_input, depth_input)[None].to(DEVICE)
+        with torch.no_grad():
+            push, pick = net(x)
+        h, w = depth_input.shape[:2]
+        push = self._crop(push, h, w)[0].cpu().numpy()
+        pick = self._crop(pick, h, w)[0].cpu().numpy()
+        return push, pick
+
+    # ------------------------------------------------------------------ learning
+    def _soft_update(self, alpha):
+        with torch.no_grad():
+            for pt, p in zip(self.model_target.parameters(), self.model.parameters()):
+                pt.data.copy_(alpha * p.data + (1 - alpha) * pt.data)
 
     @staticmethod
-    def _soft_update_q_network_parameters(q_network_1: nn.Module,
-                                          q_network_2: nn.Module,
-                                          alpha: float) -> None:
-        """In-place, soft-update of q_network_1 parameters with parameters from q_network_2."""
+    def _soft_update_q_network_parameters(q_network_1, q_network_2, alpha):
+        """In-place soft update of q_network_1 with the parameters of q_network_2."""
         for p1, p2 in zip(q_network_1.parameters(), q_network_2.parameters()):
             p1.data.copy_(alpha * p2.data + (1 - alpha) * p1.data)
 
-    def _synchronize_q_networks(self,q_network_1: nn.Module, q_network_2: nn.Module) -> None:
-        """In place, synchronization of q_network_1 and q_network_2."""
-        _ = q_network_1.load_state_dict(q_network_2.state_dict())
+    def _masks_padded(self, depths, h, w):
+        """Feasibility masks of a batch of depth maps in padded coordinates: (B,1,P,P) push, pick."""
+        top, left = self._pads(h, w)
+        o = self.offset_px
+        B = len(depths)
+        out = {}
+        for prim in ('push', 'grasp'):
+            m = np.zeros((B, 1, self.max_dim, self.max_dim), bool)
+            for i, d in enumerate(depths):
+                m[i, 0, top + o:top + h - o, left + o:left + w] = self.valid_mask(d, prim)
+            out[prim] = torch.from_numpy(m).to(DEVICE)
+        return out['push'], out['grasp']
 
+    def train_step(self, transitions):
+        """One double-DQN gradient step on a list of Transition. Gradients flow only through the taken pixel."""
+        B = len(transitions)
+        states = [t.state for t in transitions]
+        nexts = [t.next_state for t in transitions]
+        h, w = states[0]['depthmap'].shape[:2]
+        top, left = self._pads(h, w)
 
-    def preprocessQmaps(self, map, depth, primitve):
+        x = torch.stack([self.prepare(s['colormap'], s['depthmap']) for s in states]).to(DEVICE)
+        xn = torch.stack([self.prepare(s['colormap'], s['depthmap']) for s in nexts]).to(DEVICE)
+        reward = torch.tensor([float(t.reward) for t in transitions], device=DEVICE)
+        done = torch.tensor([float(t.done) for t in transitions], device=DEVICE)
+        is_push = torch.tensor([t.primitive_action == 'push' for t in transitions], device=DEVICE)
+        rot = torch.tensor([int(t.action[0]) for t in transitions], device=DEVICE)
+        rows = torch.tensor([int(t.action[1]) + self.offset_px + top for t in transitions], device=DEVICE)
+        cols = torch.tensor([int(t.action[2]) + self.offset_px + left for t in transitions], device=DEVICE)
 
-        depth_input_crop = depth[self.offset_px:depth.shape[0]-self.offset_px,self.offset_px:depth.shape[1]]
-        object_pixels = (depth_input_crop>0.008).astype(np.uint8)
+        # ---- TD target (double DQN: policy net selects, target net evaluates, over both primitives)
+        with torch.no_grad():
+            push_mask, pick_mask = self._masks_padded([s['depthmap'] for s in nexts], h, w)
+            neg = -1e9
+            pp, pk = self.model(xn)
+            pol = torch.cat([torch.where(push_mask.expand_as(pp), pp, torch.full_like(pp, neg)).flatten(1),
+                             torch.where(pick_mask, pk, torch.full_like(pk, neg)).flatten(1)], dim=1)
+            if self.double:
+                tp, tk = self.model_target(xn)
+                tgt = torch.cat([torch.where(push_mask.expand_as(tp), tp, torch.full_like(tp, neg)).flatten(1),
+                                 torch.where(pick_mask, tk, torch.full_like(tk, neg)).flatten(1)], dim=1)
+                future = tgt.gather(1, pol.argmax(1, keepdim=True)).squeeze(1)
+            else:
+                future = pol.max(1).values
+            # no valid action at all (e.g. empty scene): no bootstrap
+            future = torch.where(future < neg / 2, torch.zeros_like(future), future)
+            label = reward + self.future_reward_discount * future * (1.0 - done)
 
-        if primitve == 'grasp':
-            
-            map = np.ma.masked_array(map, np.broadcast_to(1-object_pixels, map.shape, subok=True))        
-            map = map.filled(fill_value=-1000)
-        elif primitve == 'push':
-            kernel = np.ones((self.push_length_px, self.push_length_px), np.uint8)
-            contactable_regions = cv2.dilate(object_pixels, kernel, iterations=1)
-            contactable_regions[np.nonzero(object_pixels)] = 0
-            for i in range(map.shape[0]):
-                mapf = np.ma.masked_array(map[i,:,:], np.broadcast_to(1-contactable_regions, map[i,:,:].shape, subok=True))        
-                map[i,:,:] = mapf.filled(fill_value=-1000)
-        return map
+        # ---- prediction at the taken pixel only
+        out = self.model.forward_selected(x, is_push, rot)
+        pred = out[torch.arange(B, device=DEVICE), 0, rows, cols]
+        loss = F.smooth_l1_loss(pred, label)  # Huber loss (paper Eq. 3)
 
-    def forward(self, color_input, depth_input, is_volatile=True, specific_rotation=-1,network='policy'):
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
+        self.optimizer.step()
+        return float(loss.detach().cpu())
 
-        color_heightmap = color_input.copy()
-        depth_heightmap = depth_input.copy()
-
-        color_heightmap = color_heightmap.astype(float)/255.
-        depth_heightmap = depth_heightmap.astype(float)/0.4
-
-
-        max_dim = self.max_dim
-
-        padding_width_scal_x = int((max_dim-color_input.shape[0])/2)
-        padding_width_scal_y = int((max_dim-color_input.shape[1])/2)
-
-        padding_width = ((int(padding_width_scal_x), int(padding_width_scal_x)), (int(padding_width_scal_y), int(padding_width_scal_y)))
-            # color_heightmap_2x = np.pad(color_heightmap_2x, padding_width, 'constant', constant_values=0)
-
-        color_heightmap_r =  np.pad(color_heightmap[:,:,0], padding_width, 'constant', constant_values=0)
-        color_heightmap_r.shape = (color_heightmap_r.shape[0], color_heightmap_r.shape[1], 1)
-        color_heightmap_g =  np.pad(color_heightmap[:,:,1], padding_width, 'constant', constant_values=0)
-        color_heightmap_g.shape = (color_heightmap_g.shape[0], color_heightmap_g.shape[1], 1)
-        color_heightmap_b =  np.pad(color_heightmap[:,:,2], padding_width, 'constant', constant_values=0)
-        color_heightmap_b.shape = (color_heightmap_b.shape[0], color_heightmap_b.shape[1], 1)
-        color_heightmap = np.concatenate((color_heightmap_r, color_heightmap_g, color_heightmap_b), axis=2)
-
-
-        padding_width = ((int(padding_width_scal_x), int(padding_width_scal_x)), (int(padding_width_scal_y), int(padding_width_scal_y)))
-
-        depth_heightmap =  np.pad(depth_heightmap, padding_width, 'constant', constant_values=0)    
-
-        depth_heightmap = np.tile(depth_heightmap.reshape(
-                            depth_heightmap.shape[0], depth_heightmap.shape[1], 1), (1, 1, 3))
-
-        depth_heightmap.shape = (depth_heightmap.shape[0], depth_heightmap.shape[1], depth_heightmap.shape[2], 1)
-        color_heightmap.shape = (color_heightmap.shape[0], color_heightmap.shape[1], color_heightmap.shape[2], 1)
-
-
-            # Construct minibatch of size 1 (b,c,h,w)
-
-        input_color_data = torch.from_numpy(depth_heightmap.astype(np.float32)).permute(3,2,0,1)
-        input_depth_data = torch.from_numpy(color_heightmap.astype(np.float32)).permute(3,2,0,1)
-
-
-        input = torch.cat((input_color_data,input_depth_data),axis=1)
-
-        if network=='policy':
-            output_prob_push = self.model_push.forward(input=input,specific_rotation=specific_rotation,is_volatile=is_volatile)
-            output_prob_pick = self.model_pick.forward(input=input,is_volatile=is_volatile)
-        elif network=='target':
-            output_prob_push = self.model_push_target.forward(input=input,specific_rotation=specific_rotation,is_volatile=is_volatile)
-            output_prob_pick = self.model_pick_target.forward(input=input,is_volatile=is_volatile)
-
-
-
-        push_predictions = output_prob_push.cpu().detach().numpy()[:,0,int(padding_width_scal_x):int(color_heightmap.shape[0] - padding_width_scal_x),int(padding_width_scal_y):int(color_heightmap.shape[1] - padding_width_scal_y)]
-        push_predictions = push_predictions[:,self.offset_px:color_input.shape[0]-self.offset_px,self.offset_px:color_input.shape[1]]
-
-        pick_predictions = output_prob_pick.cpu().detach().numpy()[:,0,int(padding_width_scal_x):int(color_heightmap.shape[0] - padding_width_scal_x),int(padding_width_scal_y):int(color_heightmap.shape[1] - padding_width_scal_y)]
-        pick_predictions = pick_predictions[:,self.offset_px:color_input.shape[0]-self.offset_px,self.offset_px:color_input.shape[1]]
-        pick_predictions = self.preprocessQmaps(pick_predictions,depth_input,'grasp')
-        
-        
-        return push_predictions, pick_predictions
-
-
-    def backprop(self, color_heightmap, depth_heightmap, primitive_action, best_pix_ind, label_value):
-
-
-        size = color_heightmap.shape
-        max_dim = self.max_dim
-        padding_width_scal_x = int((max_dim-color_heightmap.shape[0])/2)
-        padding_width_scal_y = int((max_dim-color_heightmap.shape[1])/2)
-
-
-        label = np.zeros((1,size[0]+2*padding_width_scal_x,size[1]+2*padding_width_scal_y))
-        action_area = np.zeros((size[0],size[1]))
-        action_area[best_pix_ind[1]+self.offset_px][best_pix_ind[2]+self.offset_px] = 1
-        tmp_label = np.zeros((size[0],size[1]))
-
-        tmp_label[action_area > 0] = label_value
-        label[0,padding_width_scal_x:(size[0]+padding_width_scal_x),padding_width_scal_y:(size[1]+padding_width_scal_y)] = tmp_label
-
-                # Compute label mask
-        label_weights = np.zeros(label.shape)
-        tmp_label_weights = np.zeros((size[0],size[1]))
-        tmp_label_weights[action_area > 0] = 1
-        label_weights[0,padding_width_scal_x:(size[0]+padding_width_scal_x),padding_width_scal_y:(size[1]+padding_width_scal_y)] = tmp_label_weights
-
-        self.forward(color_heightmap, depth_heightmap, is_volatile=False, specific_rotation=best_pix_ind[0])
-        loss = 0
-        if primitive_action == 'push':
-            loss = self.criterion_push(self.model_push.push_prob[0].view(1,max_dim,max_dim), Variable(torch.from_numpy(label).float().to(DEVICE))) * Variable(torch.from_numpy(label_weights).float().to(DEVICE),requires_grad=False)
-            loss = loss.sum()
-        elif primitive_action == 'grasp':
-            loss = self.criterion_grasp(self.model_pick.pick_prob[0].view(1,max_dim,max_dim), Variable(torch.from_numpy(label).float().to(DEVICE))) * Variable(torch.from_numpy(label_weights).float().to(DEVICE),requires_grad=False)
-            loss = loss.sum()
-
-
-        return loss    
+    def optimize(self):
+        """Sample a batch from the replay buffer, take a gradient step and Polyak-update the target."""
+        if self.is_testing or len(self.buffer) < self.cfg.batch_size:
+            return None
+        loss = self.train_step(self.buffer.sample(self.cfg.batch_size))
+        self._soft_update(self.cfg.polyak_beta)
+        return loss
 
     def get_prediction_vis(self, predictions, color_input, best_pix_ind=[], final_pix=[]):
 
