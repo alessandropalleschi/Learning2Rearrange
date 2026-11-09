@@ -95,6 +95,12 @@ class SimParams:
     move_joints_max_steps: int = 1000       # simulation-step budget of one joint move
 
     # simulation quality options ('improved' preset). All default to the original behaviour.
+    controller: str = 'legacy'              # 'legacy' | 'pd': rate-limited joint commands (smooth, velocity-limited)
+    velocity_scale: float = 1.0             # 'pd': fraction of the URDF joint velocity limits used
+    pd_motor_forces: str = 'default'        # 'pd': 'default' = PyBullet default motor force, 'urdf' = URDF effort limits
+    solver_iterations: object = None        # PyBullet numSolverIterations (default 50); more = stiffer contacts, slower
+    deterministic: bool = False             # deterministic overlapping pairs: identical runs for identical seeds
+    strict_place: bool = False              # place(): a failed approach (after one retry) fails the action
     contact_force_limit: float = 300.0      # N: a motion is aborted when the joint reaction force exceeds this
     force_sense_x: object = None            # m: only check forces where the tool x < this (None = legacy: 0.5, or 0.2 holding)
     adaptive_step: bool = False             # coarse IK waypoints (5x) while the tool is outside the cabinet front
@@ -132,9 +138,15 @@ class SimParams:
         params.contact_force_limit = getattr(args, 'force_limit', 300.0)
         params.force_sense_x = getattr(args, 'force_sense_x', None)
         params.adaptive_step = getattr(args, 'adaptive_step', False)
-        if getattr(args, 'sim_quality', 'legacy') == 'improved':
+        quality = getattr(args, 'sim_quality', 'legacy')
+        if quality in ('improved', 'modern'):
             params.ik_limits = params.filtered_force = params.suction_verify = True
             params.suction_min_alignment = 0.8
+        if quality == 'modern':  # + rate-limited controller, stiffer solver, reproducible contacts, strict place errors
+            params.controller, params.solver_iterations = 'pd', 100
+            params.deterministic = params.strict_place = params.adaptive_step = True
+            params.force_sense_x = 0.27  # do not check forces while the tool is still outside the cabinet
+        params.velocity_scale = getattr(args, 'velocity_scale', 1.0)
         return params
 
     @staticmethod
@@ -142,9 +154,13 @@ class SimParams:
         """Command-line flags that configure the simulation."""
         parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy',
                             help="'paper': 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated)")
-        parser.add_argument('--sim_quality', choices=['legacy', 'improved'], default='legacy',
+        parser.add_argument('--sim_quality', choices=['legacy', 'improved', 'modern'], default='legacy',
                             help="'improved': IK with joint limits, filtered force contact detection, verified suction "
-                                 "grasps (opt-in, not yet validated against the legacy behaviour)")
+                                 "grasps. 'modern': improved + rate-limited joint controller, 100 solver iterations, "
+                                 "deterministic contacts, strict place errors, adaptive waypoints, force check only near the "
+                                 "cabinet (all opt-in, not yet validated against the legacy behaviour)")
+        parser.add_argument('--velocity_scale', type=float, default=1.0,
+                            help="'modern' controller: fraction of the URDF joint velocity limits")
         parser.add_argument('--force_limit', type=float, default=300.0,
                             help='N: abort a motion when the joint reaction force exceeds this (legacy 300; ~50%% of the '
                                  'actions hit it, see profile_sim.py)')

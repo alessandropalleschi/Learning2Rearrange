@@ -8,6 +8,7 @@ from scipy import ndimage
 from copy import deepcopy
 import cv2
 from config import SimParams
+from arm_control import joint_limits, rate_limited_command
 from force_sensing import ForceMonitor
 from random import sample
 PIXEL_SIZE = 0.005
@@ -697,6 +698,13 @@ class Environment:
         self._randomize_camera()
         p.resetSimulation()
         p.setTimeStep(self.time_step)  # resetSimulation restores the default 1/240 s
+        engine = {}  # resetSimulation also restores these solver settings
+        if self.params.solver_iterations:
+            engine['numSolverIterations'] = int(self.params.solver_iterations)
+        if self.params.deterministic:
+            engine['deterministicOverlappingPairs'] = 1
+        if engine:
+            p.setPhysicsEngineParameter(**engine)
         p.setGravity(0, 0, -9.81)
         # Temporarily disable rendering to load scene faster.
         p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)
@@ -724,6 +732,7 @@ class Environment:
         self.force_monitor = ForceMonitor(p, self.ur5e, [self.ur5e_ee_id, 11, 10], self.params.force_window,
                                           self.params.force_debounce)
         self._ik_kwargs = self._build_ik_kwargs() if self.params.ik_limits else {}
+        self._limits = joint_limits(p, self.ur5e, self.ur5e_joints)
 
 
         # Move robot to home joint configuration.
@@ -1037,8 +1046,38 @@ class Environment:
     def go_home(self):
         return self.move_joints(self.home_joints)
 
+    def _move_joints_pd(self, target_joints, tol=1e-3):
+        """Rate-limited joint move (params.controller == 'pd'): the position command advances towards the goal at
+        most v_max * dt per step (URDF velocity limits x params.velocity_scale), starting from the current state, so
+        there are no command jumps. Done when the joints are within `tol` and (almost) at rest."""
+        goal = np.asarray(target_joints, dtype=float).copy()
+        goal[-1] = np.pi  # the last wrist joint is kept fixed, as in the legacy controller
+        v_max = self._limits['v_max'] * self.params.velocity_scale
+        dt = self.time_step
+        states = p.getJointStates(self.ur5e, self.ur5e_joints)
+        command = np.array([s[0] for s in states])
+        extra = {}
+        if self.params.pd_motor_forces == 'urdf':
+            extra['forces'] = list(self._limits['effort'])
+        for _ in range(self.params.move_joints_max_steps):
+            states = p.getJointStates(self.ur5e, self.ur5e_joints)
+            q, qd = np.array([s[0] for s in states]), np.array([s[1] for s in states])
+            err = goal - q
+            err[-1] = 0
+            if np.all(np.abs(err) < tol) and np.all(np.abs(qd) < 0.05):
+                p.stepSimulation(self.client_id)
+                return True
+            command = rate_limited_command(command, goal, v_max, dt)
+            p.setJointMotorControlArray(bodyIndex=self.ur5e, jointIndices=self.ur5e_joints,
+                                        controlMode=p.POSITION_CONTROL, targetPositions=command,
+                                        positionGains=0.4 * np.ones(len(self.ur5e_joints)), **extra)
+            p.stepSimulation(self.client_id)
+        return False
+
     def move_joints(self, target_joints, speed=0.02, timeout=0.5):
         """Move UR5e to target joint configuration."""
+        if self.params.controller == 'pd':
+            return self._move_joints_pd(target_joints)
         for _ in range(self.params.move_joints_max_steps):  # simulation steps, not wall-clock
             current_joints = np.array([s[0] for s in p.getJointStates(self.ur5e, self.ur5e_joints)])
             diff_joints = target_joints - current_joints
@@ -1341,7 +1380,7 @@ class Environment:
       success = self.move_ee_pose((tool_position, quat), speed=speed)
       if not success:
         success = self.move_ee_pose((tool_position, quat), speed=speed)
-        success = True
+        success = success or not self.params.strict_place  # legacy: carry on even if the retry failed
 
       if success:
         success = self.straight_move(tool_position,position, quat,speed, detect_force=True)

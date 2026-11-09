@@ -185,6 +185,57 @@ def test_waypoints():
     assert len(retreat) <= len(legacy) // 5 + 1 and len(monitored) < len(legacy)
 
 
+def test_rate_limited_arm_controller():
+    """The 'pd' controller: commands never jump, the arm converges without overshoot, limits come from the URDF."""
+    import env as real_env
+    from arm_control import joint_limits, rate_limited_command
+    from config import SimParams
+
+    cmd = rate_limited_command(np.zeros(3), np.array([1.0, -1.0, 0.001]), np.array([2.0, 2.0, 2.0]), 0.01)
+    assert np.allclose(cmd, [0.02, -0.02, 0.001])  # at most v_max * dt, never past the goal
+
+    class Arm:
+        """Joint controller: q moves a fraction kp of the way to the commanded target per step."""
+        POSITION_CONTROL, JOINT_PRISMATIC = 0, 1
+
+        def __init__(self):
+            self.q, self.qd, self.target, self.history = np.zeros(7), np.zeros(7), np.zeros(7), []
+
+        def getJointStates(self, body, joints):
+            return [(self.q[i], self.qd[i]) for i in range(7)]
+
+        def setJointMotorControlArray(self, bodyIndex, jointIndices, controlMode, targetPositions, positionGains, **kw):
+            self.target = np.array(targetPositions)
+
+        def stepSimulation(self, client=0):
+            new = self.q + 0.4 * (self.target - self.q)
+            self.qd, self.q = (new - self.q) * 480, new
+            self.history.append(self.q.copy())
+
+        def getJointInfo(self, body, j):
+            return (j, b'j', 1 if j == 0 else 0, 0, 0, 0, 0, 0, -10000.0 if j == 0 else -6.28,
+                    10000.0 if j == 0 else 6.28, 1.0 if j == 0 else 150.0, 10000.0 if j == 0 else 3.14)
+
+    arm, old = Arm(), real_env.p
+    real_env.p = arm
+    try:
+        lim = joint_limits(arm, 0, range(7))
+        assert lim['upper'][0] == 0.5 and lim['v_max'][0] == 1.0 and lim['effort'][0] == 1000.0 and lim['v_max'][1] == 3.14
+        sim = real_env.Environment.__new__(real_env.Environment)
+        sim.params, sim.ur5e, sim.ur5e_joints, sim.time_step, sim.client_id = SimParams(controller='pd'), 0, list(range(7)), 1 / 480, 0
+        sim._limits = lim
+        goal = np.array([0.1, 0.5, -0.4, 0.3, 0.0, 0.2, np.pi])
+        assert sim.move_joints(goal)
+        assert np.all(np.abs(arm.q[:6] - goal[:6]) < 1e-3)
+        steps = np.array(arm.history)
+        assert np.all(np.diff(steps, axis=0)[:, 1] <= lim['v_max'][1] / 480 + 1e-9)       # velocity limit respected
+        assert np.all(steps[:, 1] <= goal[1] + 1e-6)                                      # no overshoot
+        legacy_jump = abs(goal[1])                                                        # legacy: command = whole error at once
+        assert np.max(np.abs(np.diff(steps, axis=0))) < legacy_jump / 20
+    finally:
+        real_env.p = old
+
+
 def test_belief_tracker():
     from belief import BeliefTracker, compact_belief, BELIEF_CHANNELS
     tr = BeliefTracker(age_horizon=5)
@@ -284,6 +335,7 @@ if __name__ == '__main__':
     test_force_monitor()
     test_suction_and_ik_helpers()
     test_waypoints()
+    test_rate_limited_arm_controller()
     test_belief_tracker()
     test_models()
     for mode in ('none', 'spatial', 'recurrent'):

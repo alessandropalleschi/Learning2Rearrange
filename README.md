@@ -39,6 +39,10 @@ compare success rates and `profile_sim.py` timings before trusting it):
   debounced before it stops a motion. The raw reading contains the tool weight, differs per arm pose and spikes for single steps.
 * **Suction**: seal needs a surface normal within ~37 degrees of the cup axis (legacy: 60), and after the lift the object must still be
   at its grasp offset, otherwise the grasp counts as lost (`suction_holds`).
+`--sim_quality modern` adds the rate-limited joint controller (`arm_control.py`), 100 solver iterations, deterministic contacts,
+strict `place()` errors, adaptive (coarser) retreat waypoints and the force check only near the cabinet. See `SIMULATION_NOTES.md`
+for the review of the simulator (errors fixed, findings, open issues). Compare modes with the same seed:
+`python profile_sim.py --actions 100 --seed 1 [--sim_quality modern]`.
 Not changed (needs tuning on your setup): explicit motor forces / velocity limits of the joint controller, and a force-limited
 vacuum model instead of the fixed constraint (`suction_max_force` is already a parameter; the `paper` preset uses 50 N).
 
