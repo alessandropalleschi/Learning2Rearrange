@@ -24,16 +24,19 @@ def relable_episode(episode,env):
     next_state_id_list = list(map(itemgetter('idmap'), Transition(*zip(*episode.memory)).next_state))
     next_state_color_heightmap_new = env.relabel_image(next_state_color_list,next_state_id_list,env.id_list,env.new_class)    
 
+    relabeled = []
     for (transitions,state_color,next_state_color) in zip(episode.memory,state_color_heightmap_new,next_state_color_heightmap_new):
-        state = transitions.state
+        # copy the dicts so the original transitions stored in the replay buffer are untouched
+        # (state and next_state can be the very same dict when the episode ended)
+        state = dict(transitions.state)
         state['colormap'] = state_color
-        next_state = transitions.next_state
+        next_state = dict(transitions.next_state)
         next_state['colormap'] = next_state_color
+        relabeled.append(transitions._replace(state=state, next_state=next_state))
 
-        transitions = transitions._replace(state=state)
-        transitions = transitions._replace(next_state=next_state)
-    
-    return episode      
+    episode.memory.clear()
+    episode.memory.extend(relabeled)
+    return episode
 
 
 def check_push(env, depth, pix_x, pix_y, angle):
@@ -64,9 +67,11 @@ def check_push(env, depth, pix_x, pix_y, angle):
 
 
 
-def optimize_model(trainer):
+def optimize_model(trainer, is_testing=False):
 
     buffer = trainer.buffer
+    if is_testing:
+        return
     if len(buffer) > BATCH_SIZE*NUM_EPOCHS:
         print("Training")
                 # mini_batch, idxs, is_weights = trainer.prioritized_memory.sample(BATCH_SIZE)
@@ -225,7 +230,9 @@ def select_placement(Yup,Ydow,freespace,no_obj=False):
     visual = np.zeros_like(freespace)
     ind = np.where(freespace>0)
     if (no_obj):
-        dist_y = np.abs(ind[0]-freespace.shape[0] // 2) + 1/ind[1]
+        if ind[0].size == 0:
+            return freespace.shape[1] // 2, freespace.shape[0] // 2
+        dist_y = np.abs(ind[0]-freespace.shape[0] // 2) + 1/np.maximum(ind[1], 1)
         pixel_ind = np.nanargmin(dist_y)
         return ind[1][pixel_ind], ind[0][pixel_ind]
     else: 
@@ -246,10 +253,10 @@ def select_placement(Yup,Ydow,freespace,no_obj=False):
         #         pixel_ind = np.nanargmin(dist_y)
         visual[ind] = 1/dist_y
         # else: 
-        try:
-            pixel_ind = np.nanargmin(dist_y)
-        except ValueError:
-            print(ind)
+        if dist_y.size == 0:
+            # no free pixel left: fall back to the middle of the target region
+            return freespace.shape[1] // 2, int(mid)
+        pixel_ind = np.nanargmin(dist_y)
 
         return ind[1][pixel_ind], ind[0][pixel_ind]
 
@@ -381,7 +388,7 @@ def main(args):
     np.random.seed(random_seed)
     
     # Initialize pick-and-place system (camera and robot)
-    env = Environment(gui=True,num_obj=[2])
+    env = Environment(gui=args.gui, num_obj=[args.num_obj])
     while True:
         if(env.reset()):
             if(env.check_sorted()<1):
@@ -461,7 +468,8 @@ def main(args):
         reward_value = reward_value if ok_status else -50
         reward+=reward_value
         done_episode = done or (not ok_status)
-        train_short_memory(obs,next_obs,reward_value, best_index, primitive_action,done_episode,trainer)
+        if not is_testing:
+            train_short_memory(obs,next_obs,reward_value, best_index, primitive_action,done_episode,trainer)
         trainer.buffer.push(obs.copy(), best_index, next_obs.copy(), reward_value, primitive_action,done_episode)
         reward_relable = 0 if env.check_relabel()==1 else reward_value
         if relable and reward_value==-1 and env.check_relabel()==1:
@@ -482,7 +490,7 @@ def main(args):
                 trainer.buffer.memory+=trainer.episode.memory
                 trainer.episode.memory.clear()
 
-        optimize_model(trainer=trainer)
+        optimize_model(trainer=trainer, is_testing=is_testing)
         trainer.iteration +=1
 
 if __name__ == '__main__':
@@ -508,6 +516,9 @@ if __name__ == '__main__':
     parser.add_argument('--snapshot_pick_target', dest='snapshot_pick_target', action='store', default='/scr1/ObjectSorting/logs/train_resnet_123/models/target_pick_and_place_snapshot-001400.reinforcement.pth')
     parser.add_argument('--logging_directory', dest='logging_directory', action='store', default='train_resnet_123_test')
     parser.add_argument('--save_visualizations', dest='save_visualizations', action='store_true', default=False,          help='save visualizations of FCN predictions?')
+
+    parser.add_argument('--gui', dest='gui', action='store_true', default=False, help='show the PyBullet GUI')
+    parser.add_argument('--num_obj', dest='num_obj', type=int, default=2, help='number of objects per episode (paper uses a curriculum 1..8)')
 
     # Run main program with specified arguments
     args = parser.parse_args()

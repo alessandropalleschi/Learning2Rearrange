@@ -44,9 +44,9 @@ class Trainer(object):
         self.model_push_target = self.model_push_target.cuda()
         self.model_pick_target = self.model_pick_target.cuda()
 
-        # Set model to training mode
-        self.model_push.train()
-        self.model_pick.train()
+        # Set model to training mode (evaluation mode when testing, so BatchNorm stats are frozen)
+        for m in (self.model_push, self.model_pick, self.model_push_target, self.model_pick_target):
+            m.eval() if is_testing else m.train()
 
         l_r = 1e-4
 

@@ -265,16 +265,16 @@ class Environment:
         for _ in range(5):
             p.stepSimulation(self.client_id)
         scene_info = self.info
-        z_value = [value[0][2] for key, value in scene_info.items()]
+        z_value = np.array([value[0][2] for key, value in scene_info.items()])
         
       
         roll = [abs(p.getEulerFromQuaternion(value[1])[0]) for key, value in scene_info.items()]
         pitch = [abs(p.getEulerFromQuaternion(value[1])[1]) for key, value in scene_info.items()]
         # print(pitch)
         not_fall = max(roll)<1.2 and max(pitch)<1.2
-        y_value = [value[0][1] for key, value in scene_info.items()]
-        in_bound = all(y_value>self.bounds[1][0]+0.02) and all(y_value<self.bounds[1][1]-0.02)
-        return all(z_value>self.bounds[2][0]-0.1) and not_fall
+        # NOTE: an object is invalid if it fell below the cabinet floor or toppled over
+        # (the y-bounds check that used to be computed here was never used in the result).
+        return bool(np.all(z_value > self.bounds[2][0]-0.1) and not_fall)
 
 
     def release(self):
@@ -489,21 +489,18 @@ class Environment:
       return sorted/len(info_scene)
 
     def relabel_image(env, color_image, id_image, id_lists, new_class_list):
-      for (images,id_images) in zip(color_image,id_image):
-        image = images[4:images.shape[0]-4,4:images.shape[0]-4]
-        for (id,class_new) in zip(id_lists,new_class_list):
-          pixels = np.where(id_images==id)
-          print(id)
-          if class_new == 1:
-            new_color = [np.multiply(COLORS['blue'][:3],255)]
-          elif class_new == 3:
-            new_color = [np.multiply(COLORS['green'][:3],255)]
-          elif class_new == 5:
-            new_color = [np.multiply(COLORS['yellow'][:3],255)]
-
-          image[pixels] = new_color
-          images[4:images.shape[0]-4,4:images.shape[0]-4] = image
-      return color_image
+      class_to_color = {LABELS[k]: np.multiply(COLORS[k][:3], 255) for k in ('blue', 'green', 'yellow')}
+      relabeled = []
+      for (images, id_images) in zip(color_image, id_image):
+        # Work on a copy: the original (un-relabeled) transition is stored in the replay
+        # buffer and shares these arrays, so it must not be modified in place.
+        image = images.copy()
+        for (id, class_new) in zip(id_lists, new_class_list):
+          if class_new not in class_to_color:
+            continue
+          image[id_images == id] = class_to_color[class_new]
+        relabeled.append(image)
+      return relabeled
 
     # def add_target_pixels_center(self):
     #    C = []
@@ -798,7 +795,7 @@ class Environment:
         PLACE_TARGETS_RAND = PLACE_CHOICES[rand_int]
         PLACE_SELECT = random.sample(PLACE_TARGETS_RAND,3)
 
-        PLACE_TARGETS = PLACE_TARGETS_ORG
+        PLACE_TARGETS = deepcopy(PLACE_TARGETS_ORG)
         # print(PLACE_TARGETS)
         n_obj = 0
         for key in PLACE_TARGETS:
@@ -827,9 +824,10 @@ class Environment:
         self.obj_ids = {"fixed": [], "rigid": []}
         self.use_gripper = False
         p.resetSimulation()
+        p.setTimeStep(self.time_step)  # resetSimulation restores the default 1/240 s
         p.setGravity(0, 0, -9.81)
         # Temporarily disable rendering to load scene faster.
-        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
+        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)
         # self.ur5e_ghost = p.loadURDF("assets/ur5e/ur5e.urdf", basePosition=(0, 0, -10), useFixedBase=True)
 
         # Load UR5e
