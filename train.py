@@ -1,115 +1,117 @@
-"""Training / testing loop: double DQN with push + pick-and-place primitives, curriculum and HER."""
+"""Training / testing loop: double DQN with push + pick-and-place primitives, curriculum and HER.
+
+Several simulators can run in parallel (--num_envs); the policy is evaluated on all of them in one batch.
+"""
 import argparse
-import csv
 import os
 from collections import deque
+from functools import partial
 
 import cv2
-import numpy as np
 
-from config import Config
+import env as sim_module
+from config import Config, SimParams
+from logger import Logger
 from memory import Transition
-from rearrange_env import RearrangeEnv, check_push
+from policy import select_action
+from rearrange_env import make_env
 from trainer import Trainer
-
-
-def select_action(trainer, env, obs, push_q, pick_q, explore_prob, is_testing, cfg):
-    """Epsilon-greedy over the two primitives. Returns (primitive, (rot,row,col), predicted_value)."""
-    push_q = trainer.preprocessQmaps(push_q, obs['depthmap'], 'push')
-    pick_q = trainer.preprocessQmaps(pick_q, obs['depthmap'], 'grasp')
-    primitive = 'push' if np.max(push_q) > np.max(pick_q) else 'grasp'
-    q = {'push': push_q, 'grasp': pick_q}
-
-    if not is_testing and np.random.uniform() < explore_prob:
-        if np.random.randint(0, 2) == 1:
-            primitive = 'push' if np.random.randint(0, 2) == 0 else 'grasp'
-        valid = np.flatnonzero(q[primitive].ravel() > -1000)
-        if valid.size:
-            if primitive == 'push':  # prefer pushes that actually touch something
-                for _ in range(100):
-                    pix = np.unravel_index(np.random.choice(valid), q[primitive].shape)
-                    angle = np.deg2rad(pix[0] * 180.0 - 90)
-                    if check_push(env.sim, obs['depthmap'], pix[2], pix[1], angle, cfg.push_length):
-                        break
-            else:
-                pix = np.unravel_index(np.random.choice(valid), q[primitive].shape)
-        else:
-            pix = np.unravel_index(np.argmax(q[primitive]), q[primitive].shape)
-    else:
-        pix = np.unravel_index(np.argmax(q[primitive]), q[primitive].shape)
-    return primitive, tuple(int(i) for i in pix), float(q[primitive][pix])
+from utils import seed_everything
+from vec_env import VecEnv
 
 
 def main(args):
     cfg = Config(start_objects=args.num_obj, max_objects=args.max_obj, max_actions=args.max_actions)
-    np.random.seed(args.random_seed)
+    params = SimParams.preset(args.physics, randomize=args.randomize)
+    sim_module.configure_cabinet(params)  # the main process needs the same workspace bounds as the workers
+    seed_everything(args.random_seed)
     log_dir = os.path.join(os.path.abspath('logs'), args.logging_directory)
     os.makedirs(os.path.join(log_dir, 'models'), exist_ok=True)
 
-    env = RearrangeEnv(cfg, gui=args.gui, num_obj=cfg.start_objects)
+    n = args.num_envs
+    venv = VecEnv([partial(make_env, cfg, args.gui and r == 0, cfg.start_objects, params, args.random_seed + r)
+                   for r in range(n)], start_method=args.start_method)
     trainer = Trainer(cfg, is_testing=args.is_testing, load_snapshot=args.load_snapshot,
                       snapshot=args.snapshot, snapshot_target=args.snapshot_target)
+    logger = Logger(log_dir)
 
     num_obj = cfg.start_objects
-    successes = deque(maxlen=cfg.success_window)
-    scores = deque(maxlen=cfg.success_window)
+    successes, scores = deque(maxlen=cfg.success_window), deque(maxlen=cfg.success_window)
     stage_iteration, episode = 0, 0
-    csv_file = open(os.path.join(log_dir, 'episodes.csv'), 'a', newline='')
-    writer = csv.writer(csv_file)
-    if csv_file.tell() == 0:
-        writer.writerow(['episode', 'iteration', 'num_obj', 'return', 'actions', 'success', 'epsilon'])
+    obs = venv.reset(num_obj, seeds=[args.random_seed + 1000 * r for r in range(n)])
+    try:
+        while True:
+            # epsilon-greedy: 0.8 annealed to 0.01 for each curriculum stage (paper)
+            eps = 0.0 if args.is_testing else max(cfg.eps_start * cfg.eps_decay ** stage_iteration, cfg.eps_end)
+            push_q, pick_q = trainer.forward_batch([o['colormap'] for o in obs], [o['depthmap'] for o in obs])
+            choices = [select_action(trainer, obs[i], push_q[i], pick_q[i], eps, cfg) for i in range(n)]
+            next_obs, rewards, terminated, truncated, infos = venv.step(
+                [{'primitive': c[0], 'pix': c[1]} for c in choices])
 
-    obs = env.reset(num_obj)
-    while True:
-        # epsilon-greedy: 0.8 annealed to 0.01 for each curriculum stage (paper)
-        eps = max(cfg.eps_start * cfg.eps_decay ** stage_iteration, cfg.eps_end)
+            batch = []
+            for i in range(n):
+                primitive, pix, _ = choices[i]
+                if args.save_visualizations and i == 0:
+                    place = infos[i]['place_pix']
+                    vis = trainer.get_prediction_vis((push_q if primitive == 'push' else pick_q)[i], obs[i]['colormap'],
+                                                     pix, pix if place is None else [place[1], place[0]])
+                    cv2.imwrite(os.path.join(log_dir, 'visualization.%s.png' % primitive), vis)
+                if args.is_testing:
+                    continue
+                t = Transition(obs[i], pix, next_obs[i], rewards[i], primitive, terminated[i])
+                trainer.buffer.push(*t)
+                batch.append(t)
+                if infos[i]['relabel']:  # hindsight experience replay (paper Fig. 8)
+                    obs_r, next_r = infos[i]['relabel_pair']
+                    trainer.buffer.push(obs_r, pix, next_r, cfg.reward_goal, primitive, True)
 
-        push_q, pick_q = trainer.forward(obs['colormap'], obs['depthmap'])
-        primitive, pix, value = select_action(trainer, env, obs, push_q, pick_q, eps, args.is_testing, cfg)
-        next_obs, reward, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix})
+            if batch:
+                trainer.train_step(batch)  # short-term memory: learn from the newest transitions at once
+                for _ in range(args.updates_per_step * n):
+                    loss = trainer.optimize()
+                    if loss is not None and trainer.opt_steps % 10 == 0:
+                        logger.scalar('train/loss', loss, trainer.iteration)
+                        logger.scalar('train/q_mean', trainer.last_q, trainer.iteration)
+                        logger.scalar('train/epsilon', eps, trainer.iteration)
+                        logger.scalar('train/lr', trainer.optimizer.param_groups[0]['lr'], trainer.iteration)
+                        logger.scalar('train/buffer', len(trainer.buffer), trainer.iteration)
+                        print('Iteration %d  loss %.4f  eps %.3f' % (trainer.iteration, loss, eps))
+            trainer.iteration += n
+            stage_iteration += n
+            if not args.is_testing and trainer.iteration // args.save_every != (trainer.iteration - n) // args.save_every:
+                trainer.save(os.path.join(log_dir, 'models', 'snapshot-%07d.pth' % trainer.iteration),
+                             os.path.join(log_dir, 'models', 'target-%07d.pth' % trainer.iteration))
 
-        if args.save_visualizations:
-            vis = trainer.get_prediction_vis(push_q if primitive == 'push' else pick_q, obs['colormap'], pix,
-                                             pix if info['place_pix'] is None else [info['place_pix'][1], info['place_pix'][0]])
-            cv2.imwrite(os.path.join(log_dir, 'visualization.%s.png' % primitive), vis)
-
-        if not args.is_testing:
-            transition = Transition(obs, pix, next_obs, reward, primitive, terminated)
-            trainer.buffer.push(*transition)
-            trainer.train_step([transition])  # short-term memory: learn from the newest transition at once
-            if info['relabel']:
-                obs_r, next_r = env.relabel(obs, next_obs)
-                print('Relabeling')
-                trainer.buffer.push(obs_r, pix, next_r, cfg.reward_goal, primitive, True)
-            loss = trainer.optimize()
-            if loss is not None:
-                print('Iteration %d  loss %.4f  eps %.3f' % (trainer.iteration, loss, eps))
-            if trainer.iteration % args.save_every == 0:
-                trainer.save(os.path.join(log_dir, 'models', 'snapshot-%06d.pth' % trainer.iteration),
-                             os.path.join(log_dir, 'models', 'target-%06d.pth' % trainer.iteration))
-        trainer.iteration += 1
-        stage_iteration += 1
-
-        if terminated or truncated:
-            episode += 1
-            successes.append(1 if info['sorted'] else 0)
-            scores.append(info['episode_return'])
-            avg_success = sum(successes) / len(successes)
-            print('Episode %d: return %.0f, success %s, avg success %.2f, avg return %.1f'
-                  % (episode, info['episode_return'], info['sorted'], avg_success, sum(scores) / len(scores)))
-            writer.writerow([episode, trainer.iteration, num_obj, info['episode_return'], info['actions'],
-                             int(info['sorted']), round(eps, 4)])
-            csv_file.flush()
-            if (not args.is_testing and len(successes) == successes.maxlen and avg_success > cfg.success_threshold
-                    and num_obj < cfg.max_objects):
-                num_obj += 1
-                successes.clear()
-                scores.clear()
-                stage_iteration = 0  # restart exploration annealing for the new stage
-                print('Curriculum: now using %d objects' % num_obj)
-            obs = env.reset(num_obj)
-        else:
-            obs = next_obs
+            finished = []
+            for i in range(n):
+                if terminated[i] or truncated[i]:
+                    finished.append(i)
+                    episode += 1
+                    info = infos[i]
+                    successes.append(1 if info['sorted'] else 0)
+                    scores.append(info['episode_return'])
+                    avg_success = sum(successes) / len(successes)
+                    print('Episode %d: return %.0f, success %s, avg success %.2f, avg return %.1f'
+                          % (episode, info['episode_return'], info['sorted'], avg_success, sum(scores) / len(scores)))
+                    logger.episode(episode, trainer.iteration, num_obj, info['episode_return'], info['actions'],
+                                   info['sorted'], eps)
+                    if (not args.is_testing and len(successes) == successes.maxlen
+                            and avg_success > cfg.success_threshold and num_obj < cfg.max_objects):
+                        num_obj += 1
+                        successes.clear()
+                        scores.clear()
+                        stage_iteration = 0  # restart exploration annealing for the new stage
+                        logger.scalar('curriculum/num_obj', num_obj, trainer.iteration)
+                        print('Curriculum: now using %d objects' % num_obj)
+            obs = list(next_obs)
+            if args.max_iterations and trainer.iteration >= args.max_iterations:
+                break
+            if finished:
+                for i, o in zip(finished, venv.reset(num_obj, indices=finished)):
+                    obs[i] = o
+    finally:
+        venv.close()
+        logger.close()
 
 
 if __name__ == '__main__':
@@ -122,9 +124,16 @@ if __name__ == '__main__':
     parser.add_argument('--snapshot_target', default=None, help='target network weights (defaults to --snapshot)')
     parser.add_argument('--logging_directory', default='train')
     parser.add_argument('--save_visualizations', action='store_true', default=False)
-    parser.add_argument('--save_every', type=int, default=500, help='iterations between model snapshots')
+    parser.add_argument('--save_every', type=int, default=500, help='environment steps between model snapshots')
     parser.add_argument('--num_obj', type=int, default=1, help='initial number of objects (curriculum start)')
     parser.add_argument('--max_obj', type=int, default=8, help='maximum number of objects of the curriculum')
     parser.add_argument('--max_actions', type=int, default=40, help='maximum number of actions per episode')
-    parser.add_argument('--gui', action='store_true', default=False, help='show the PyBullet GUI')
+    parser.add_argument('--num_envs', type=int, default=1, help='parallel simulators')
+    parser.add_argument('--updates_per_step', type=int, default=1, help='gradient steps per environment step')
+    parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy',
+                        help="'paper': 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated)")
+    parser.add_argument('--randomize', action='store_true', default=False, help='domain randomisation')
+    parser.add_argument('--max_iterations', type=int, default=0, help='stop after this many environment steps (0 = run forever)')
+    parser.add_argument('--start_method', default='spawn', help='multiprocessing start method of the workers')
+    parser.add_argument('--gui', action='store_true', default=False, help='show the PyBullet GUI (first env only)')
     main(parser.parse_args())

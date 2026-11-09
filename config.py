@@ -17,6 +17,16 @@ class Config:
     buffer_size: int = 8000
     polyak_beta: float = 1e-3       # target network soft update rate
     grad_clip: float = 10.0
+    clip_q: bool = True             # clamp TD targets to the reachable range [reward_invalid/(1-gamma), reward_goal]
+    lr_decay: float = 1.0           # exponential LR decay per optimisation step (1.0 = fixed LR as in the paper)
+    amp: bool = True                # mixed precision (only used on CUDA)
+
+    # --- Prioritized experience replay (proportional) ---
+    prioritized: bool = True
+    per_alpha: float = 0.6
+    per_beta_start: float = 0.4     # annealed to 1.0 over per_beta_iters optimisation steps
+    per_beta_iters: int = 50000
+    per_eps: float = 1e-3
 
     # --- Exploration (epsilon-greedy, annealed per curriculum stage) ---
     eps_start: float = 0.8
@@ -42,3 +52,36 @@ class Config:
     @property
     def push_length_px(self) -> int:
         return int(round(self.push_length / self.pixel_size))
+
+
+@dataclass
+class SimParams:
+    """Physics / scene parameters of the PyBullet simulation.
+
+    'legacy'  reproduces the original code (0.5 x 0.35 m cabinet, very strong suction, heavy objects).
+    'paper'   uses the cabinet of the paper (40 x 60 x 27 cm) and more physical suction force and masses.
+              NOTE: not validated against the real robot; check the camera framing when you first use it.
+    """
+    name: str = 'legacy'
+    cabinet_depth: float = 0.5      # m, x extent of the workspace
+    cabinet_height: float = 0.35    # m, z extent of the workspace
+    suction_max_force: float = 1000.0   # N, max force of the constraint simulating the suction cup
+    suction_erp: float = 0.1
+    cabinet_friction: float = 0.8
+    block_mass: float = 1.0         # kg
+    cylinder_mass: float = 0.7      # kg
+
+    # domain randomisation (applied at every reset)
+    randomize: bool = False
+    friction_range: tuple = (0.3, 0.8)      # lateral friction of the objects
+    mass_scale_range: tuple = (0.7, 1.3)    # multiplicative object mass noise
+    cam_pos_jitter: float = 0.01            # m
+    cam_rot_jitter_deg: float = 1.0
+    sensor_noise: bool = False              # RGB-D noise of the simulated camera
+
+    @staticmethod
+    def preset(name, randomize=False):
+        if name == 'paper':
+            return SimParams(name='paper', cabinet_depth=0.40, cabinet_height=0.27, suction_max_force=50.0,
+                             block_mass=0.3, cylinder_mass=0.25, randomize=randomize, sensor_noise=randomize)
+        return SimParams(randomize=randomize, sensor_noise=randomize)

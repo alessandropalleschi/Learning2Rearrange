@@ -10,18 +10,9 @@ import random
 from scipy import ndimage
 from copy import deepcopy
 import cv2
+from config import SimParams
 from random import sample
-#PIXEL_SIZE = 0.00267857
 PIXEL_SIZE = 0.005
-
-# --- Physics parameters (kept in one place; defaults reproduce the previous behaviour) ---
-SUCTION_MAX_FORCE = 1000   # N, max force of the fixed constraint that simulates the suction cup
-SUCTION_ERP = 0.1          # constraint error reduction of the suction constraint
-CABINET_MASS = 0           # 0 = static walls (they used to be 100 kg bodies pinned with constraints)
-CABINET_FRICTION = 0.8     # lateral friction of the cabinet floor
-BLOCK_MASS, CYLINDER_MASS = 1.0, 0.7   # kg, heavier than the YCB objects (0.2-0.4 kg)
-MOVE_JOINTS_MAX_STEPS = 1000   # simulation-step budget of move_joints (was 0.5 s of *wall-clock* time)
-WAIT_STATIC_MAX_STEPS = 480    # simulation-step budget of wait_static (was 1 s of wall-clock time)
 
 BOUNDS = np.float32([[-0.25, 0.25], [-0.3, 0.3], [0.4, 0.75]])  # (X, Y, Z)
 image_size = (480,640)
@@ -32,20 +23,8 @@ config_camera = {'position': (0.52, 0, BOUNDS[2][0]+0.38),
                   'zrange': (0.01, 10.0),
                   'noise': False}
 
-# config_camera = {'position': (BOUNDS[0][0]-0.27, 0, BOUNDS[2][0]+0.35),
-#                   'rotation': (np.pi / 4, np.pi, -np.pi / 2-np.pi),
-#                   'intrinsics': (450., 0, 320., 0, 450., 240., 0, 0, 1),
-#                   'image_size': (480, 640),
-#                   'zrange': (0.01, 10.0),
-#                   'noise': False}
 
 
-# config_camera = {'position': (0.4+.448/2, 0, BOUNDS[2][1]+0.45),
-#                   'rotation': (0, np.pi, -np.pi / 2-np.pi),
-#                   'intrinsics': (462.14, 0, 240.,0, 462.14, 240.,0, 0, 1),
-#                   'image_size': (480, 480),
-#                   'zrange': (0.01, 10.0),
-#                   'noise': False}
 
 PICK_TARGETS = {
   'blue block': None,
@@ -100,43 +79,9 @@ DIMENSIONS = {
   'gray':   (186/255, 176/255, 172/255, 255/255),
 }
 
-# PLACE_TARGETS = {
-#   'blue': [ BOUNDS[1][0], BOUNDS[1][0]+(BOUNDS[1][1]-BOUNDS[1][0])/3 ],
-#   'red block': None,
-#   'green': [ BOUNDS[1][0]+(BOUNDS[1][1]-BOUNDS[1][0])/3, BOUNDS[1][0]+2*(BOUNDS[1][1]-BOUNDS[1][0])/3 ],
-#   'orange block': None,
-#   'yellow': [BOUNDS[1][0]+2*(BOUNDS[1][1]-BOUNDS[1][0])/3, BOUNDS[1][1] ],
-#   'purple block': None,
-#   'pink block': None,
-#   'cyan block': None,
-#   'brown block': None,
-#   'gray block': None,
-# }
 
-# PLACE_TARGETS = {
-#   'blue': [ BOUNDS[1][0], BOUNDS[1][0]+0.1 ],
-#   'red block': None,
-#   'green': [ (BOUNDS[1][1]-0.1), BOUNDS[1][1] ],
-#   'orange block': None,
-#   'yellow': [ (BOUNDS[1][1]-0.22), (BOUNDS[1][1]-0.12) ],
-#   'purple block': None,
-#   'pink block': None,
-#   'cyan block': None,
-#   'brown block': None,
-#   'gray block': None,
-# }
 
-# PLACE_TARGETS_ORG = {
-#   'blue': [ BOUNDS[1][0], BOUNDS[1][0]+0.1 ],
-#   'green': [ (BOUNDS[1][1]-0.1), BOUNDS[1][1] ],
-#   'yellow': [ (BOUNDS[1][1]-0.22), (BOUNDS[1][1]-0.12) ],
-# }
 
-# PLACE_TARGETS = {
-#   'blue': [ BOUNDS[1][0]+0.05, BOUNDS[1][0]+0.17 ],
-#   'yellow': [ (BOUNDS[1][1]-0.17), BOUNDS[1][1]-0.05 ],
-#   'green': [ -0.06, 0.06 ],
-# }
 
 PLACE_TARGETS = {
   'blue': [ BOUNDS[1][0]+0.1, BOUNDS[1][0]+0.15 ],
@@ -150,11 +95,6 @@ PLACE_TARGETS_COLORS = {
   'yellow': [ 246,190,0 ],
 }
 
-# PLACE_TARGETS_COLORS = {
-#   'blue': [ 79,  121, 167 ],
-#   'green': [ 88,  169,  79],
-#   'yellow': [ 236, 201,  72 ],
-# }
 
 
 
@@ -164,7 +104,6 @@ PLACE_TARGETS_LIST_2 = [ [ BOUNDS[1][0]+0.01, BOUNDS[1][0]+0.14 ], [ (BOUNDS[1][
 PLACE_TARGETS_LIST_3 = [ [ BOUNDS[1][0]+0.02, BOUNDS[1][0]+0.16 ], [ (BOUNDS[1][1]-0.16), BOUNDS[1][1]-0.02 ], [ -0.065, 0.037 ]]
 
 PLACE_CHOICES = [PLACE_TARGETS_LIST]
-# PLACE_CHOICES = [PLACE_TARGETS_LIST]
 
 COLORS_CLASS = {
   '1':   (78/255,  121/255, 167/255, 255/255),
@@ -187,14 +126,26 @@ colors = ['blue','green', 'yellow']
 objects  = ['GelatinBox', 'CrackerBox', 'PottedMeatCan', 'MasterChefCan', 'SugarBox', 'ChipsCan', 'MustardBottle']
 objects  = ['PottedMeatCan', 'CrackerBox', 'ChipsCan', 'MustardBottle']
 
+def configure_cabinet(params):
+    """Resize the workspace (module-level BOUNDS is updated in place; call in every process that uses it)."""
+    BOUNDS[0] = (-params.cabinet_depth / 2, params.cabinet_depth / 2)
+    BOUNDS[2, 1] = BOUNDS[2, 0] + params.cabinet_height
+
+
 class Environment:
-    def __init__(self, gui=False, time_step=1 / 480, num_obj=[9]):
+    MOVE_JOINTS_MAX_STEPS = 1000   # simulation-step budget of move_joints
+    WAIT_STATIC_MAX_STEPS = 480    # simulation-step budget of wait_static (1 s of simulated time)
+
+    def __init__(self, gui=False, time_step=1 / 480, num_obj=[9], params=None):
         """Creates environment with PyBullet.
 
         Args:
         gui: show environment with PyBullet's built-in display viewer
         time_step: PyBullet physics simulation step speed. Default is 1 / 240.
         """
+        self.params = params or SimParams()
+        configure_cabinet(self.params)
+        self.camera_config = dict(config_camera)
         self.num_obj = num_obj
         self.time_step = time_step
         self.gui = gui
@@ -281,7 +232,6 @@ class Environment:
       
         roll = [abs(p.getEulerFromQuaternion(value[1])[0]) for key, value in scene_info.items()]
         pitch = [abs(p.getEulerFromQuaternion(value[1])[1]) for key, value in scene_info.items()]
-        # print(pitch)
         not_fall = max(roll)<1.2 and max(pitch)<1.2
         # NOTE: an object is invalid if it fell below the cabinet floor or toppled over
         # (the y-bounds check that used to be computed here was never used in the result).
@@ -317,13 +267,10 @@ class Environment:
       # TODO(andyzeng): check deformables logic.
       # del def_ids
       dist = 1000.0
-      # p.stepSimulation(self.client_id)
       body_pose = p.getLinkState(self.ur5e, self.ur5e_ee_id)
       if not self.activated:
         points = p.getContactPoints(bodyA=self.ur5e, linkIndexA=self.ur5e_ee_id)
-        # points =  [point for point in points if abs(point[8]) <=0.01]
         if points:
-          # time.sleep(10)
           # Handle contact between suction with a rigid object.
           body_pose = p.getLinkState(self.ur5e, self.ur5e_ee_id)
           obj_id = -1
@@ -347,14 +294,11 @@ class Environment:
           
           if obj_id in self.obj_ids['rigid']:
             body_pose = p.getLinkState(self.ur5e, self.ur5e_ee_id)
-            # print(body_pose)
             obj_pose = p.getBasePositionAndOrientation(obj_id)
             world_to_body = p.invertTransform(body_pose[0], body_pose[1])
             obj_to_body = p.multiplyTransforms(world_to_body[0],
                                               world_to_body[1],
                                               obj_pose[0], obj_pose[1])
-                # time.sleep(2)
-            # print(obj_to_body)
             if body_pose[0][0]>contact_pos[0]:
               offset = contact_pos[0]-body_pose[0][0]
             else:
@@ -373,7 +317,7 @@ class Environment:
             childFrameOrientation=((0, 0, 0)),)
             self.offset_y = obj_to_body[0][1]
             self.offset_x = -pos_constrs[0]
-            p.changeConstraint(self.contact_constraint,gearRatio=-1, erp=SUCTION_ERP,maxForce=SUCTION_MAX_FORCE)
+            p.changeConstraint(self.contact_constraint,gearRatio=-1, erp=self.params.suction_erp,maxForce=self.params.suction_max_force)
             self.activated = True
         else:
              closest = []
@@ -389,17 +333,11 @@ class Environment:
                  obj_to_body = p.multiplyTransforms(world_to_body[0],
                                                  world_to_body[1],
                                                  obj_pose[0], obj_pose[1])
-        #         # print(obj_to_body[0])
-        #         # time.sleep(2)
                  contact_pos = close[5]
                  if(np.abs(contact_pos[1]-body_pose[0][1])<0.01):
                     closest = close[2] if np.linalg.norm(np.asarray(obj_to_body[0])) < min_dist and obj_pose[0][0]>contact_pos[0] else closest
                     points = points_2 if np.linalg.norm(np.asarray(obj_to_body[0])) < min_dist and obj_pose[0][0]>contact_pos[0] else points
                     min_dist = np.linalg.norm(np.asarray(obj_to_body[0])) if np.linalg.norm(np.asarray(obj_to_body[0])) < min_dist and obj_pose[0][0]>contact_pos[0] else min_dist
-        #         # if (np.linalg.norm(obj_to_body)<dist):
-        #         # obj_id = obj_id_i
-        #         # contact_link = contact_link_i
-        #         # dist = np.linalg.norm(obj_to_body)
 
              if points:
 
@@ -413,10 +351,6 @@ class Environment:
                   obj_to_body = p.multiplyTransforms(world_to_body[0],
                                                     world_to_body[1],
                                                     obj_pose[0], obj_pose[1])
-        #         # print(body_pose)
-        #         # # print(contact_link)
-        #         # time.sleep(2)
-        #         # offset = 0 if obj_to_body[0][0] > 0 else obj_to_body[0][0]-0.015
                 
                 self.contact_constraint = p.createConstraint(
                     parentBodyUniqueId=self.ur5e,
@@ -427,17 +361,14 @@ class Environment:
                     jointAxis=(0, 0, 0),
                 parentFramePosition=(obj_to_body[0]),
             parentFrameOrientation=((obj_to_body[1])),
-                # childFramePosition=(offset, 0, 0),
                  # childFrameOrientation=((0, 0, 0)),)
             childFramePosition=(0, 0, 0),
             childFrameOrientation=((0,0,0)),)
-                p.changeConstraint(self.contact_constraint,gearRatio=-1, erp=SUCTION_ERP,maxForce=SUCTION_MAX_FORCE)
+                p.changeConstraint(self.contact_constraint,gearRatio=-1, erp=self.params.suction_erp,maxForce=self.params.suction_max_force)
                 self.offset_x = -obj_to_body[0][0]
 
                 self.activated = True              
                 self.offset_y = obj_to_body[0][1]
-        #         # parentFrameOrientation=((0,-math.sqrt(2)/2,0,math.sqrt(2)/2)),
-        #         # childFramePosition=(-obj_to_body[0][0], obj_to_body[0][1], 0),
 
 
     def get_target_px(self): 
@@ -464,10 +395,8 @@ class Environment:
        Y_down = []
        Color = []
        for key in self.place_targets:
-        # print(key)
         BOUND_TARG_UP = self.place_targets[key][1]
         BOUND_TARG_DOWN = self.place_targets[key][0]
-        # print(BOUND_TARG_UP)
         Yup = int(np.round((BOUND_TARG_UP-BOUNDS[1,0]) / PIXEL_SIZE))
         Ydown = int(np.round((BOUND_TARG_DOWN-BOUNDS[1,0])  / PIXEL_SIZE))
         color = PLACE_TARGETS_COLORS[key]
@@ -513,25 +442,12 @@ class Environment:
         relabeled.append(image)
       return relabeled
 
-    # def add_target_pixels_center(self):
-    #    C = []
-    #    for key in PLACE_TARGETS:
-    #     print(key)
-    #     BOUND_TARG_UP = PLACE_TARGETS[key][1]
-    #     BOUND_TARG_DOWN = PLACE_TARGETS[key][0]
-    #     print(BOUND_TARG_UP)
-    #     Yup = int(np.round((BOUND_TARG_UP-BOUNDS[1,0]) / PIXEL_SIZE))
-    #     Ydown = int(np.round((BOUND_TARG_DOWN-BOUNDS[1,0])  / PIXEL_SIZE))
-    #     Y_center = (Yup-Ydown)//2
-    #     C.append(Y_center)
-    #    return C
 
     def check_sorted(self):
         for _ in range(1):
             p.stepSimulation(self.client_id)
 
         info_scene = self.info
-        # grasped = self.check_grasped()
         sorted = 0
         for id in info_scene:
             Y_pos = info_scene[id][0][1]
@@ -546,12 +462,9 @@ class Environment:
             p.stepSimulation(self.client_id)
         d = 0
         info_scene = self.info
-        # grasped = self.check_grasped()
         sorted = 0
         d = 0
         for id in info_scene:
-            # if(id in grasped):
-            #     continue
             Y_pos = info_scene[id][0][1]
             Y_pos = min(Y_pos,BOUNDS[1][1])
             Y_pos = max(Y_pos,BOUNDS[1][0])
@@ -565,11 +478,8 @@ class Environment:
 
     def check_sort_status(self):
         info_scene = self.info
-        # grasped = self.check_grasped()
         sorted = 0
         for id in info_scene:
-            # if(id in grasped):
-            #     continue
             Y_pos = info_scene[id][0][1]
             Y_pos = min(Y_pos,BOUNDS[1][1])
             Y_pos = max(Y_pos,BOUNDS[1][0])
@@ -581,13 +491,11 @@ class Environment:
 
     def add_objects(self):
         """List of (fixed, rigid) objects in env."""
-        # self.config = np.random.choice(config)
-        NO = np.random.choice(self.num_obj)
+        NO = min(int(np.random.choice(self.num_obj)), 15)  # at most 5 objects per class, 3 classes
         obj = sample(objects,3)
         obj = [x+' '+y for x,y in zip(colors,obj)]
         print(obj)
 
-        # print(NO)
         obj_names = []
         yellow = 0
         green = 0
@@ -603,7 +511,6 @@ class Environment:
           elif col.split(' ')[0] == 'green' and green < 5:
             green +=1
             obj_names.append(col)
-          # print(col.split(' ')[0])
         self.randomize()
         self.obj_name_to_id = {}
         self.obj_id_to_color = {}
@@ -611,7 +518,6 @@ class Environment:
         self.obj_id_to_class = {}
         self.obj_id_to_target = {}
         self.body_ids = []
-        # obj_names = list(self.config['objects'])
         obj_xyz = np.zeros((0, 2))
         ind = 0
         yy = [-0.02, 0.02]
@@ -619,14 +525,15 @@ class Environment:
           if (1):
             BOUND_TARG = BOUNDS[1, :]
  
-            # Get random position 15cm+ from other objects.
+            # Random position at least min_dist from the other objects (spacing shrinks if the cabinet is too full).
+            min_dist, attempts = 0.1, 0
             while True:
+              attempts += 1
+              if attempts % 100 == 0:
+                min_dist *= 0.8
               rand_x = np.random.uniform(BOUNDS[0, 0] +0.05, BOUNDS[0, 1] - 0.1)
               rand_y = np.random.uniform(BOUNDS[1, 0] + 0.02, BOUNDS[1,1] - 0.02)
-              # rand_y = np.random.uniform(BOUNDS[1, 0] + 0.08, PLACE_TARGETS[self.obj_id_to_name[id].split(' ')[0]][1] - 0.08)
 
-            #   rand_x = BOUNDS[0, 0] + 0.1 + yy[ind]
-            #   rand_y = yy[ind]
 
               rand_xyz = np.float32([rand_x, rand_y, BOUNDS[2][0]+0.0]).reshape(1, 3)
               rand_xy = np.float32([rand_x, rand_y]).reshape(1, 2)
@@ -635,21 +542,17 @@ class Environment:
                 break
               else:
                 nn_dist = np.min(np.linalg.norm(obj_xyz - rand_xy, axis=1)).squeeze()
-                if nn_dist >0.1:
+                if nn_dist > min_dist:
                   obj_xyz = np.concatenate((obj_xyz, rand_xy), axis=0)
                   break
 
             object_color = deepcopy(COLORS[obj_name.split(' ')[0]])
             object_dim = deepcopy(DIMENSIONS[obj_name.split(' ')[0]])
-            # object_dim += np.random.normal(0, 0.005, 3)
             object_dim[0] += np.random.uniform(-0.005,0.01)
             object_dim[1] += np.random.uniform(-0.005,0.01)
-            # print(object_dim[2])
 
             object_dim[2] += np.random.uniform(-0.01,0.01)
             object_dim[2] = max(object_dim[2],0.03)
-            # print(object_dim[2])
-            # object_dim[1] = min(object_dim[1],0.025)
 
             object_type = obj_name.split(' ')[1]
             object_position = rand_xyz.squeeze()
@@ -657,8 +560,7 @@ class Environment:
               object_position[2] += object_dim[2] + 0.002  # rest on the floor instead of starting half inside it
               object_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=object_dim)
               object_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=object_dim)
-              # object_id = p.loadURDF("assets/block.urdf", object_position, useFixedBase=0)
-              object_id = p.createMultiBody(BLOCK_MASS, object_shape, object_visual, basePosition=object_position)
+              object_id = p.createMultiBody(self.params.block_mass, object_shape, object_visual, basePosition=object_position)
             elif object_type == 'bowl':
               object_position[2] = 0
               object_id = p.loadURDF("assets/ycb_objects/YcbBowl/model.urdf", object_position, useFixedBase=1)
@@ -667,11 +569,14 @@ class Environment:
               object_position[2] += object_dim[2] + 0.002
               object_shape = p.createCollisionShape(p.GEOM_CYLINDER, radius=radius, height = 2*object_dim[2])
               object_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=radius, length = 2*object_dim[2])
-              object_id = p.createMultiBody(CYLINDER_MASS, object_shape, object_visual, basePosition=object_position)
+              object_id = p.createMultiBody(self.params.cylinder_mass, object_shape, object_visual, basePosition=object_position)
             else:
                 path = "assets/ycb_objects/Ycb"+object_type+"/model.urdf"
                 object_id = p.loadURDF(path, basePosition=object_position,baseOrientation=p.getQuaternionFromEuler([0,0,np.random.uniform(-3.14,3.14)]))
-            # p.changeVisualShape(object_id, -1, rgbaColor=object_color)
+            if self.params.randomize:
+                mass = p.getDynamicsInfo(object_id, -1)[0]
+                p.changeDynamics(object_id, -1, lateralFriction=np.random.uniform(*self.params.friction_range),
+                                 mass=mass * np.random.uniform(*self.params.mass_scale_range))
             self.obj_id_to_name[object_id] = obj_name
             self.obj_id_to_color[object_id] = object_color
             self.obj_id_to_class[object_id] = LABELS[self.obj_id_to_name[object_id].split(' ')[0]]
@@ -691,12 +596,9 @@ class Environment:
         """Detects a contact with a rigid object."""
         body, link = self.ur5e, self.ur5e_ee_id
         if self.activated and self.contact_constraint is not None:
-          # return False
           try:
             info = p.getConstraintInfo(self.contact_constraint)
-            # print(info)
             body, link = info[2], info[3]
-            # print(body)
           except:  # pylint: disable=bare-except
             self.contact_constraint = None
             pass
@@ -705,7 +607,6 @@ class Environment:
         points = p.getContactPoints(bodyA=body, linkIndexA=link)
         if self.activated:
           points = [point for point in points if point[2] != self.ur5e]  # ignore contacts with the robot itself
-          # print(points)
         if points:
 
           return True
@@ -726,13 +627,10 @@ class Environment:
                 obj_to_body = p.multiplyTransforms(world_to_body[0],
                                                 world_to_body[1],
                                                 obj_pose[0], obj_pose[1])
-                # print(obj_to_body[0])
-                # time.sleep(2)
                 closest = close[2] if (np.linalg.norm(np.asarray(obj_to_body[0])) < min_dist and abs(obj_to_body[0][0])>0) else closest
                 points = points_2 if (np.linalg.norm(np.asarray(obj_to_body[0])) < min_dist and abs(obj_to_body[0][0])>0) else points
                 min_dist = np.linalg.norm(np.asarray(obj_to_body[0])) if (np.linalg.norm(np.asarray(obj_to_body[0])) < min_dist and abs(obj_to_body[0][0])>0) else min_dist
 
-        # # # We know if len(points) > 0, contact is made with SOME rigid item.
             if closest:
               return True
 
@@ -741,105 +639,38 @@ class Environment:
     def wait_static(self, timeout=1):
         """Step simulator asynchronously until objects settle."""
         p.stepSimulation(self.client_id)
-        for _ in range(WAIT_STATIC_MAX_STEPS):  # simulation steps, not wall-clock => machine independent
+        for _ in range(self.WAIT_STATIC_MAX_STEPS):  # simulation steps, not wall-clock => machine independent
             if self.is_static:
                 return True
             p.stepSimulation(self.client_id)
-        #print(f"Warning: move_joints exceeded {timeout} second timeout. Skipping.")
         return False
-    # def randomize(self):
-    #     global PLACE_TARGETS
-    #     PLACE_TARGETS = PLACE_TARGETS_ORG
-    #     # print(PLACE_TARGETS)
-    #     for key in PLACE_TARGETS:
-    #       # print(key)
-    #       while True:
-    #         k = PLACE_TARGETS[key][1]
-    #         kd = PLACE_TARGETS[key][0]
-    #         # print(k)
-    #         k = min(max(k+np.random.normal(0,0.09),BOUNDS[1,0]),BOUNDS[1,1])
-    #         # print(k)
-    #         size = np.random.uniform(0.1,0.15)
-    #         kd = max(k-size,BOUNDS[1,0])
-    #         if k-kd == size:
-    #          print('Here')
-    #          PLACE_TARGETS[key][1] = k
-    #          PLACE_TARGETS[key][0] = kd
-    #          break
-    #     return PLACE_TARGETS    
 
-    # def randomize(self):
-    #     global PLACE_TARGETS
-    #     object_name = list(self.config['objects'])
-    #     num_class = len(list(np.unique(np.array(object_name))))
-    #     PLACE_SELECT = random.sample(PLACE_TARGETS_LIST,num_class)
 
-    #     PLACE_TARGETS = PLACE_TARGETS_ORG
-    #     # print(PLACE_TARGETS)
-    #     n_obj = 0
-    #     for obj in list(np.unique(np.array(object_name))):
-    #         key = obj.split(' ')[0]
-    #         PLACE_TARGETS[key][0] = PLACE_SELECT[n_obj][0]
-    #         PLACE_TARGETS[key][1] = PLACE_SELECT[n_obj][1]
-    #         n_obj+=1
-    #       # print(key)
-    #       # while True:
-    #       #   k = PLACE_TARGETS[key][1]
-    #       #   kd = PLACE_TARGETS[key][0]
-    #       #   # print(k)
-    #       #   k = min(max(k+np.random.normal(0,0.09),BOUNDS[1,0]),BOUNDS[1,1])
-    #       #   # print(k)
-    #       #   size = np.random.uniform(0.1,0.15)
-    #       #   kd = max(k-size,BOUNDS[1,0])
-    #       #   if k-kd == size:
-    #       #    print('Here')
-    #       #    PLACE_TARGETS[key][1] = k
-    #       #    PLACE_TARGETS[key][0] = kd
-    #       #    break
-    #     return PLACE_TARGETS  
 
 
     def randomize(self):
-        # object_name = list(self.config['objects'])
-        # num_class = len(list(np.unique(np.array(object_name))))
         rand_int = np.random.randint(0,len(PLACE_CHOICES))
         PLACE_TARGETS_RAND = PLACE_CHOICES[rand_int]
         PLACE_SELECT = random.sample(PLACE_TARGETS_RAND,3)
 
         self.place_targets = deepcopy(PLACE_TARGETS_ORG)
-        # print(PLACE_TARGETS)
         n_obj = 0
         for key in self.place_targets:
             self.place_targets[key][0] = PLACE_SELECT[n_obj][0]
             self.place_targets[key][1] = PLACE_SELECT[n_obj][1]
             n_obj+=1
-          # print(key)
-          # while True:
-          #   k = PLACE_TARGETS[key][1]
-          #   kd = PLACE_TARGETS[key][0]
-          #   # print(k)
-          #   k = min(max(k+np.random.normal(0,0.09),BOUNDS[1,0]),BOUNDS[1,1])
-          #   # print(k)
-          #   size = np.random.uniform(0.1,0.15)
-          #   kd = max(k-size,BOUNDS[1,0])
-          #   if k-kd == size:
-          #    print('Here')
-          #    PLACE_TARGETS[key][1] = k
-          #    PLACE_TARGETS[key][0] = kd
-          #    break
         return self.place_targets  
 
-        # print(PLACE_TARGETS)
 
     def reset(self):
         self.obj_ids = {"fixed": [], "rigid": []}
         self.use_gripper = False
+        self._randomize_camera()
         p.resetSimulation()
         p.setTimeStep(self.time_step)  # resetSimulation restores the default 1/240 s
         p.setGravity(0, 0, -9.81)
         # Temporarily disable rendering to load scene faster.
         p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)
-        # self.ur5e_ghost = p.loadURDF("assets/ur5e/ur5e.urdf", basePosition=(0, 0, -10), useFixedBase=True)
 
         # Load UR5e
         self.ur5e = p.loadURDF("assets/ur5e/ur5e.urdf", basePosition=(0.6, 0, 0), useFixedBase=True)
@@ -848,7 +679,6 @@ class Environment:
             info = p.getJointInfo(self.ur5e, i)
             joint_id = info[0]
             joint_name = info[1].decode("utf-8")
-            # print(joint_name)
             joint_type = info[2]
             if joint_name == "fixFrame":
                 self.ur5e_ee_id = joint_id
@@ -863,34 +693,18 @@ class Environment:
         p.enableJointForceTorqueSensor(self.ur5e, 11, 1)
         p.enableJointForceTorqueSensor(self.ur5e, 10, 1)
 
-        # if use_gripper:
-        #     self.setup_gripper()
 
         # Move robot to home joint configuration.
         success = self.go_home()
-        # if self.use_gripper:
-        #     self.close_gripper()
-        #     self.open_gripper()
 
         if not success:
             print("Simulation is wrong!")
-            # exit()
         self.plane = p.loadURDF("plane.urdf", basePosition=(0, 0, -0.00), useFixedBase=True)
-        # p.changeDynamics(
-        #     self.plane,
-        #     -1,
-        #     lateralFriction=1.1,
-        #     restitution=0.5,
-        #     linearDamping=0.5,
-        #     angularDamping=0.5,
-        # )
 
         self.createCabinet()
 
         self.add_objects()
-        # self.add_target_regions()
         self.wait_static()
-        # print(self.check_sort_status())
         # Re-enable rendering.
         p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
         return self.check_sim()
@@ -923,8 +737,19 @@ class Environment:
 
         # Get RGB-D camera image observations.
         obs = self.get_observation()
-        #reward = self.get_reward(act,success)
         return obs, success
+
+    def _randomize_camera(self):
+        """Domain randomisation of the camera pose and sensor noise (no-op unless params.randomize)."""
+        cfg = dict(config_camera)
+        if self.params.randomize:
+            cfg['position'] = tuple(np.asarray(config_camera['position']) +
+                                    np.random.uniform(-self.params.cam_pos_jitter, self.params.cam_pos_jitter, 3))
+            cfg['rotation'] = tuple(np.asarray(config_camera['rotation']) +
+                                    np.deg2rad(np.random.uniform(-self.params.cam_rot_jitter_deg,
+                                                                 self.params.cam_rot_jitter_deg, 3)))
+        cfg['noise'] = bool(self.params.sensor_noise)
+        self.camera_config = cfg
 
     def seed(self, seed=None):
         self._random = np.random.RandomState(seed)
@@ -934,7 +759,7 @@ class Environment:
       observation = {}
 
       # Render current image.
-      color, depth, segm, position, orientation, intrinsics = self.render_camera(config_camera)
+      color, depth, segm, position, orientation, intrinsics = self.render_camera(self.camera_config)
       observation['color'] = color.copy()
       observation['depth'] = depth.copy()
       # Get heightmaps and colormaps.
@@ -974,20 +799,6 @@ class Environment:
           
           segm[segm==sid] = LABELS[self.obj_id_to_name[sid].split(' ')[0]]
           sgms_binary[sgms_binary==sid] = 1
-      # print(segm_ids)
-      # mask_indices = np.in1d(segm_ids, self.body_ids)
-      # non_mask_indices = np.logical_not(mask_indices)
-      # # Set non-mask pixels to white
-      # color[np.isin(segm, segm_ids[non_mask_indices])] = [255, 255, 255]
-      # segm_plane = color.copy()
-      # segm_plane[np.isin(segm, segm_ids[non_mask_indices])] = [255, 255, 255]
-      # # Set mask pixels to class color
-      # mask_colors = [np.multiply(COLORS[self.obj_id_to_name[sid].split(' ')[0]][:3], 255) for sid in segm_ids[mask_indices]]
-      # color[np.isin(segm, segm_ids[mask_indices])] = mask_colors
-      # # Set mask pixels to class label
-      # mask_labels = [LABELS[self.obj_id_to_name[sid].split(' ')[0]] for sid in segm_ids[mask_indices]]
-      # segm[np.isin(segm, segm_ids[mask_indices])] = mask_labels
-      # sgms_binary = np.isin(segm, segm_ids[mask_indices]).astype(int)
       observation['mask'] = segm
       
       
@@ -1000,8 +811,6 @@ class Environment:
       points = self.transform_pointcloud(points, transform)
       heightmap, colormap = self.get_heightmap(points, color, segm_plane, BOUNDS, PIXEL_SIZE)
 
-      # points_mask = self.get_pointcloud(segm, intrinsics)
-      # points_mask = self.transform_pointcloud(points_mask, transfointsrm)
       Y_down, Y_up, _ = self.add_target_pixels()
 
       heightmap_on_target = np.zeros_like(heightmap)
@@ -1042,20 +851,13 @@ class Environment:
           class_mask_map[object_pixels] = obj_class
           if obj_on_target:
             heightmap_on_target[object_pixels] = -1
-          # heightmap_mask = np.expand_dims(heightmap_mask, axis=0)
-          # if masks_heightmap is None:
-          #   masks_heightmap = heightmap_mask
-          # else:
-          #   masks_heightmap = np.concatenate((masks_heightmap,heightmap_mask),axis=0)
 
           id_mask +=1
   
-    #   heightmap_mask_binary = self.get_heightmap_mask(points, sgms_binary, BOUNDS, PIXEL_SIZE)
       
       free_space = np.ones_like(heightmap)
       # free_space[Y_down[0]:Y_up[0],:] = 1+ 
       # free_space[Y_down[1]:Y_up[1],:] = 
-      # free_space[Y_down[2]:Y_up[2],:] = 1
 
       object_pixels = np.where((class_mask_map!=0) | ((colormap[:,:,0]==105) & (colormap[:,:,1]==105) & (colormap[:,:,2]==105)))
       binary_mask_map_original = deepcopy(binary_mask_map)
@@ -1063,17 +865,9 @@ class Environment:
       object_pixels = np.where( (binary_mask_map==1) & (heightmap_on_target!=-1))
       binary_mask_map[object_pixels[0],:] = 1
       object_pixels = np.where( (binary_mask_map==1) & (heightmap_on_target==-1))
-      # print(len(object_pixels[0]))
-      # if len(object_pixels[0])>0:
-      #   binary_mask_map[object_pixels[0],object_pixels[1][-1]:80] = 1
 
-      # (rows, cols)  =  binary_mask_map.shape[:2]
-      # res_L = cv2.warpAffine(binary_mask_map, M_L, (cols,rows))
       res_R = ndimage.interpolation.shift(binary_mask_map, [-2,0], order=0)
-      # res_R = np.pad(binary_mask_map,((10,0),(0,0)), mode='constant')[10:,:]      
-      # # print(binary_mask_map.shape)
       binary_mask_map = cv2.bitwise_or(binary_mask_map, res_R)
-      # res_L = np.pad(binary_mask_map,((0,10),(0,0)), mode='constant')[:-10,:]      
       res_L = ndimage.interpolation.shift(binary_mask_map, [2,0], order=0)
 
       binary_mask_map = cv2.bitwise_or(binary_mask_map, res_L)
@@ -1085,11 +879,7 @@ class Environment:
         binary_mask_map = cv2.bitwise_or(binary_mask_map, res_R)
 
 
-      # res_R = ndimage.interpolation.shift(binary_mask_map, [0,-8], order=0)
-      # binary_mask_map = cv2.bitwise_or(binary_mask_map, res_R)
 
-      # res_R = ndimage.interpolation.shift(binary_mask_map, [0,80], order=0)
-      # binary_mask_map = cv2.bitwise_or(binary_mask_map, res_R)
 
 
       if np.all(binary_mask_map==1):
@@ -1187,7 +977,6 @@ class Environment:
         zbuffer = np.array(depth).reshape(depth_image_size)
         depth = zfar + znear - (2.0 * zbuffer - 1.0) * (zfar - znear)
         depth = (2.0 * znear * zfar) / depth
-        # depth = zfar * znear / (zfar - (zfar - znear) * depth)
         if config_camera["noise"]:
             depth += np.random.normal(0, 0.003, depth_image_size)
 
@@ -1211,13 +1000,8 @@ class Environment:
 
     def move_joints(self, target_joints, speed=0.02, timeout=0.5):
         """Move UR5e to target joint configuration."""
-        for _ in range(MOVE_JOINTS_MAX_STEPS):  # simulation steps, not wall-clock
+        for _ in range(self.MOVE_JOINTS_MAX_STEPS):  # simulation steps, not wall-clock
             current_joints = np.array([p.getJointState(self.ur5e, i)[0] for i in self.ur5e_joints])
-            # print(current_joints)
-            # pos, _ = self.get_link_pose(self.ee, self.ee_tip_id)
-            # if pos[2] < 0.005:
-            #     print(f"Warning: move_joints tip height is {pos[2]}. Skipping.")
-            #     return False
             diff_joints = target_joints - current_joints
             diff_joints[-1] = 0
             if all(np.abs(diff_joints) < 1e-3):
@@ -1240,13 +1024,11 @@ class Environment:
             )
             p.stepSimulation(self.client_id)
 
-        #print(f"Warning: move_joints exceeded {timeout} second timeout. Skipping.")
         return False
 
     def move_ee_pose(self, pose, speed=0.01):
         """Move UR5e to target end effector pose."""
         target_joints, success = self.solve_ik(pose, speed=speed)
-        # self.move_joints(target_joints,speed)
         return success     
 
     def accurateCalculateInverseKinematics(self, pose, threshold=0.002, maxIter=5, speed = 0.03):
@@ -1257,12 +1039,9 @@ class Environment:
             endEffectorLinkIndex=self.ur5e_ee_id,
             targetPosition=pose[0],
              targetOrientation=pose[1]) #lowerLimits=[-6.283, -6.283, -3.141, -6.283, -6.283, -6.283, -10000]*3,
-            # upperLimits=[6.283, 6.283, 3.141, 6.283, 6.283, 6.283, 10000]*3,
             # jointRanges=[12.566, 12.566, 6.282, 12.566, 12.566, 12.566, 20000]*3)
-        # print("Start Moving")
 
         success = self.move_joints(jointPoses,speed)
-        # print("Finish Moving")
 
         if(not success):
           return jointPoses, False
@@ -1280,23 +1059,9 @@ class Environment:
     
     def solve_ik(self, pose, speed):
         """Calculate joint configuration with inverse kinematics."""
-        # joints = p.calculateInverseKinematics(
-            # bodyUniqueId=self.ur5e,
-            # endEffectorLinkIndex=self.ur5e_ee_id,
-            # targetPosition=pose[0],
-            # targetOrientation=pose[1],
-        #     maxNumIterations=1000,
-        #     residualThreshold=1e-5,
-        # )
         joints, success = self.accurateCalculateInverseKinematics(pose, speed=speed)
-            #         lowerLimits=3*[-6.283, -6.283, -3.141, -6.283, -6.283, -6.283],
-            # upperLimits=3*[6.283, 6.283, 3.141, 6.283, 6.283, 6.283],
-            # jointRanges=3*[12.566, 12.566, 6.282, 12.566, 12.566, 12.566],
-        # print("Finish IK")
 
         joints = np.array(joints, dtype=np.float32)
-        # print(joints)
-        # joints[2:] = (joints[2:] + np.pi) % (2 * np.pi) - np.pi
         return joints, success
 
     def straight_move(self, pose0, pose1, rot, speed=0.01, max_force=300, detect_force=False, detect_contact=False):
@@ -1308,7 +1073,6 @@ class Environment:
             return True
         vec = vec / length
         n_push = np.int32(np.floor(np.linalg.norm(pose1 - pose0) / step_distance))  # every 1 cm
-        # n_push = 100
 
         success = True
         for n in range(n_push):
@@ -1332,19 +1096,12 @@ class Environment:
                 if force > max_force or force2> max_force or force3 > max_force:
                     target = pose0 +(n-1)* vec * step_distance
                     self.move_ee_pose((target, rot), speed)
-                    # target = target - vec * step_distance
-                    # self.move_ee_pose((target, rot), speed)
-                    # target = target - vec * step_distance
-                    # self.move_ee_pose((target, rot), speed)
-                    # time.sleep(10)
                     print(f"Force is {force}, exceed the max force {max_force}")
                     return False
             if detect_contact:
-              # print(self.detect_contact())
 
               if(self.detect_contact()):
                 if np.linalg.norm(np.float32(pose1)-np.float32(target))<0.01:
-                  # self.activate()
                   return True
                 else:
                   pass
@@ -1370,10 +1127,6 @@ class Environment:
         posxy = np.asarray(pose0).copy()
         pos0[0] = posxy[0]
         pos0[1] = posxy[1]
-        # pos0[2] = max(pos0[2] - 0.03, )
-        # pos0[0] -= self.ee_tip_offset
-        # pos0[0] -= 0.13
-        # pos0[0] +=0.02
         pos0[2] = self.bounds[2][0] + 0.05
         push_length = 0.08
         pos1 = [pos0[0], pos0[1]+push_length*np.sin(angle), pos0[2]]
@@ -1384,7 +1137,6 @@ class Environment:
         # Align against push direction.
         grasp_location_margin = 0.1
         angle = 0
-        # location_front_grasp_target = (pos0[0], pos0[1], pos0[2]+0.04)
         quat = (0.7,0,-0.7,0)
         pos, ori = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
         pos = np.asarray(pos)
@@ -1394,12 +1146,10 @@ class Environment:
         success = self.move_ee_pose((tool_position, quat), speed)
         # Execute push.
         if success:
-            #print("Moving to the push starting point")
             success = self.straight_move(tool_position, pos0, quat,speed, detect_force=True)
         else:
             pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
             pos = np.asarray(pos)
-            #print("Error, Going back home")
             location_front_grasp_target = (self.bounds[0][1]+grasp_location_margin, pos[1], pos[2])
             tool_position = location_front_grasp_target            
 
@@ -1407,7 +1157,6 @@ class Environment:
             self.go_home()
             return success
         if success:
-            # print("Pushing")
             success = self.straight_move(pos0, pos1, quat, 0.1*speed, detect_force=True)
 
         else:
@@ -1439,7 +1188,6 @@ class Environment:
             self.go_home()
 
 
-        # print(f"Push from {pos0} to {pos1}, {success}")
         success &= self.check_sim()
         return success
 
@@ -1452,58 +1200,39 @@ class Environment:
       pos0[2] = self.bounds[2][0] + 0.04
       success = self.move_joints(self.ik_rest_joints)
       success = False
-      # pos0[0] = min(pos0[0],self.bounds[0][1]-0.04)
       pos, ori = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
       quat = ori
-      # pos0[0] -= 0.13
-      # pos0[0] +=0.02
-      # pos0[0] = self.bounds[0][0]
       pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id) 
       self.release()
       grasp_location_margin = 0.1
       location_front_grasp_target = (self.bounds[0][1]+grasp_location_margin, pos0[1], pos0[2])
-        # location_front_grasp_target = (pos0[0], pos0[1], pos0[2]+0.04)
 
       tool_position = location_front_grasp_target
 
       pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
       pos = np.asarray(pos)
       success = self.move_ee_pose((tool_position, quat), speed=speed)
-    #   pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
-    #   pos = np.asarray(pos)
-    #   success = self.straight_move(pos,tool_position, [1.0, 0.0, 0.0, 0.0])
     
       if success:
         success = self.straight_move(tool_position,pos0, quat,speed=0.5*speed, detect_contact=True, detect_force=True)
-        # self.activate()
         pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
         pos = np.asarray(pos)
         if (np.linalg.norm(np.float32(pos0)-np.float32(pos)))<0.05:
           self.activate()
           success = True
-        # time.sleep(40)
       else:
         self.straight_move(pos,tool_position, quat,speed)
         self.go_home()
-        # print(f"Grasp at {position}, {success}")
         return success     
       if success:
         self.activate()
         location_front_grasp_target = (self.bounds[0][1]+grasp_location_margin+0.2, pos[1], pos[2]+0.0)
-        # location_front_grasp_target = (pos0[0], pos0[1], pos0[2]+0.04)
 
         tool_position = location_front_grasp_target
 
         self.straight_move(pos,tool_position, quat,speed)
         self.go_home()
-        # print('Chiuso')
-        # location_front_grasp_target = (self.bounds[0][0]-0.02, pos0[1], pos0[2]+0.02)
-        # tool_position = location_front_grasp_target
-        # location_front_grasp_target = (self.bounds[0][0]-grasp_location_margin, pos0[1], pos0[2])
-        # pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
-        # pos = np.asarray(pos)
 
-        # success = self.straight_move(pos,tool_position,quat,speed)
         grasp_sucess = self.activated
         success &= grasp_sucess
       else:
@@ -1514,11 +1243,8 @@ class Environment:
 
       
 
-    #   print(f"Grasp at {position}, {supccess}")
-      # self.go_home()
       self.go_home()
 
-      # success &= len(self.check_grasped())>0
       success &= self.check_sim()
 
       return success
@@ -1533,68 +1259,24 @@ class Environment:
 
       position[2] = self.bounds[2][0] + 0.05
       position[0] -= self.offset_x
-      # position[0] -= 0.15
-      # position[0] +=0.02
-    #   print('Executing: place at (%f, %f, %f)' % (position[0], position[1], position[2]))
       quat = (0.7088025212287903, 0.0003121407644357532, -0.7054068446159363, 0.0003104391216766089)
-      # pos0[0] -= 0.13
-      # pos0[0] +=0.02
-      # pos0[0] = self.bounds[0][0]
       position[1] +=self.offset_y
       grasp_location_margin = 0.15
       location_front_grasp_target = (self.bounds[0][1]+grasp_location_margin, position[1], position[2])
-        # location_front_grasp_target = (pos0[0], pos0[1], pos0[2]+0.04)
-      # position[0] +=0.02
 
       tool_position = location_front_grasp_target
 
       pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
       pos = np.asarray(pos)
 
-      # grasp_location_margin = 0.2
-      # angle = heightmap_rotation_angle
-      # location_front_grasp_target = (self.bounds[0][0]-grasp_location_margin*np.cos(-angle), position[1], position[2])
-      # tool_position = location_front_grasp_target
-      # # success = self.move_joints(self.ik_rest_joints)
 
-      # # ee_xyz = np.asarray(pybullet.getLinkState(self.robot_id, self.tip_link_id)[0])
-      # quat = p.getQuaternionFromEuler([0,0,angle])
-      # quat = [1, 0, 0, 0]
 
-      # move_direction = np.asarray([tool_position[0] - ee_xyz[0], tool_position[1] - ee_xyz[1], tool_position[2] - ee_xyz[2]])
-      # move_magnitude = np.linalg.norm(move_direction)
-      # move_step = 0.0005*move_direction/move_magnitude
-      # num_move_steps = int(np.floor(move_direction[0]/move_step[0]))
 
-      # #ee_or = np.asarray(pybullet.getLinkState(self.robot_id, self.tip_link_id)[1])
       
-      # for step_iter in range(num_move_steps):
-      #   pos_int = (ee_xyz[0] + move_step[0]*min(step_iter,num_move_steps), ee_xyz[1] + move_step[1]*min(step_iter,num_move_steps), ee_xyz[2] + move_step[2]*min(step_iter,num_move_steps))
-      #   self.movep(pos_int)
-      #   self.step_sim_and_render()
-      # success = self.move_ee_pose((tool_position, quat))
-      # grasp_location_margin = 0.15
-      # location_front_grasp_target = (self.bounds[0][0]-grasp_location_margin-0.1, position[1], position[2])
-      #   # location_front_grasp_target = (pos0[0], pos0[1], pos0[2]+0.04)
 
-      # tool_position = location_front_grasp_target
 
-      # pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
-      # pos = np.asarray(pos)
-      #       #prnt("Error, Going back home")
-      # location_front_grasp_target = (position[0], position[1], position[2])    
-      # success = self.straight_move(pos, tool_position, quat)
-      # pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
-      # pos = np.asarray(pos)
 
-      # location_front_grasp_target = (self.bounds[0][0]-grasp_location_margin-0.05, position[1], position[2])
-      # tool_position = location_front_grasp_target
-      # success = self.straight_move(pos, tool_position, quat, speed)
-      # pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
-      # pos = np.asarray(pos)
 
-      # location_front_grasp_target = (self.bounds[0][0]-grasp_location_margin, position[1], position[2])
-      # tool_position = location_front_grasp_target
       success = self.move_ee_pose((tool_position, quat), speed=speed)
       if not success:
         success = self.move_ee_pose((tool_position, quat), speed=speed)
@@ -1638,7 +1320,7 @@ class Environment:
     def createCabinet(self): 
       ori = [0,0,0,1]
       color= [186/255, 176/255, 172/255, 1]
-      mass = CABINET_MASS
+      mass = 0  # static walls
       width = 0.2
       height = BOUNDS[2][1]-BOUNDS[2][0]
       bottom_width = BOUNDS[2][0]
@@ -1652,20 +1334,7 @@ class Environment:
           basePosition=[0,0, bottom_width/2],
           baseOrientation=ori)
 
-      p.changeDynamics(self.bottom_wall_id, -1, lateralFriction=CABINET_FRICTION)
-      # p.changeDynamics(
-      #       self.bottom_wall_id,
-      #       -1,
-      #       lateralFriction=1.8
-      #   )
-      # p.changeDynamics(
-      #       self.bottom_wall_id,
-      #       -1,
-      #       lateralFriction=1.3,
-      #       # restitution=0.8,
-      #       # linearDamping=0.8,
-      #       # angularDamping=0.5,
-      #   )
+      p.changeDynamics(self.bottom_wall_id, -1, lateralFriction=self.params.cabinet_friction)
 
       # Back
       half_extent = [width/2, self.final_scene_size[1]/2+width, height/2+bottom_width/2]
@@ -1695,7 +1364,7 @@ class Environment:
       half_extent = [self.final_scene_size[0]/2 + width/2, self.final_scene_size[1]/2 + width, top_width/2]
       wall_cid = p.createCollisionShape(shapeType=p.GEOM_BOX, halfExtents=half_extent)
       wall_vid = p.createVisualShape(shapeType=p.GEOM_BOX, halfExtents=half_extent, rgbaColor=color)
-      self.top_wall_id = p.createMultiBody(CABINET_MASS,baseCollisionShapeIndex=wall_cid, baseVisualShapeIndex=wall_vid, 
+      self.top_wall_id = p.createMultiBody(0,baseCollisionShapeIndex=wall_cid, baseVisualShapeIndex=wall_vid, 
           basePosition=[-width/2,0, height + bottom_width+top_width/2],
           baseOrientation=ori)
       
@@ -1751,24 +1420,16 @@ class Environment:
         colormap: HxWx3 uint8 array of backprojected color aligned with heightmap.
         xyzmap: HxWx3 float array of XYZ points in world coordinates.
       """
-      # heightmap_mask, plane_mask = self.get_heightmap_mask(points, segm_plane, BOUNDS, PIXEL_SIZE, no_pad=True)
 
       width = int(np.round((bounds[0, 1] - bounds[0, 0]) / pixel_size))
       height = int(np.round((bounds[1, 1] - bounds[1, 0]) / pixel_size))
       heightmap = np.zeros((height, width), dtype=np.float32)
-      # heightmap = np.full((height, width),np.nan)
       colormap = np.full((height, width, colors.shape[-1]),(105,105,105), dtype=np.uint8)
       # if 1 < 0.5:
-      #   Y2, Y1, CT = self.get_target_px()
       # else:
       Y2, Y1, CT = self.add_target_pixels()
-      # print(len(Y2))
-      # time.sleep(3)
-      # yy = np.linspace(y2, y1)
-      # colormap[y2:y1,0:224]==[[255,0,0]]
       # for ind in range(y2,y1):
       #   if colormap[ind,0:224]==[255,255,255]:
-      #     colormap[ind,Ellipsis]==[255,0,0]
       # Filter out 3D points that are outside of the predefined bounds.
       ix = (points[Ellipsis, 0] >= bounds[0, 0]) & (points[Ellipsis, 0] <= bounds[0, 1])
       iy = (points[Ellipsis, 1] >= bounds[1, 0]) & (points[Ellipsis, 1] <= bounds[1, 1])
@@ -1796,7 +1457,6 @@ class Environment:
                           np.linspace(bounds[1, 0], bounds[1, 1], width))
       
 
-      # colormap = cv2.drawContours(colormap,contours, -1, (255,255,255),1)
       
       
       for i in range(len(Y2)):
@@ -1808,7 +1468,6 @@ class Environment:
             if np.array_equal(colormap[ind,xx], [255,255,255]):
               colormap[ind,xx] = cc
 
-      # padding_width = ((int((224-height)/2),int((224-height)/2)), ((0,224-height))) 
       return heightmap, colormap
 
 
@@ -1851,22 +1510,9 @@ class Environment:
       for c in range(mask.shape[-1]):
         colormap[py, px, c] = mask[:, c]
 
-    #   padding_width = ((0,height-width),(0,0))
       if no_pad:
         return heightmap, colormap
-    #   heightmap =  np.pad(heightmap, padding_width, 'constant', constant_values=0)
-      # padding_width = ((int((224-height)/2),int((224-height)/2)), ((0,224-height))) 
-      # padding_width = ((int(0),int((0))), ((0,0)))       
-      # color_heightmap_sq_r =  np.pad(colormap[:,:,0], padding_width, 'constant', constant_values=0)
-      # color_heightmap_sq_r.shape = (color_heightmap_sq_r.shape[0], color_heightmap_sq_r.shape[1], 1)
-      # color_heightmap_sq_g =  np.pad(colormap[:,:,1], padding_width, 'constant', constant_values=0)
-      # color_heightmap_sq_g.shape = (color_heightmap_sq_g.shape[0], color_heightmap_sq_g.shape[1], 1)
-      # color_heightmap_sq_b =  np.pad(colormap[:,:,2], padding_width, 'constant', constant_values=0)
-      # color_heightmap_sq_b.shape = (color_heightmap_sq_b.shape[0], color_heightmap_sq_b.shape[1], 1)
-      # color_heightmap_sq = np.concatenate((color_heightmap_sq_r, color_heightmap_sq_g, color_heightmap_sq_b), axis=2)
-      # depth_heightmap_sq =  np.pad(heightmap, padding_width, 'constant', constant_values=0.0)
       
-      #heightmap = heightmap[::-1, :]  # Flip up-down.
       return heightmap, colormap
 
     def xyz_to_pix(self,position):

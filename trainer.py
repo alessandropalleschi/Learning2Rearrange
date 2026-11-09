@@ -6,14 +6,24 @@ import torch.nn.functional as F
 from scipy import ndimage
 
 from config import Config
-from memory import ReplayMemory
+from memory import ReplayMemory, PrioritizedReplay
 from models import QNet, DEVICE
 
 
 class Trainer(object):
     def __init__(self, cfg=None, is_testing=False, load_snapshot=False, snapshot=None, snapshot_target=None):
         self.cfg = cfg or Config()
-        self.buffer = ReplayMemory(self.cfg.buffer_size)
+        if self.cfg.prioritized:
+            self.buffer = PrioritizedReplay(self.cfg.buffer_size, self.cfg.per_alpha, self.cfg.per_eps)
+        else:
+            self.buffer = ReplayMemory(self.cfg.buffer_size)
+        self.opt_steps = 0
+        self.last_td = None
+        self.amp = bool(self.cfg.amp and DEVICE.type == 'cuda')
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.amp)
+        # Q values are bounded: rewards lie in [reward_invalid, reward_goal]
+        self.q_min = self.cfg.reward_invalid / (1.0 - self.cfg.gamma)
+        self.q_max = self.cfg.reward_goal
         self.episode = ReplayMemory(50)
         self.double = True
         self.iteration = 0
@@ -37,6 +47,7 @@ class Trainer(object):
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.learning_rate,
                                           weight_decay=self.cfg.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, self.cfg.lr_decay)
 
     # ------------------------------------------------------------------ persistence
     def save(self, snapshot_path, snapshot_target_path=None):
@@ -84,14 +95,17 @@ class Trainer(object):
     # ------------------------------------------------------------------ acting
     def forward(self, color_input, depth_input, is_volatile=True, specific_rotation=-1, network='policy'):
         """Q-maps of one observation: push (2,h,w), pick (1,h,w) as numpy, cropped to action coordinates."""
+        push, pick = self.forward_batch([color_input], [depth_input], network)
+        return push[0], pick[0]
+
+    def forward_batch(self, colors, depths, network='policy'):
+        """Q-maps of several observations at once: push (B,2,h,w), pick (B,1,h,w) as numpy."""
         net = self.model if network == 'policy' else self.model_target
-        x = self.prepare(color_input, depth_input)[None].to(DEVICE)
-        with torch.no_grad():
+        x = torch.stack([self.prepare(c, d) for c, d in zip(colors, depths)]).to(DEVICE)
+        with torch.no_grad(), torch.autocast(device_type=DEVICE.type, enabled=self.amp):
             push, pick = net(x)
-        h, w = depth_input.shape[:2]
-        push = self._crop(push, h, w)[0].cpu().numpy()
-        pick = self._crop(pick, h, w)[0].cpu().numpy()
-        return push, pick
+        h, w = depths[0].shape[:2]
+        return (self._crop(push.float(), h, w).cpu().numpy(), self._crop(pick.float(), h, w).cpu().numpy())
 
     # ------------------------------------------------------------------ learning
     def _soft_update(self, alpha):
@@ -118,7 +132,7 @@ class Trainer(object):
             out[prim] = torch.from_numpy(m).to(DEVICE)
         return out['push'], out['grasp']
 
-    def train_step(self, transitions):
+    def train_step(self, transitions, weights=None):
         """One double-DQN gradient step on a list of Transition. Gradients flow only through the taken pixel."""
         B = len(transitions)
         states = [t.state for t in transitions]
@@ -136,14 +150,16 @@ class Trainer(object):
         cols = torch.tensor([int(t.action[2]) + self.offset_px + left for t in transitions], device=DEVICE)
 
         # ---- TD target (double DQN: policy net selects, target net evaluates, over both primitives)
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast(device_type=DEVICE.type, enabled=self.amp):
             push_mask, pick_mask = self._masks_padded([s['depthmap'] for s in nexts], h, w)
             neg = -1e9
             pp, pk = self.model(xn)
+            pp, pk = pp.float(), pk.float()
             pol = torch.cat([torch.where(push_mask.expand_as(pp), pp, torch.full_like(pp, neg)).flatten(1),
                              torch.where(pick_mask, pk, torch.full_like(pk, neg)).flatten(1)], dim=1)
             if self.double:
                 tp, tk = self.model_target(xn)
+                tp, tk = tp.float(), tk.float()
                 tgt = torch.cat([torch.where(push_mask.expand_as(tp), tp, torch.full_like(tp, neg)).flatten(1),
                                  torch.where(pick_mask, tk, torch.full_like(tk, neg)).flatten(1)], dim=1)
                 future = tgt.gather(1, pol.argmax(1, keepdim=True)).squeeze(1)
@@ -152,23 +168,42 @@ class Trainer(object):
             # no valid action at all (e.g. empty scene): no bootstrap
             future = torch.where(future < neg / 2, torch.zeros_like(future), future)
             label = reward + self.future_reward_discount * future * (1.0 - done)
+            if self.cfg.clip_q:
+                label = label.clamp(self.q_min, self.q_max)
 
         # ---- prediction at the taken pixel only
-        out = self.model.forward_selected(x, is_push, rot)
-        pred = out[torch.arange(B, device=DEVICE), 0, rows, cols]
-        loss = F.smooth_l1_loss(pred, label)  # Huber loss (paper Eq. 3)
+        with torch.autocast(device_type=DEVICE.type, enabled=self.amp):
+            out = self.model.forward_selected(x, is_push, rot)
+        pred = out.float()[torch.arange(B, device=DEVICE), 0, rows, cols]
+        per_sample = F.smooth_l1_loss(pred, label, reduction='none')  # Huber loss (paper Eq. 3)
+        if weights is not None:  # importance-sampling correction of prioritized replay
+            per_sample = per_sample * torch.as_tensor(weights, device=DEVICE)
+        loss = per_sample.mean()
+        self.last_td = (pred - label).detach().cpu().numpy()
 
         self.optimizer.zero_grad()
-        loss.backward()
+        self.scaler.scale(loss).backward()
+        self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
-        self.optimizer.step()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.last_q = float(pred.detach().mean().cpu())
         return float(loss.detach().cpu())
 
     def optimize(self):
         """Sample a batch from the replay buffer, take a gradient step and Polyak-update the target."""
         if self.is_testing or len(self.buffer) < self.cfg.batch_size:
             return None
-        loss = self.train_step(self.buffer.sample(self.cfg.batch_size))
+        if self.cfg.prioritized:
+            beta = min(1.0, self.cfg.per_beta_start +
+                       (1.0 - self.cfg.per_beta_start) * self.opt_steps / self.cfg.per_beta_iters)
+            transitions, idx, weights = self.buffer.sample(self.cfg.batch_size, beta)
+            loss = self.train_step(transitions, weights)
+            self.buffer.update(idx, self.last_td)
+        else:
+            loss = self.train_step(self.buffer.sample(self.cfg.batch_size))
+        self.scheduler.step()
+        self.opt_steps += 1
         self._soft_update(self.cfg.polyak_beta)
         return loss
 

@@ -25,3 +25,13 @@ def check_env_depth_change(prev_depth_heightmap, depth_heightmap, change_thresho
     change_detected = change_value > change_threshold
 
     return change_detected, change_value
+
+
+def seed_everything(seed):
+    """Seed python, numpy and torch (CPU and CUDA)."""
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)

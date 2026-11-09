@@ -7,21 +7,29 @@
 It owns everything that is not learning: action execution, feasibility checks, the reward (paper Eq. 2),
 episode termination and the hindsight relabelling of observations.
 """
+import random
+
 import numpy as np
 from skimage.draw import line
 
 from config import Config
-from env import Environment
+from env import Environment, BOUNDS, PIXEL_SIZE
 
 
-def check_push(env, depth, pix_x, pix_y, angle, push_length=0.08):
+def px_to_xy(px, py):
+    """Heightmap pixel -> workspace (x, y) in metres (pure geometry, no simulator needed)."""
+    return [px * PIXEL_SIZE + BOUNDS[0][0], py * PIXEL_SIZE + BOUNDS[1][0]]
+
+
+def y_to_pix(y):
+    return int(np.round((y - BOUNDS[1, 0]) / PIXEL_SIZE))
+
+
+def check_push(depth, pix_x, pix_y, angle, push_length=0.08):
     """True if there is something in the way of the push (there must be an object to push)."""
-    primitive_position_f = env.px_to_xy(pix_x, pix_y)
-    primitive_position_f[1] = primitive_position_f[1] + push_length * np.sin(angle)
-    depth_new = depth.copy()
-    depth_new = depth_new[4:depth_new.shape[0] - 4, 4:depth_new.shape[1]]
-    pixel_final = env.xyz_to_pix(primitive_position_f)
-    end_px = min(pixel_final[0], depth_new.shape[0] - 1)
+    y_end = px_to_xy(pix_x, pix_y)[1] + push_length * np.sin(angle)
+    depth_new = depth[4:depth.shape[0] - 4, 4:depth.shape[1]]
+    end_px = min(y_to_pix(y_end), depth_new.shape[0] - 1)
     rr, cc = line(pix_y, pix_x, end_px, pix_x)
     local_region_push = depth_new[rr, pix_x:]
     local_region_push = local_region_push[local_region_push > 0.02]
@@ -52,16 +60,19 @@ def get_place_pose(env, obj_class, freespace):
 
 
 class RearrangeEnv:
-    def __init__(self, cfg=None, gui=False, num_obj=1):
+    def __init__(self, cfg=None, gui=False, num_obj=1, params=None):
         self.cfg = cfg or Config()
         self.num_obj = num_obj
-        self.sim = Environment(gui=gui, num_obj=[num_obj])
+        self.sim = Environment(gui=gui, num_obj=[num_obj], params=params)
         self.obs = None
         self.actions = 0
         self.episode_return = 0.0
 
     # ------------------------------------------------------------------ gym API
-    def reset(self, num_obj=None):
+    def reset(self, num_obj=None, seed=None):
+        if seed is not None:  # reproducible scene (object sizes, positions, target regions)
+            np.random.seed(seed)
+            random.seed(seed)
         if num_obj is not None:
             self.num_obj = num_obj
             self.sim.num_obj = [num_obj]
@@ -83,7 +94,7 @@ class RearrangeEnv:
         position = sim.px_to_xy(px_x, px_y)
         executed, place_pix = False, None
 
-        if prim == 'push' and check_push(sim, obs['depthmap'], px_x, px_y, rotation, cfg.push_length):
+        if prim == 'push' and check_push(obs['depthmap'], px_x, px_y, rotation, cfg.push_length):
             executed = sim.push(position, rotation)
         elif prim == 'grasp' and obs['classmap'][px_y, px_x] != 0:
             executed = sim.pick(position)
@@ -133,3 +144,11 @@ class RearrangeEnv:
         new_obs['colormap'] = sim.relabel_image([obs['colormap']], [obs['idmap']], sim.id_list, sim.new_class)[0]
         new_next['colormap'] = sim.relabel_image([next_obs['colormap']], [next_obs['idmap']], sim.id_list, sim.new_class)[0]
         return new_obs, new_next
+
+
+def make_env(cfg, gui, num_obj, params, seed=None):
+    """Top-level factory (picklable) used by the vectorised environment workers."""
+    if seed is not None:
+        np.random.seed(seed)
+        random.seed(seed)
+    return RearrangeEnv(cfg, gui=gui, num_obj=num_obj, params=params)

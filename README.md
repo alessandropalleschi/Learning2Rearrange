@@ -15,7 +15,30 @@ xvfb-run -a python train.py --gui   # PyBullet GUI inside the container (virtual
 python train.py --is_testing --load_snapshot --snapshot logs/train/models/snapshot-000500.pth
 ```
 
-Useful flags: `--num_obj` (start), `--max_obj`, `--max_actions`, `--gui`.
+Useful flags:
+
+| flag | meaning |
+|---|---|
+| `--num_envs N` | N parallel simulators (training is simulation-bound) |
+| `--num_obj` / `--max_obj` | curriculum start / end (paper: 1 -> 8 objects) |
+| `--max_actions` | actions per episode |
+| `--physics paper` | 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated; default `legacy`) |
+| `--randomize` | domain randomisation: object friction/mass, camera pose, sensor noise |
+| `--gui` | PyBullet GUI for the first simulator |
+
+Logs go to `logs/<logging_directory>/` (`episodes.csv`, TensorBoard in `tb/`, snapshots in `models/`):
+
+```bash
+tensorboard --logdir logs
+```
+
+Evaluate a snapshot on fixed seeds (success rate and mean number of actions per object count):
+
+```bash
+python evaluate.py --snapshot logs/train/models/snapshot-0010000.pth --objects 3 5 8 --episodes 20 --num_envs 4
+```
+
+Tests (no PyBullet needed, uses a fake simulator): `python tests/test_training_loop.py`
 
 ## Without a container
 `pip install torch` (CUDA build if you have a GPU) and `pip install -r requirements.txt`.
@@ -23,11 +46,15 @@ Useful flags: `--num_obj` (start), `--max_obj`, `--max_actions`, `--gui`.
 ## Code layout
 | file | purpose |
 |---|---|
-| `config.py` | all hyper-parameters (reward, epsilon, curriculum, push length, ...) |
+| `config.py` | all hyper-parameters, plus `SimParams` (physics presets, domain randomisation) |
 | `env.py` | PyBullet scene: UR5, cabinet, objects, suction, camera, heightmaps (physics constants at the top) |
 | `rearrange_env.py` | Gym-style `reset()/step()` wrapper: action execution, reward, termination, relabelling |
 | `models.py` | `QNet`: 4-channel input, GroupNorm, global-context block, shared backbone + push/pick heads |
-| `trainer.py` | batched double DQN (Huber loss on the taken pixel, Polyak target update) |
+| `trainer.py` | batched double DQN: prioritized replay, Huber loss on the taken pixel, clipped targets, mixed precision, Polyak target update |
+| `policy.py` | epsilon-greedy action selection shared by training and evaluation |
+| `vec_env.py` | parallel simulators in worker processes |
+| `evaluate.py` | fixed-seed evaluation per object count |
+| `logger.py` | episode CSV + TensorBoard |
 | `train.py` | training / testing loop, curriculum 1 -> 8 objects, episode CSV log, snapshots |
 | `tests/test_training_loop.py` | smoke test of the learning stack with a fake simulator (no PyBullet) |
 
