@@ -50,6 +50,7 @@ class FakeSim:
         return {'colormap': color, 'depthmap': d, 'classmap': cls,
                 'idmap': cls.astype(np.float32), 'freespace': np.ones((H - 8, W - 4), np.float32)}
 
+    force_stops = 0
     add_target_pixels = staticmethod(lambda: ([10, 50, 90], [30, 70, 110], None))
     px_to_xy = staticmethod(lambda x, y: [x * 0.005, y * 0.005])
     push = pick = place = lambda self, *a, **k: True
@@ -140,6 +141,31 @@ def test_suction_and_ik_helpers():
         real_env.p = old
 
 
+def test_push_lengths():
+    """Learned push: direction x length action space (network, masks, decoding)."""
+    import torch
+    from models import QNet
+    from rearrange_env import decode_push
+    L = 3
+    net = QNet(4, 'none', 8, L)
+    x = torch.randn(2, 4, 160, 160)
+    push, pick, place, _ = net(x)
+    assert push.shape == (2, 2 * L, 160, 160)
+    for idx in range(2 * L):  # every (direction, length) channel is what forward_selected returns
+        out = net.forward_selected(x, torch.tensor([QNet.PUSH, QNet.PUSH]), torch.tensor([idx, idx]))
+        assert torch.allclose(out[:, 0], push[:, idx], atol=1e-4), idx
+    angle, length = decode_push(4, (0.04, 0.08, 0.12))  # direction 1, second length
+    assert abs(angle - np.pi / 2) < 1e-9 and length == 0.08
+    cfg = Config(push_lengths=(0.04, 0.12))
+    trainer = Trainer(cfg)
+    depth = np.zeros((H, W), np.float32)
+    depth[40:60, 50:70] = 0.05
+    mask = trainer.valid_mask(depth, 'push')
+    assert mask.shape == (4, H - 8, W - 4)
+    assert mask[1].sum() > mask[0].sum() and (mask[0] == mask[2]).all()  # longer push reaches farther
+    assert trainer.preprocessQmaps(np.zeros((4, H - 8, W - 4), np.float32), depth, 'push').shape == (4, H - 8, W - 4)
+
+
 def test_belief_tracker():
     from belief import BeliefTracker, compact_belief, BELIEF_CHANNELS
     tr = BeliefTracker(age_horizon=5)
@@ -203,7 +229,7 @@ def test_learned_placement_env():
     print('ok: learned placement environment')
 
 
-def test_train_and_evaluate(belief='none', placement='heuristic'):
+def test_train_and_evaluate(belief='none', placement='heuristic', push_lengths=(0.08,)):
     rearrange_env.Environment = FakeSim  # forked workers inherit the patch
     out = tempfile.mkdtemp()
     os.chdir(out)
@@ -211,7 +237,7 @@ def test_train_and_evaluate(belief='none', placement='heuristic'):
         num_obj=1, max_obj=3, max_actions=5, random_seed=0, logging_directory='t', num_envs=2, gui=False,
         is_testing=False, load_snapshot=False, snapshot=None, snapshot_target=None, save_every=8,
         save_visualizations=False, updates_per_step=1, physics='legacy', randomize=False, max_iterations=24,
-        start_method='fork', belief=belief, placement=placement, eps_decay=0.9995,
+        start_method='fork', belief=belief, placement=placement, eps_decay=0.9995, push_lengths=push_lengths,
         step_distance=0.002, move_budget=1000)
     import config
     orig = config.Config
@@ -223,7 +249,7 @@ def test_train_and_evaluate(belief='none', placement='heuristic'):
     models = os.listdir('logs/t/models')
     assert any(m.startswith('snapshot') for m in models), models
 
-    cfg = Config(max_actions=5, belief=belief, placement=placement)
+    cfg = Config(max_actions=5, belief=belief, placement=placement, push_lengths=tuple(push_lengths))
     trainer = Trainer(cfg, is_testing=True)
     venv = VecEnv([partial(rearrange_env.make_env, cfg, False, 1, None, r) for r in range(2)], start_method='fork')
     try:
@@ -231,7 +257,7 @@ def test_train_and_evaluate(belief='none', placement='heuristic'):
     finally:
         venv.close()
     assert res['episodes'] == 5, res
-    print('ok (belief=%s, placement=%s):' % (belief, placement), res)
+    print('ok (belief=%s, placement=%s, push_lengths=%s):' % (belief, placement, push_lengths), res)
 
 
 if __name__ == '__main__':
@@ -242,6 +268,9 @@ if __name__ == '__main__':
     test_models()
     for mode in ('none', 'spatial', 'recurrent'):
         test_train_and_evaluate(mode)
+    test_push_lengths()
     test_learned_placement_env()
+    test_train_and_evaluate('none', 'heuristic', (0.04, 0.08, 0.12))
+    test_train_and_evaluate('recurrent', 'learned', (0.04, 0.12))
     for mode in ('none', 'spatial', 'recurrent'):
         test_train_and_evaluate(mode, 'learned')

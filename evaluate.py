@@ -61,7 +61,8 @@ def evaluate(trainer, venv, cfg, num_obj, episodes, base_seed):
 
 
 def main(args):
-    cfg = Config(max_actions=args.max_actions, belief=args.belief, placement=args.placement)
+    cfg = Config(max_actions=args.max_actions, belief=args.belief, placement=args.placement,
+                 push_lengths=tuple(args.push_lengths))
     params = SimParams.from_args(args)
     sim_module.configure_cabinet(params)
     seed_everything(args.seed)
@@ -88,6 +89,7 @@ if __name__ == '__main__':
     parser.add_argument('--episodes', type=int, default=20, help='episodes per object count')
     parser.add_argument('--num_envs', type=int, default=1)
     parser.add_argument('--max_actions', type=int, default=40)
+    parser.add_argument('--push_lengths', type=float, nargs='+', default=[0.08], help='must match the snapshot')
     parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic',
                         help='must match the snapshot')
     parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',

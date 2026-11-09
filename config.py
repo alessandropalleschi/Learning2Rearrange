@@ -54,7 +54,8 @@ class Config:
     max_actions: int = 40           # actions per episode
 
     # --- Action primitives ---
-    push_length: float = 0.08       # m (paper: 8 cm)
+    push_length: float = 0.08       # m (paper: 8 cm); used when push_lengths is left at its default
+    push_lengths: tuple = (0.08,)   # learned push: the policy chooses among these lengths (m), e.g. (0.04, 0.08, 0.12)
     push_height: float = 0.05       # m above the cabinet floor (paper: 5 cm)
 
     # --- Input representation ---
@@ -63,8 +64,13 @@ class Config:
     pixel_size: float = 0.005       # m / px of the heightmap
 
     @property
-    def push_length_px(self) -> int:
-        return int(round(self.push_length / self.pixel_size))
+    def push_lengths_px(self) -> tuple:
+        return tuple(int(round(length / self.pixel_size)) for length in self.push_lengths)
+
+    @property
+    def push_actions(self) -> int:
+        """Number of push Q-map channels: two directions x the selectable lengths (index = direction * L + length)."""
+        return 2 * len(self.push_lengths)
 
 
 @dataclass
@@ -89,6 +95,8 @@ class SimParams:
     move_joints_max_steps: int = 1000       # simulation-step budget of one joint move
 
     # simulation quality options ('improved' preset). All default to the original behaviour.
+    ik_iterations: object = None            # IK solver iterations (None = PyBullet default; 100 made IK ~7x slower)
+    camera_scale: float = 1.0               # scale of the rendered image (0.5 = 4x fewer pixels; check the heightmaps)
     ik_limits: bool = False                 # IK with joint limits, rest pose and tighter solver tolerances
     filtered_force: bool = False            # contact stop from tared, median-filtered, debounced F/T readings
     force_window: int = 5                   # samples of the median filter
@@ -117,6 +125,7 @@ class SimParams:
         """Build the parameters from the command-line flags shared by train / evaluate / profile."""
         params = cls.preset(args.physics, randomize=getattr(args, 'randomize', False))
         params.step_distance, params.move_joints_max_steps = args.step_distance, args.move_budget
+        params.camera_scale = getattr(args, 'camera_scale', 1.0)
         if getattr(args, 'sim_quality', 'legacy') == 'improved':
             params.ik_limits = params.filtered_force = params.suction_verify = True
             params.suction_min_alignment = 0.8
@@ -130,6 +139,8 @@ class SimParams:
         parser.add_argument('--sim_quality', choices=['legacy', 'improved'], default='legacy',
                             help="'improved': IK with joint limits, filtered force contact detection, verified suction "
                                  "grasps (opt-in, not yet validated against the legacy behaviour)")
+        parser.add_argument('--camera_scale', type=float, default=1.0,
+                            help='scale of the simulated camera image; <1 renders faster but gives sparser heightmaps')
         parser.add_argument('--step_distance', type=float, default=0.002,
                             help='m between IK waypoints of straight moves (larger = faster, coarser; try 0.004)')
         parser.add_argument('--move_budget', type=int, default=1000, help='simulation steps allowed per joint move')

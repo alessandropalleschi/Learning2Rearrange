@@ -23,6 +23,7 @@ Useful flags:
 | `--num_obj` / `--max_obj` | curriculum start / end (paper: 1 -> 8 objects) |
 | `--max_actions` | actions per episode |
 | `--physics paper` | 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated; default `legacy`) |
+| `--push_lengths 0.04 0.08 0.12` | learned push: the policy also chooses the push length (default: fixed 0.08 m as in the paper) |
 | `--placement heuristic\|learned` | where the held object is placed: rule from the paper, or a learned place head (see below) |
 | `--belief none\|spatial\|recurrent` | belief-state ablation (see below); `evaluate.py` needs the same value |
 | `--sim_quality improved` | opt-in simulation improvements: IK with joint limits, tared/filtered/debounced F/T contact detection, verified suction grasps (see below) |
@@ -40,6 +41,14 @@ compare success rates and `profile_sim.py` timings before trusting it):
   at its grasp offset, otherwise the grasp counts as lost (`suction_holds`).
 Not changed (needs tuning on your setup): explicit motor forces / velocity limits of the joint controller, and a force-limited
 vacuum model instead of the fixed constraint (`suction_max_force` is already a parameter; the `paper` preset uses 50 N).
+
+### Learned push (`--push_lengths`)
+The push primitive has two directions (left/right, the arm only has lateral access) and, by default, a fixed 8 cm length. With
+several lengths (e.g. `--push_lengths 0.04 0.08 0.12`) the push head outputs one Q-map per length for each direction
+(`2L` maps, action index `direction * L + length`), and the feasibility mask of a push grows with its length (a longer push can start
+farther from an object). Direction handling (180 degree flip), the Q-learning target, the recurrent action encoding and the hindsight
+replay all use the same index. Not learned: the push height (5 cm, chosen to avoid toppling) and finer angles.
+Train and evaluate with the same `--push_lengths`.
 
 ### Placement ablation
 * `heuristic` - pick-and-place is one action; the place pixel is chosen by a hand-written rule (paper).

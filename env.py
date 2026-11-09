@@ -143,6 +143,7 @@ class Environment:
         self.params = params or SimParams()
         configure_cabinet(self.params)
         self.camera_config = dict(config_camera)
+        self.force_stops = 0  # motions aborted because the contact force exceeded the limit (diagnostics)
         self.num_obj = num_obj
         self.time_step = time_step
         self.gui = gui
@@ -275,7 +276,7 @@ class Environment:
 
     def _build_ik_kwargs(self):
         """IK arguments: joint limits from the URDF (the base slide limited to the workspace), the home pose as
-        rest pose (null-space pull towards a sensible configuration) and tighter solver tolerances."""
+        rest pose (null-space pull towards a sensible configuration)."""
         lower, upper = [], []
         for j in self.ur5e_joints:
             info = p.getJointInfo(self.ur5e, j)
@@ -284,9 +285,11 @@ class Environment:
                 lo, hi = -0.5, 0.5
             lower.append(lo)
             upper.append(hi)
-        return dict(lowerLimits=lower, upperLimits=upper, jointRanges=[u - l for l, u in zip(lower, upper)],
-                    restPoses=[float(q) for q in self.ik_rest_joints], maxNumIterations=100,
-                    residualThreshold=1e-4)
+        kwargs = dict(lowerLimits=lower, upperLimits=upper, jointRanges=[u - l for l, u in zip(lower, upper)],
+                      restPoses=[float(q) for q in self.ik_rest_joints])
+        if self.params.ik_iterations:
+            kwargs['maxNumIterations'] = int(self.params.ik_iterations)
+        return kwargs
 
     def activate(self):
       """Simulate suction using a rigid fixed constraint to contacted object."""
@@ -777,6 +780,11 @@ class Environment:
                                     np.deg2rad(np.random.uniform(-self.params.cam_rot_jitter_deg,
                                                                  self.params.cam_rot_jitter_deg, 3)))
         cfg['noise'] = bool(self.params.sensor_noise)
+        s = self.params.camera_scale
+        if s != 1.0:  # fewer pixels: scale the image and the intrinsics together
+            cfg['image_size'] = (int(config_camera['image_size'][0] * s), int(config_camera['image_size'][1] * s))
+            fx, _, cx, _, fy, cy = (config_camera['intrinsics'][i] for i in range(6))
+            cfg['intrinsics'] = (fx * s, 0, cx * s, 0, fy * s, cy * s, 0, 0, 1)
         self.camera_config = cfg
 
     def seed(self, seed=None):
@@ -1131,6 +1139,7 @@ class Environment:
                     target = pose0 +(n-1)* vec * step_distance
                     self.move_ee_pose((target, rot), speed)
                     print(f"Force is {force}, exceed the max force {max_force}")
+                    self.force_stops += 1
                     return False
             if detect_contact:
 
@@ -1143,13 +1152,14 @@ class Environment:
         success &= self.move_ee_pose((pose1, rot), speed)
         return success 
 
-    def push(self, pose0, angle=0., speed=0.01):
+    def push(self, pose0, angle=0., speed=0.01, push_length=0.08):
         """Execute pushing primitive.
 
         Args:
             pose0: SE(3) starting pose.
-            pose1: SE(3) ending pose.
+            angle: push direction angle (rad), the push moves along y by push_length * sin(angle).
             speed: the speed of the planar push.
+            push_length: length of the push in metres (paper: 8 cm).
 
         Returns:
             success: robot movement success if True.
@@ -1162,7 +1172,6 @@ class Environment:
         pos0[0] = posxy[0]
         pos0[1] = posxy[1]
         pos0[2] = self.bounds[2][0] + 0.05
-        push_length = 0.08
         pos1 = [pos0[0], pos0[1]+push_length*np.sin(angle), pos0[2]]
         pos1[1] = min(pos1[1],self.bounds[1,1]-0.008)
         pos1[1] = max(pos1[1],self.bounds[1,0]+0.008)

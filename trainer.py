@@ -35,14 +35,15 @@ class Trainer(object):
         self.is_testing = is_testing
         self.max_dim = self.cfg.max_dim
         self.offset_px = self.cfg.offset_px
-        self.push_length_px = self.cfg.push_length_px
+        self.push_lengths_px = self.cfg.push_lengths_px
         self.future_reward_discount = self.cfg.gamma
 
         self.belief = self.cfg.belief
         self.learned_placement = self.cfg.placement == 'learned'
         in_channels = 4 + (BELIEF_CHANNELS if self.belief == 'spatial' else 0)
-        self.model = QNet(in_channels, self.belief, self.cfg.recurrent_hidden).to(DEVICE)
-        self.model_target = QNet(in_channels, self.belief, self.cfg.recurrent_hidden).to(DEVICE)
+        n_len = len(self.cfg.push_lengths)
+        self.model = QNet(in_channels, self.belief, self.cfg.recurrent_hidden, n_len).to(DEVICE)
+        self.model_target = QNet(in_channels, self.belief, self.cfg.recurrent_hidden, n_len).to(DEVICE)
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
             self.model_target.load_state_dict(torch.load(snapshot_target or snapshot, map_location=DEVICE))
@@ -101,7 +102,7 @@ class Trainer(object):
             return (min((row + o + top) // 8, self._cells() - 1), min((col + o + left) // 8, self._cells() - 1))
 
         rot, row, col = action['pix']
-        channel = {'push': rot, 'grasp': 2, 'place': 3}[action['primitive']]
+        channel = {'push': rot // len(self.cfg.push_lengths), 'grasp': 2, 'place': 3}[action['primitive']]
         a[channel][cell(row, col)] = 1.0
         if action.get('place_pix') is not None:
             a[3][cell(action['place_pix'][1], action['place_pix'][0])] = 1.0
@@ -123,16 +124,19 @@ class Trainer(object):
         return q[..., self.offset_px:h - self.offset_px, self.offset_px:w]
 
     def valid_mask(self, depth, primitive):
-        """Boolean mask (cropped coordinates) of pixels where the primitive is feasible."""
+        """Boolean mask (cropped coordinates) of pixels where the primitive is feasible: (h,w) for 'grasp',
+        (2L,h,w) for 'push' (index = direction*L + length; a longer push can start farther from an object)."""
         o = self.offset_px
         crop = depth[o:depth.shape[0] - o, o:depth.shape[1]]
         object_pixels = (crop > 0.008).astype(np.uint8)
         if primitive == 'grasp':
             return object_pixels.astype(bool)
-        kernel = np.ones((self.push_length_px, self.push_length_px), np.uint8)
-        contactable = cv2.dilate(object_pixels, kernel, iterations=1)
-        contactable[np.nonzero(object_pixels)] = 0
-        return contactable.astype(bool)
+        per_length = []
+        for k in self.push_lengths_px:
+            contactable = cv2.dilate(object_pixels, np.ones((k, k), np.uint8), iterations=1)
+            contactable[np.nonzero(object_pixels)] = 0
+            per_length.append(contactable.astype(bool))
+        return np.tile(np.stack(per_length), (2, 1, 1))  # same feasibility for both directions
 
     def _held(self, obs_list):
         """(B,3) one-hot class of the held object (learned placement only; zeros when nothing is held)."""
@@ -152,7 +156,9 @@ class Trainer(object):
     def preprocessQmaps(self, map, depth, primitve):
         """Set infeasible pixels to -1000 (numpy Q-maps in cropped coordinates)."""
         mask = self.valid_mask(depth, primitve)
-        return np.where(mask[None], map, -1000.0)
+        if mask.ndim == 2:
+            mask = mask[None]
+        return np.where(mask, map, -1000.0)
 
     # ------------------------------------------------------------------ acting
     def forward(self, color_input, depth_input, is_volatile=True, specific_rotation=-1, network='policy'):
@@ -193,14 +199,16 @@ class Trainer(object):
         top, left = self._pads(h, w)
         o = self.offset_px
         B = len(obs_list)
-        masks = {k: np.zeros((B, 1, self.max_dim, self.max_dim), bool) for k in ('push', 'grasp', 'place')}
+        masks = {'push': np.zeros((B, self.cfg.push_actions, self.max_dim, self.max_dim), bool),
+                 'grasp': np.zeros((B, 1, self.max_dim, self.max_dim), bool),
+                 'place': np.zeros((B, 1, self.max_dim, self.max_dim), bool)}
         for i, obs in enumerate(obs_list):
-            region = (i, 0, slice(top + o, top + h - o), slice(left + o, left + w))
+            window = (slice(top + o, top + h - o), slice(left + o, left + w))
             if obs.get('held_class'):
-                masks['place'][region] = self.place_valid(obs)
+                masks['place'][(i, 0) + window] = self.place_valid(obs)
             else:
-                masks['push'][region] = self.valid_mask(obs['depthmap'], 'push')
-                masks['grasp'][region] = self.valid_mask(obs['depthmap'], 'grasp')
+                masks['push'][(i, slice(None)) + window] = self.valid_mask(obs['depthmap'], 'push')
+                masks['grasp'][(i, 0) + window] = self.valid_mask(obs['depthmap'], 'grasp')
         return [torch.from_numpy(masks[k]).to(DEVICE) for k in ('push', 'grasp', 'place')]
 
     PRIMITIVES = {'grasp': QNet.PICK, 'push': QNet.PUSH, 'place': QNet.PLACE}

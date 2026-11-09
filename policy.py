@@ -1,7 +1,7 @@
 """Action selection shared by training and evaluation."""
 import numpy as np
 
-from rearrange_env import check_push
+from rearrange_env import check_push, decode_push
 
 
 def select_placement(trainer, obs, place_q, explore_prob, cfg):
@@ -45,8 +45,8 @@ def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg):
             pix = np.unravel_index(np.random.choice(valid), q[primitive].shape)
             if primitive == 'push':  # prefer pushes that actually touch something
                 for _ in range(100):
-                    angle = np.deg2rad(pix[0] * 180.0 - 90)
-                    if check_push(obs['depthmap'], pix[2], pix[1], angle, cfg.push_length):
+                    angle, length = decode_push(pix[0], cfg.push_lengths)
+                    if check_push(obs['depthmap'], pix[2], pix[1], angle, length):
                         break
                     pix = np.unravel_index(np.random.choice(valid), q[primitive].shape)
         else:

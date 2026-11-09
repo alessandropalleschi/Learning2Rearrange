@@ -22,7 +22,7 @@ from trainer import Trainer
 
 
 def main(args):
-    cfg = Config(placement=args.placement, max_actions=10 ** 6)
+    cfg = Config(placement=args.placement, max_actions=10 ** 6, push_lengths=tuple(args.push_lengths))
     params = SimParams.from_args(args)
     sim_module.configure_cabinet(params)
     np.random.seed(args.seed)
@@ -30,6 +30,8 @@ def main(args):
     trainer = Trainer(cfg, is_testing=True)
     obs = env.reset()
     times = {'push': [], 'grasp': [], 'place': []}
+    executed = {'push': 0, 'grasp': 0, 'place': 0}
+    force_stops = sorted_episodes = episodes = 0
     obs_times = []
     profiler = cProfile.Profile()
     profiler.enable()
@@ -40,17 +42,23 @@ def main(args):
         t1 = time.time()
         obs, reward, term, trunc, info = env.step({'primitive': prim, 'pix': pix})
         times[prim].append(time.time() - t1)
+        executed[prim] += int(info['executed'])
+        force_stops += info.get('force_stops', 0)
         obs_times.append(t1 - t0)
         if term or trunc:
+            episodes += 1
+            sorted_episodes += int(info['sorted'])
             obs = env.reset()
     profiler.disable()
     print('\n== time per action (s) ==')
     for k, v in times.items():
         if v:
-            print('%-6s n=%2d  mean %.2f  max %.2f' % (k, len(v), np.mean(v), np.max(v)))
+            print('%-6s n=%2d  mean %.2f s  max %.2f s  executed %d/%d' % (k, len(v), np.mean(v), np.max(v),
+                                                                       executed[k], len(v)))
     print('policy forward + action selection: mean %.3f s' % np.mean(obs_times))
     total = sum(sum(v) for v in times.values())
     print('simulated actions/s: %.2f' % (args.actions / max(total, 1e-9)))
+    print('motions stopped by the force limit: %d   episodes sorted: %d/%d' % (force_stops, sorted_episodes, episodes))
     print('\n== top functions by own time ==')
     pstats.Stats(profiler).sort_stats('tottime').print_stats(args.top)
 
@@ -62,5 +70,6 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--top', type=int, default=15)
     SimParams.add_arguments(parser)
+    parser.add_argument('--push_lengths', type=float, nargs='+', default=[0.08])
     parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic')
     main(parser.parse_args())

@@ -22,7 +22,8 @@ from vec_env import VecEnv
 
 def main(args):
     cfg = Config(start_objects=args.num_obj, max_objects=args.max_obj, max_actions=args.max_actions,
-                 belief=args.belief, placement=args.placement, eps_decay=args.eps_decay)
+                 belief=args.belief, placement=args.placement, eps_decay=args.eps_decay,
+                 push_lengths=tuple(args.push_lengths))
     params = SimParams.from_args(args)
     sim_module.configure_cabinet(params)  # the main process needs the same workspace bounds as the workers
     seed_everything(args.random_seed)
@@ -56,9 +57,14 @@ def main(args):
                 carry(trainer, next_obs[i], None if h_new is None else h_new[i], primitive, pix, infos[i]['place_pix'])
                 if args.save_visualizations and i == 0:
                     place = infos[i]['place_pix']
-                    vis = trainer.get_prediction_vis({'push': q.push, 'grasp': q.pick, 'place': q.place}[primitive][i],
-                                                     obs[i]['colormap'],
-                                                     pix, pix if place is None else [place[1], place[0]])
+                    maps = {'push': q.push, 'grasp': q.pick, 'place': q.place}[primitive][i]
+                    if primitive == 'push':  # the two directions of the chosen length
+                        n_len = len(cfg.push_lengths)
+                        maps, pix_vis = maps[[pix[0] % n_len, n_len + pix[0] % n_len]], (pix[0] // n_len,) + tuple(pix[1:])
+                    else:
+                        pix_vis = pix
+                    vis = trainer.get_prediction_vis(maps, obs[i]['colormap'],
+                                                     pix_vis, pix_vis if place is None else [place[1], place[0]])
                     cv2.imwrite(os.path.join(log_dir, 'visualization.%s.png' % primitive), vis)
                 if args.is_testing:
                     continue
@@ -139,6 +145,8 @@ if __name__ == '__main__':
     SimParams.add_arguments(parser)
     parser.add_argument('--eps_decay', type=float, default=0.9995,
                         help='epsilon multiplier per environment step (0.8 -> 0.01); use ~0.998 for runs of a few thousand steps')
+    parser.add_argument('--push_lengths', type=float, nargs='+', default=[0.08],
+                        help='selectable push lengths in m; one value = fixed (paper: 0.08), several = learned, e.g. 0.04 0.08 0.12')
     parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic',
                         help="'learned': a Q-head chooses where to place the held object (default: rule from the paper)")
     parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',

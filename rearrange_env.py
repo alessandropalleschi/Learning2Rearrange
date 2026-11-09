@@ -17,6 +17,12 @@ from config import Config
 from env import Environment, BOUNDS, PIXEL_SIZE
 
 
+def decode_push(index, push_lengths):
+    """Push action index (direction * L + length) -> (angle in rad, length in m). Direction 0/1 = -90/+90 degrees."""
+    direction, length = divmod(int(index), len(push_lengths))
+    return np.deg2rad(direction * 180.0 - 90), push_lengths[length]
+
+
 def px_to_xy(px, py):
     """Heightmap pixel -> workspace (x, y) in metres (pure geometry, no simulator needed)."""
     return [px * PIXEL_SIZE + BOUNDS[0][0], py * PIXEL_SIZE + BOUNDS[1][0]]
@@ -101,15 +107,17 @@ class RearrangeEnv:
         obs, sim, cfg = self.obs, self.sim, self.cfg
         prim, pix = action['primitive'], action['pix']
         px_x, px_y = pix[2], pix[1]
-        rotation = np.deg2rad(pix[0] * (360.0 / 2) - 90)  # two push directions: -90 / +90 degrees
         position = sim.px_to_xy(px_x, px_y)
         executed, place_pix = False, None
+        stops_before = sim.force_stops
         learned = cfg.placement == 'learned'
         if self.holding and prim != 'place':
             raise ValueError("an object is held: the next action must be 'place'")
 
-        if prim == 'push' and check_push(obs['depthmap'], px_x, px_y, rotation, cfg.push_length):
-            executed = sim.push(position, rotation)
+        if prim == 'push':
+            angle, length = decode_push(pix[0], cfg.push_lengths)
+            if check_push(obs['depthmap'], px_x, px_y, angle, length):
+                executed = sim.push(position, angle, push_length=length)
         elif prim == 'place':
             place_pix = (px_x, px_y)  # (col, row) of the free cell
             executed = sim.place(position)
@@ -155,7 +163,7 @@ class RearrangeEnv:
                    and (not prev_relabel[0] or prev_relabel[1] != self._relabel_state[1]))
         info = {'executed': bool(executed), 'sorted': bool(sorted_ and valid), 'invalid': not valid,
                 'place_pix': place_pix, 'relabel': bool(relabel), 'episode_return': self.episode_return,
-                'actions': self.actions, 'phase': 'act'}
+                'actions': self.actions, 'phase': 'act', 'force_stops': sim.force_stops - stops_before}
         self.obs = next_obs
         return self.compact(next_obs), reward, terminated, truncated, info
 
