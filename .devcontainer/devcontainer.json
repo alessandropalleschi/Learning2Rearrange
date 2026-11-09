@@ -1,0 +1,15 @@
+{
+  "name": "Learning2Rearrange",
+  "build": { "dockerfile": "Dockerfile", "context": ".." },
+  // Remove "--gpus=all" if the host has no NVIDIA GPU / NVIDIA Container Toolkit.
+  "runArgs": ["--gpus=all", "--shm-size=4g"],
+  "workspaceFolder": "/workspaces/Learning2Rearrange",
+  "remoteEnv": { "PYTHONUNBUFFERED": "1" },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-python.vscode-pylance"],
+      "settings": { "python.defaultInterpreterPath": "/opt/conda/bin/python" }
+    }
+  },
+  "postCreateCommand": "python -c \"import torch;print('cuda available:', torch.cuda.is_available())\""
+}

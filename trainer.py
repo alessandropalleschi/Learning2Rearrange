@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-from models import PushFCN, PickFCN
+from models import PushFCN, PickFCN, DEVICE
 from memory import *
 from scipy import ndimage
 import matplotlib.pyplot as plt
@@ -25,10 +25,10 @@ class Trainer(object):
         self.max_dim = 160
         self.offset_px = 4
         if load_snapshot:
-            self.model_push.load_state_dict(torch.load(snapshot_push))
-            self.model_pick.load_state_dict(torch.load(snapshot_pick))
-            self.model_push_target.load_state_dict(torch.load(snapshot_push_target))
-            self.model_pick_target.load_state_dict(torch.load(snapshot_pick_target))
+            self.model_push.load_state_dict(torch.load(snapshot_push, map_location=DEVICE))
+            self.model_pick.load_state_dict(torch.load(snapshot_pick, map_location=DEVICE))
+            self.model_push_target.load_state_dict(torch.load(snapshot_push_target, map_location=DEVICE))
+            self.model_pick_target.load_state_dict(torch.load(snapshot_pick_target, map_location=DEVICE))
 
             print('Pre-trained model snapshot')
         # if torch.cuda.is_available():
@@ -39,10 +39,10 @@ class Trainer(object):
             self._synchronize_q_networks(self.model_pick_target, self.model_pick)        
         
         
-        self.model_push = self.model_push.cuda()
-        self.model_pick = self.model_pick.cuda()
-        self.model_push_target = self.model_push_target.cuda()
-        self.model_pick_target = self.model_pick_target.cuda()
+        self.model_push = self.model_push.to(DEVICE)
+        self.model_pick = self.model_pick.to(DEVICE)
+        self.model_push_target = self.model_push_target.to(DEVICE)
+        self.model_pick_target = self.model_pick_target.to(DEVICE)
 
         # Set model to training mode (evaluation mode when testing, so BatchNorm stats are frozen)
         for m in (self.model_push, self.model_pick, self.model_push_target, self.model_pick_target):
@@ -50,8 +50,8 @@ class Trainer(object):
 
         l_r = 1e-4
 
-        self.criterion_push = torch.nn.SmoothL1Loss(reduction='none').cuda() # Huber loss
-        self.criterion_grasp = torch.nn.SmoothL1Loss(reduction='none').cuda() # Huber loss
+        self.criterion_push = torch.nn.SmoothL1Loss(reduction='none').to(DEVICE) # Huber loss
+        self.criterion_grasp = torch.nn.SmoothL1Loss(reduction='none').to(DEVICE) # Huber loss
         
         self.optimizer_push = torch.optim.Adam(self.model_push.parameters(), lr=l_r, weight_decay=2e-5)
         self.optimizer_pick = torch.optim.Adam(self.model_pick.parameters(), lr=l_r, weight_decay=2e-5)
@@ -178,10 +178,10 @@ class Trainer(object):
         self.forward(color_heightmap, depth_heightmap, is_volatile=False, specific_rotation=best_pix_ind[0])
         loss = 0
         if primitive_action == 'push':
-            loss = self.criterion_push(self.model_push.push_prob[0].view(1,max_dim,max_dim), Variable(torch.from_numpy(label).float().cuda())) * Variable(torch.from_numpy(label_weights).float().cuda(),requires_grad=False)
+            loss = self.criterion_push(self.model_push.push_prob[0].view(1,max_dim,max_dim), Variable(torch.from_numpy(label).float().to(DEVICE))) * Variable(torch.from_numpy(label_weights).float().to(DEVICE),requires_grad=False)
             loss = loss.sum()
         elif primitive_action == 'grasp':
-            loss = self.criterion_grasp(self.model_pick.pick_prob[0].view(1,max_dim,max_dim), Variable(torch.from_numpy(label).float().cuda())) * Variable(torch.from_numpy(label_weights).float().cuda(),requires_grad=False)
+            loss = self.criterion_grasp(self.model_pick.pick_prob[0].view(1,max_dim,max_dim), Variable(torch.from_numpy(label).float().to(DEVICE))) * Variable(torch.from_numpy(label_weights).float().to(DEVICE),requires_grad=False)
             loss = loss.sum()
 
 

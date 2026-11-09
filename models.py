@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 import numpy as np
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 def conv3x3(in_planes, out_planes, stride=1):
     """3x3 convolution with padding"""
@@ -51,7 +53,7 @@ class ResidualBlock(nn.Module):
 class PushFCN(nn.Module):
     def __init__(self):
         super(PushFCN, self).__init__()
-        self.device = 'cuda'
+        self.device = DEVICE
         self.nr_rotations = 2
         self.conv1 = nn.Conv2d(6, 64, kernel_size=3, stride=1, padding=1, bias=False, groups=2)
         self.rb1 = self.make_layer(64, 128)
@@ -97,7 +99,7 @@ class PushFCN(nn.Module):
         self.push_prob = []
 
         if is_volatile:
-            batch_rot_input = torch.zeros((self.nr_rotations,input.shape[1],input.shape[2],input.shape[3])).to('cuda')
+            batch_rot_input = torch.zeros((self.nr_rotations,input.shape[1],input.shape[2],input.shape[3])).to(self.device)
             for rot_id in range(self.nr_rotations):
                 theta = np.radians(rot_id*(360/self.nr_rotations))
                 affine_mat_before = np.array([[np.cos(theta), np.sin(theta), 0.0],
@@ -180,7 +182,7 @@ class PushFCN(nn.Module):
 class PickFCN(nn.Module):
     def __init__(self):
         super(PickFCN, self).__init__()
-        self.device = 'cuda'
+        self.device = DEVICE
 
         self.conv1 = nn.Conv2d(6, 64, kernel_size=3, stride=1, padding=1, bias=False, groups=2)
         self.rb1 = self.make_layer(64, 128)

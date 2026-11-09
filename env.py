@@ -1158,7 +1158,8 @@ class Environment:
             projectionMatrix=projm,
             shadow=1,
             flags=p.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX,
-            renderer=p.ER_BULLET_HARDWARE_OPENGL,
+            # OpenGL needs a display; the CPU renderer works headless (containers, CI)
+            renderer=p.ER_BULLET_HARDWARE_OPENGL if self.gui else p.ER_TINY_RENDERER,
         )
 
         # Get color image.
