@@ -124,6 +124,6 @@ def test_noop_penalty_applies_only_when_nothing_moved(fake_simulator, monkeypatc
 def test_relabelling_still_triggers_with_shaped_rewards_and_the_value_range_follows_the_reward(fake_simulator):
     _, _, _, relabels = run_fake_episode(reward_mode='progress')
     assert relabels == [False, True, False]  # the fake scene allows relabelling at its 2nd action
-    assert Config().q_range == pytest.approx((-100.0, 0.0))
+    assert Config(reward_mode='sparse').q_range == pytest.approx((-100.0, 0.0))
     assert Config(reward_mode='progress', reward_shaping_scale=2.0).q_range == pytest.approx((-100.0, 2.0))
     assert Config(reward_mode='noop', noop_penalty=1.0).q_range[0] == pytest.approx(-110.0)
