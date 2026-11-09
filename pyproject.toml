@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "learning2rearrange"
+version = "0.2.0"
+description = "Learning to rearrange objects in confined environments (pushing + pick-and-place, double DQN)"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-image",
+    "opencv-python-headless",
+    "pybullet",
+    "torch",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "ty",
+]
+
+[tool.setuptools.packages.find]
+include = ["l2r*"]
+
+# --------------------------------------------------
+# Ruff: formatting and linting
+# --------------------------------------------------
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["docs", "assets"]
+
+[tool.ruff.lint]
+# Keep linting conservative for legacy simulator code.
+select = [
+    "E9",  # Syntax-related errors
+    "F",   # Pyflakes: undefined names, unused imports, etc.
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+# --------------------------------------------------
+# ty: static type checking
+# --------------------------------------------------
+
+[tool.ty.environment]
+python-version = "3.9"
+
+[tool.ty.src]
+include = ["l2r"]
+exclude = [
+    "docs",
+    "assets",
+]
+
+# --------------------------------------------------
+# pytest
+# --------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"

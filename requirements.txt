@@ -1,0 +1,11 @@
+numpy
+scipy
+scikit-image
+matplotlib
+opencv-python-headless
+pybullet
+tensorboard
+# torch / torchvision come from the base image (CUDA build) or: pip install torch --index-url https://download.pytorch.org/whl/cpu
+ruff
+ty
+pytest

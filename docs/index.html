@@ -5,23 +5,23 @@
   <meta charset="utf-8">
   <!-- Meta tags for social media banners, these should be filled in appropriatly as they are your "business card" -->
   <!-- Replace the content tag with appropriate information -->
-  <meta name="description" content="DESCRIPTION META TAG">
-  <meta property="og:title" content="SOCIAL MEDIA TITLE TAG" />
-  <meta property="og:description" content="SOCIAL MEDIA DESCRIPTION TAG TAG" />
-  <meta property="og:url" content="URL OF THE WEBSITE" />
+  <meta name="description" content="Deep reinforcement learning of a policy combining pushing and pick-and-place to rearrange objects in cluttered, confined spaces.">
+  <meta property="og:title" content="Learning to Rearrange Objects in Confined Environments" />
+  <meta property="og:description" content="Deep reinforcement learning of a policy combining pushing and pick-and-place to rearrange objects in cluttered, confined spaces." />
+  <meta property="og:url" content="https://alessandropalleschi.github.io/Learning2Rearrange/" />
   <!-- Path to banner image, should be in the path listed below. Optimal dimenssions are 1200X630-->
-  <meta property="og:image" content="static/image/your_banner_image.png" />
+  <meta property="og:image" content="static/images/carousel6.png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
 
 
-  <meta name="twitter:title" content="TWITTER BANNER TITLE META TAG">
-  <meta name="twitter:description" content="TWITTER BANNER DESCRIPTION META TAG">
+  <meta name="twitter:title" content="Learning to Rearrange Objects in Confined Environments">
+  <meta name="twitter:description" content="Deep reinforcement learning of a policy combining pushing and pick-and-place to rearrange objects in cluttered, confined spaces.">
   <!-- Path to banner image, should be in the path listed below. Optimal dimenssions are 1200X600-->
-  <meta name="twitter:image" content="static/images/your_twitter_banner_image.png">
+  <meta name="twitter:image" content="static/images/carousel6.png">
   <meta name="twitter:card" content="summary_large_image">
   <!-- Keywords for your paper to be indexed by-->
-  <meta name="keywords" content="KEYWORDS SHOULD BE PLACED HERE">
+  <meta name="keywords" content="robot rearrangement, reinforcement learning, pushing, pick-and-place, confined spaces">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
 
@@ -37,7 +37,6 @@
   <link rel="stylesheet" href="static/css/index.css">
 
   <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
-  <script src="https://documentcloud.adobe.com/view-sdk/main.js"></script>
   <script defer src="static/js/fontawesome.all.min.js"></script>
   <script src="static/js/bulma-carousel.min.js"></script>
   <script src="static/js/bulma-slider.min.js"></script>
@@ -62,7 +61,7 @@
                 <a href="https://profiles.stanford.edu/marion-lepert" target="_blank">Marion
                   Lepert<sup>2</sup></a>,</span>
               <span class="author-block">
-                <a href="https://lianwenzhao.github.io/" target="_blank">Whenzao Lian<sup>3</sup></a>,
+                <a href="https://lianwenzhao.github.io/" target="_blank">Wenzhao Lian<sup>3</sup></a>,
               </span>
               <span class="author-block">
                 <a href="https://www.centropiaggio.unipi.it/~pallottino" target="_blank">Lucia
@@ -80,6 +79,22 @@
                 <br>2023 IEEE/RSJ International Conference on Intelligent Robots and Systems (Under Review)</span>
             </div>
 
+            <div class="column has-text-centered">
+              <div class="publication-links">
+                <span class="link-block">
+                  <a href="static/pdfs/paper.pdf" target="_blank" class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon"><i class="fas fa-file-pdf"></i></span>
+                    <span>Paper</span>
+                  </a>
+                </span>
+                <span class="link-block">
+                  <a href="https://github.com/alessandropalleschi/Learning2Rearrange" target="_blank" class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon"><i class="fab fa-github"></i></span>
+                    <span>Code</span>
+                  </a>
+                </span>
+              </div>
+            </div>
 <!--             <div class="column has-text-centered">
               <div class="publication-links">
  -->                <!-- Arxiv PDF link -->
@@ -125,8 +140,6 @@
                   <span>arXiv</span>
                 </a>
               </span> -->
-              </div>
-            </div>
           </div>
         </div>
       </div>
@@ -138,7 +151,7 @@
   <section class="hero teaser">
     <div class="container is-max-desktop">
       <div class="hero-body">
-        <video poster="" id="tree" autoplay controls muted loop height="100%">
+        <video poster="" id="banner-video" autoplay controls muted loop playsinline height="100%">
           <!-- Your video here -->
           <source src="static/videos/banner_video.mp4" type="video/mp4">
         </video>
@@ -196,7 +209,7 @@ complex, cluttered environments. </p>
             <!-- Your image here -->
             <div class="item" style="text-align: center;">
 
-            <img src="static/images/carousel1.jpg" alt="MY ALT TEXT" class="center" width="80%" />
+            <img src="static/images/carousel1.jpg" alt="Figure" class="center" width="80%" />
             <h2 class="subtitle has-text-centered">
               Schematic representation of the rearrangement
               problem. Given a visual observation of a set of objects in a
@@ -205,7 +218,7 @@ complex, cluttered environments. </p>
           </div>
           <div class="item" style="text-align: center;">
             <!-- Your image here -->
-            <img src="static/images/carousel2.jpg" alt="MY ALT TEXT" class="center" width="80%" />
+            <img src="static/images/carousel2.jpg" alt="Figure" class="center" width="80%" />
             <h2 class="subtitle has-text-centered">
               Proposed architecture: Given a side view of the environment acquired through an RGB-D sensor, we first transform
 the visual observation of the inside of the cabinet to create a recolored orthographic view, highlighting the class membership
@@ -214,7 +227,7 @@ pixel-wise Q-maps corresponding to the expected rewards for taking a push or a p
           </div>
           <div class="item" style="text-align: center;">
             <!-- Your image here -->
-            <img src="static/images/carousel3.jpg" class="center" width="80%" height="auto" alt="MY ALT TEXT" />
+            <img src="static/images/carousel3.jpg" class="center" width="80%" height="auto" alt="Figure" />
             <h2 class="subtitle has-text-centered">
               Architecture of the fully convolutional residual
               network used to compute the Q-maps from the current
@@ -227,7 +240,7 @@ pixel-wise Q-maps corresponding to the expected rewards for taking a push or a p
 
           <div class="item" style="text-align: center;">
             <!-- Your image here -->
-            <img src="static/images/carousel4.jpg" class="center" width="80%" height="auto" alt="MY ALT TEXT" />
+            <img src="static/images/carousel4.jpg" class="center" width="80%" height="auto" alt="Figure" />
             <h2 class="subtitle has-text-centered">
               Different pushing directions are handled by rotating
 the observation fed to the network. In this work we model
@@ -238,7 +251,7 @@ two pushing directions (left and right) corresponding to a
           </div>
           <div class="item" style="text-align: center;">
             <!-- Your image here -->
-            <img src="static/images/carousel5.jpg" alt="MY ALT TEXT" class="center" width="80%" height="auto"/>
+            <img src="static/images/carousel5.jpg" alt="Figure" class="center" width="80%" height="auto"/>
             <h2 class="subtitle has-text-centered">
               An FCN is used to determine the picking
 pose from the current observation. The placement pose is
@@ -249,7 +262,7 @@ well as the current state of the environment.
           </div>
           <div class="item" style="text-align: center;">
             <!-- Your image here -->
-            <img src="static/images/carousel6.png" class="center" width="100%" height="auto" alt="MY ALT TEXT" />
+            <img src="static/images/carousel6.png" class="center" width="100%" height="auto" alt="Figure" />
             <h2 class="subtitle has-text-centered">
               (a) A UR5 equipped with a pushing blade interacting with a simulated confined environment. (b) Example of an
               initial arrangement for 10 objects and three different classes. Objects of the same color belong to the same class. The target
@@ -257,7 +270,7 @@ well as the current state of the environment.
           </div>
           <div class="item" style="text-align: center;">
             <!-- Your image here -->
-            <img src="static/images/carousel7.png" class="center" width="70%" height="auto" alt="MY ALT TEXT" />
+            <img src="static/images/carousel7.png" class="center" width="70%" height="auto" alt="Figure" />
             <h2 class="subtitle has-text-centered">
               Hindsight Experience Replay: during training, the
 robot executes an action at based on the current observation
@@ -274,7 +287,7 @@ the experience replay buffer.
           </div>
           <div class="item" style="text-align: center;">
             <!-- Your image here -->
-            <img src="static/images/carousel8.png" class="center" width="70%" height="auto" alt="MY ALT TEXT" />
+            <img src="static/images/carousel8.png" class="center" width="70%" height="auto" alt="Figure" />
             <h2 class="subtitle has-text-centered">
               Results with different numbers of YCB objects from the testing set in random initial arrangements for the three
               methods: P+S is our approach, S is a pick-and-place-only variant of our approach, and the two heuristic-based pick-and-place only baselines (H-d and H-a)            </h2>
@@ -300,7 +313,7 @@ the experience replay buffer.
 
             <div class="publication-video">
               <!-- Youtube embed code here -->
-              <video poster="" id="tree" autoplay="false" controls muted loop height="100%">
+              <video poster="" id="presentation-video" preload="none" controls muted loop playsinline height="100%">
                 <!-- Your video here -->
                 <source src="static/videos/multimedia.mp4" type="video/mp4">
               </video>
@@ -357,7 +370,7 @@ the experience replay buffer.
       <div class="container">
         <h2 class="title">Paper</h2>
 
-        <iframe src="static/pdfs/paper.pdf" width="100%" height="550">
+        <iframe loading="lazy" src="static/pdfs/paper.pdf" width="100%" height="550">
         </iframe>
 
       </div>
@@ -392,7 +405,8 @@ the experience replay buffer.
           Horizon 2020 research and innovation program under agreement no. 871237
           (SOPHIA), and the Italian Ministry of Education and Research (MIUR)
           in the framework of the CrossLab and FoReLab projects (Departments of
-          Excellence).      </div>
+          Excellence).</p>
+      </div>
     </div>
   </section>
 

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+logs/
+visualization.*.png
+data/
+runs/*
+!runs/*/summary.md
+!runs/*/summary.csv
