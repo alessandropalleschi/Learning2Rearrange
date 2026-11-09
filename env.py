@@ -1,16 +1,14 @@
-from enum import unique
-from json import tool
-import time
 import pybullet as p
 import pybullet_data
 import numpy as np
-from utils import *
+
 import os
 import random
 from scipy import ndimage
 from copy import deepcopy
 import cv2
 from config import SimParams
+from force_sensing import ForceMonitor
 from random import sample
 PIXEL_SIZE = 0.005
 
@@ -164,7 +162,6 @@ class Environment:
         p.setTimeStep(time_step)
         p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
         if gui:
-            target = p.getDebugVisualizerCamera()[11]
             p.resetDebugVisualizerCamera(
                 cameraDistance=1.0,
                 cameraYaw=90,
@@ -257,9 +254,39 @@ class Environment:
           except:  # pylint: disable=bare-except
             pass
           self.init_grip_distance = None
+          self._grip_body = self._grip_offset = None
           self.init_grip_item = None
 
 
+
+    def _remember_grip(self, obj_id, obj_to_body):
+        """Remember the object and its distance to the cup at the moment the suction engaged."""
+        self._grip_body = obj_id
+        self._grip_offset = float(np.linalg.norm(np.asarray(obj_to_body[0])))
+
+    def suction_holds(self):
+        """True if the constraint is alive and the object is still where it was when it was grasped."""
+        if not self.activated or self.contact_constraint is None or getattr(self, '_grip_body', None) is None:
+            return False
+        body_pose = p.getLinkState(self.ur5e, self.ur5e_ee_id)
+        obj_pos, _ = p.getBasePositionAndOrientation(self._grip_body)
+        offset = np.linalg.norm(np.asarray(obj_pos) - np.asarray(body_pose[0]))
+        return abs(offset - self._grip_offset) < self.params.suction_hold_tolerance
+
+    def _build_ik_kwargs(self):
+        """IK arguments: joint limits from the URDF (the base slide limited to the workspace), the home pose as
+        rest pose (null-space pull towards a sensible configuration) and tighter solver tolerances."""
+        lower, upper = [], []
+        for j in self.ur5e_joints:
+            info = p.getJointInfo(self.ur5e, j)
+            lo, hi = info[8], info[9]
+            if info[2] == p.JOINT_PRISMATIC:  # base slide: URDF says +-10000 m
+                lo, hi = -0.5, 0.5
+            lower.append(lo)
+            upper.append(hi)
+        return dict(lowerLimits=lower, upperLimits=upper, jointRanges=[u - l for l, u in zip(lower, upper)],
+                    restPoses=[float(q) for q in self.ik_rest_joints], maxNumIterations=100,
+                    residualThreshold=1e-4)
 
     def activate(self):
       """Simulate suction using a rigid fixed constraint to contacted object."""
@@ -274,7 +301,7 @@ class Environment:
           body_pose = p.getLinkState(self.ur5e, self.ur5e_ee_id)
           obj_id = -1
           for point in points:
-            obj_id_i, contact_link_i, dist_c, posonCup, normal_i = point[2], point[4], point[8], point[5], point[7]
+            obj_id_i, contact_link_i, posonCup, normal_i = point[2], point[4], point[5], point[7]
 
             if obj_id_i in self.obj_ids['rigid']:
 
@@ -284,11 +311,10 @@ class Environment:
                                                 world_to_body[1],
                                                 obj_pose[0], obj_pose[1])
               dot_i = normal_i[0]
-              if (np.linalg.norm(np.asarray(obj_to_body[0]))<dist) and np.abs(posonCup[1]-body_pose[0][1])<0.017 and posonCup[0]<body_pose[0][0] and dot_i>0.5:
+              if (np.linalg.norm(np.asarray(obj_to_body[0]))<dist) and np.abs(posonCup[1]-body_pose[0][1])<0.017 and posonCup[0]<body_pose[0][0] and dot_i>self.params.suction_min_alignment:
                 obj_id = obj_id_i
                 contact_link = contact_link_i
                 dist = np.linalg.norm(np.asarray(obj_to_body[0]))
-                contact_normal = normal_i
                 contact_pos = posonCup
           
           if obj_id in self.obj_ids['rigid']:
@@ -318,6 +344,7 @@ class Environment:
             self.offset_x = -pos_constrs[0]
             p.changeConstraint(self.contact_constraint,gearRatio=-1, erp=self.params.suction_erp,maxForce=self.params.suction_max_force)
             self.activated = True
+            self._remember_grip(obj_id, obj_to_body)
         else:
              closest = []
              min_dist = 1000
@@ -366,7 +393,8 @@ class Environment:
                 p.changeConstraint(self.contact_constraint,gearRatio=-1, erp=self.params.suction_erp,maxForce=self.params.suction_max_force)
                 self.offset_x = -obj_to_body[0][0]
 
-                self.activated = True              
+                self.activated = True
+                self._remember_grip(obj_id, obj_to_body)
                 self.offset_y = obj_to_body[0][1]
 
 
@@ -417,8 +445,6 @@ class Environment:
             break
           BOUND_TARG_UP = self.place_targets[key][1]
           BOUND_TARG_DOWN = self.place_targets[key][0]
-          Yup = int(np.round((BOUND_TARG_UP-BOUNDS[1,0]) / PIXEL_SIZE))
-          Ydown = int(np.round((BOUND_TARG_DOWN-BOUNDS[1,0])  / PIXEL_SIZE))
           if(BOUND_TARG_DOWN<=Y_pos<=BOUND_TARG_UP):
               self.id_list.append(id)
               self.new_class.append(LABELS[key])
@@ -465,7 +491,6 @@ class Environment:
             p.stepSimulation(self.client_id)
         d = 0
         info_scene = self.info
-        sorted = 0
         d = 0
         for id in info_scene:
             Y_pos = info_scene[id][0][1]
@@ -522,10 +547,8 @@ class Environment:
         self.body_ids = []
         obj_xyz = np.zeros((0, 2))
         ind = 0
-        yy = [-0.02, 0.02]
         for obj_name in obj_names:
           if (1):
-            BOUND_TARG = BOUNDS[1, :]
  
             # Random position at least min_dist from the other objects (spacing shrinks if the cabinet is too full).
             min_dist, attempts = 0.1, 0
@@ -694,6 +717,9 @@ class Environment:
         p.enableJointForceTorqueSensor(self.ur5e, self.ur5e_ee_id, 1)
         p.enableJointForceTorqueSensor(self.ur5e, 11, 1)
         p.enableJointForceTorqueSensor(self.ur5e, 10, 1)
+        self.force_monitor = ForceMonitor(p, self.ur5e, [self.ur5e_ee_id, 11, 10], self.params.force_window,
+                                          self.params.force_debounce)
+        self._ik_kwargs = self._build_ik_kwargs() if self.params.ik_limits else {}
 
 
         # Move robot to home joint configuration.
@@ -820,7 +846,6 @@ class Environment:
       class_mask_map = np.zeros_like(heightmap)
       id_mask_map = np.zeros_like(heightmap)
 
-      masks_heightmap = None
       id_mask = 0
       if masks is not None:
         for m in masks:
@@ -836,7 +861,6 @@ class Environment:
           if M['m00'] == 0:
               id_mask +=1
               continue
-          cx = int(M['m10']/M['m00'])
           cy = int(M['m01']/M['m00'])
           obj_class = ID_Mask[id_mask]
           if (obj_class == 1):
@@ -986,7 +1010,12 @@ class Environment:
         return color, depth, segm, config_camera["position"], quaternion, intrinsics 
 
     def __del__(self):
-        p.disconnect()
+        client = getattr(self, 'client_id', None)  # not set if __init__ failed early
+        if client is not None:
+            try:
+                p.disconnect(client)
+            except Exception:  # already disconnected / interpreter shutting down
+                pass
 
     def get_link_pose(self, body, link):
         result = p.getLinkState(body, link)
@@ -1012,7 +1041,6 @@ class Environment:
                 return True
 
             # Move with constant velocity
-            norm = np.linalg.norm(diff_joints)
             v = 100*diff_joints
             step_joints = current_joints + v*speed
             step_joints[-1] = np.pi
@@ -1039,7 +1067,7 @@ class Environment:
         jointPoses = p.calculateInverseKinematics(bodyUniqueId=self.ur5e,
             endEffectorLinkIndex=self.ur5e_ee_id,
             targetPosition=pose[0],
-             targetOrientation=pose[1]) #lowerLimits=[-6.283, -6.283, -3.141, -6.283, -6.283, -6.283, -10000]*3,
+             targetOrientation=pose[1], **self._ik_kwargs) #lowerLimits=[-6.283, -6.283, -3.141, -6.283, -6.283, -6.283, -10000]*3,
             # jointRanges=[12.566, 12.566, 6.282, 12.566, 12.566, 12.566, 20000]*3)
 
         success = self.move_joints(jointPoses,speed)
@@ -1052,7 +1080,6 @@ class Environment:
         diff = [targetPos[0] - newPos[0], targetPos[1] - newPos[1], targetPos[2] - newPos[2]]
         diff = np.array(diff)
         closeEnough = np.linalg.norm(diff) < threshold
-        dist2 = closeEnough
         iter = iter + 1
       return jointPoses, True
     
@@ -1076,6 +1103,8 @@ class Environment:
         n_push = np.int32(np.floor(np.linalg.norm(pose1 - pose0) / step_distance))  # every 1 cm
 
         success = True
+        if detect_force and self.params.filtered_force:
+            self.force_monitor.tare(step=lambda: p.stepSimulation(self.client_id))  # zero at the start of the motion
         for n in range(n_push):
             target = pose0 + n * vec * step_distance
             success &= self.move_ee_pose((target, rot), speed)
@@ -1090,11 +1119,15 @@ class Environment:
               start_sensing = 0.5 
 
             if detect_force and target[0]<start_sensing:
-                force = np.sum(np.abs(np.array(p.getJointState(self.ur5e, self.ur5e_ee_id)[2][:3])))
-                force2 = np.sum(np.abs(np.array(p.getJointState(self.ur5e, 11)[2][:3])))
-                force3 = np.sum(np.abs(np.array(p.getJointState(self.ur5e, 10)[2][:3])))
-                
-                if force > max_force or force2> max_force or force3 > max_force:
+                if self.params.filtered_force:
+                    exceeded = self.force_monitor.update(max_force)
+                    force = float(np.max(self.force_monitor.force()))
+                else:  # legacy: raw sum of |Fx|+|Fy|+|Fz| of three joints against the limit
+                    forces = [np.sum(np.abs(np.array(p.getJointState(self.ur5e, j)[2][:3])))
+                              for j in (self.ur5e_ee_id, 11, 10)]
+                    force = max(forces)
+                    exceeded = force > max_force
+                if exceeded:
                     target = pose0 +(n-1)* vec * step_distance
                     self.move_ee_pose((target, rot), speed)
                     print(f"Force is {force}, exceed the max force {max_force}")
@@ -1134,7 +1167,6 @@ class Environment:
         pos1[1] = min(pos1[1],self.bounds[1,1]-0.008)
         pos1[1] = max(pos1[1],self.bounds[1,0]+0.008)
 
-        vec = pos1 - pos0
         # Align against push direction.
         grasp_location_margin = 0.1
         angle = 0
@@ -1235,6 +1267,9 @@ class Environment:
         self.go_home()
 
         grasp_sucess = self.activated
+        if grasp_sucess and self.params.suction_verify and not self.suction_holds():
+          self.release()  # the object slipped off during the lift
+          grasp_sucess = False
         success &= grasp_sucess
       else:
         pos, _ = self.get_link_pose(self.ur5e, self.ur5e_ee_id)
@@ -1326,7 +1361,6 @@ class Environment:
       height = BOUNDS[2][1]-BOUNDS[2][0]
       bottom_width = BOUNDS[2][0]
       top_width = 0.05
-      x_disp = BOUNDS[0][0]
       # Bottom 
       half_extent = [self.final_scene_size[0]/2, self.final_scene_size[1]/2, bottom_width/2]
       wall_cid = p.createCollisionShape(shapeType=p.GEOM_BOX, halfExtents=half_extent)
@@ -1528,8 +1562,6 @@ class Environment:
       width = int(np.round((self.bounds[0, 1] - self.bounds[0, 0]) / PIXEL_SIZE))
       if px>width:
         px = width
-      finger_width = 0.03
-      safe_kernel_width = int(np.round((finger_width)/PIXEL_SIZE))
      
       
       local_patch_width = 0.03
@@ -1547,8 +1579,6 @@ class Environment:
     
     def px_to_xy(self,px,py):
       """Convert from 3D position to pixel location on heightmap."""
-      height = int(np.round((self.bounds[1, 1] - self.bounds[1, 0]) / PIXEL_SIZE))
-      width = int(np.round((self.bounds[0, 1] - self.bounds[0, 0]) / PIXEL_SIZE))
      
       xy = [px * PIXEL_SIZE + self.bounds[0][0],
                     py * PIXEL_SIZE + self.bounds[1][0]]

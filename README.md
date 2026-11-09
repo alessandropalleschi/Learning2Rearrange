@@ -25,8 +25,21 @@ Useful flags:
 | `--physics paper` | 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated; default `legacy`) |
 | `--placement heuristic\|learned` | where the held object is placed: rule from the paper, or a learned place head (see below) |
 | `--belief none\|spatial\|recurrent` | belief-state ablation (see below); `evaluate.py` needs the same value |
+| `--sim_quality improved` | opt-in simulation improvements: IK with joint limits, tared/filtered/debounced F/T contact detection, verified suction grasps (see below) |
 | `--randomize` | domain randomisation: object friction/mass, camera pose, sensor noise |
 | `--gui` | PyBullet GUI for the first simulator |
+
+### Simulation quality (`--sim_quality improved`, opt-in)
+The default reproduces the original simulator behaviour. `improved` switches on (all unvalidated against the legacy behaviour, so
+compare success rates and `profile_sim.py` timings before trusting it):
+* **IK**: `calculateInverseKinematics` gets the URDF joint limits (base slide limited to the workspace), the home pose as rest pose
+  and tighter solver tolerances (PyBullet ignores joint limits unless they are passed explicitly).
+* **Contact detection** (`force_sensing.py`): the joint F/T reaction wrench is tared at the start of each motion, median filtered and
+  debounced before it stops a motion. The raw reading contains the tool weight, differs per arm pose and spikes for single steps.
+* **Suction**: seal needs a surface normal within ~37 degrees of the cup axis (legacy: 60), and after the lift the object must still be
+  at its grasp offset, otherwise the grasp counts as lost (`suction_holds`).
+Not changed (needs tuning on your setup): explicit motor forces / velocity limits of the joint controller, and a force-limited
+vacuum model instead of the fixed constraint (`suction_max_force` is already a parameter; the `paper` preset uses 50 N).
 
 ### Placement ablation
 * `heuristic` - pick-and-place is one action; the place pixel is chosen by a hand-written rule (paper).
@@ -61,7 +74,7 @@ Evaluate a snapshot on fixed seeds (success rate and mean number of actions per 
 python evaluate.py --snapshot logs/train/models/snapshot-0010000.pth --objects 3 5 8 --episodes 20 --num_envs 4
 ```
 
-Tests (no PyBullet needed, uses a fake simulator): `python tests/test_training_loop.py`
+Tests (no PyBullet needed, uses a fake simulator): `pytest -q` (or `python tests/test_training_loop.py`); lint: `ruff check .`. CI runs both.
 
 ## Without a container
 `pip install torch` (CUDA build if you have a GPU) and `pip install -r requirements.txt`.
@@ -74,6 +87,8 @@ Tests (no PyBullet needed, uses a fake simulator): `python tests/test_training_l
 | `rearrange_env.py` | Gym-style `reset()/step()` wrapper: action execution, reward, termination, relabelling |
 | `models.py` | `QNet`: 4-channel input, GroupNorm, global-context block, shared backbone + push/pick heads |
 | `belief.py` | spatial belief tracker |
+| `force_sensing.py` | tared / filtered / debounced force-torque contact detection |
+| `profile_sim.py` | timing breakdown of the simulator (where does the time go?) |
 | `trainer.py` | batched double DQN: prioritized replay, Huber loss on the taken pixel, clipped targets, mixed precision, Polyak target update |
 | `policy.py` | epsilon-greedy action selection shared by training and evaluation |
 | `vec_env.py` | parallel simulators in worker processes |

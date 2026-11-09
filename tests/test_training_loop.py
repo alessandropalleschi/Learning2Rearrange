@@ -76,12 +76,76 @@ def test_replay():
     assert w.max() <= 1.0 + 1e-6
 
 
+class FakePhysics:
+    """Stand-in for pybullet's joint sensors: returns a scripted sequence of wrenches."""
+
+    def __init__(self, sequence):
+        self.sequence, self.k = sequence, 0
+
+    def getJointState(self, body, joint):
+        w = self.sequence[min(self.k, len(self.sequence) - 1)]
+        self.k += 1
+        return (0, 0, w, 0)
+
+
+def test_force_monitor():
+    from force_sensing import ForceMonitor
+    # static offset of 40 N (weight of the tool): must not trigger once tared
+    base = [40, 0, 0, 0, 0, 0]
+    seq = [base] * 4 + [[40, 0, 400, 0, 0, 0]] + [base] * 6 + [[40, 0, 400, 0, 0, 0]] * 4
+    mon = ForceMonitor(FakePhysics(seq), 0, [0], window=3, debounce=2)
+    mon.tare(samples=3)
+    assert np.allclose(mon.bias[0], base)
+    assert not mon.update(100.0)              # offset removed
+    assert not mon.update(100.0)              # a single-sample spike (400 N) is rejected by the median filter
+    for _ in range(6):
+        assert not mon.update(100.0)
+    hits = [mon.update(100.0) for _ in range(4)]  # sustained contact is reported
+    assert hits[-1] and not hits[0]
+
+
+def test_suction_and_ik_helpers():
+    """Suction hold verification and IK argument construction, against a fake physics backend."""
+    import env as real_env
+    from config import SimParams
+
+    class P:
+        JOINT_PRISMATIC, JOINT_REVOLUTE = 1, 0
+        obj_pos = (0.5, 0.0, 0.0)
+
+        def getLinkState(self, body, link):
+            return ((0.5, 0.0, 0.05),)
+
+        def getBasePositionAndOrientation(self, body):
+            return self.obj_pos, (0, 0, 0, 1)
+
+        def getJointInfo(self, body, j):
+            return (j, b'j', 1 if j == 0 else 0, 0, 0, 0, 0, 0, -10000.0 if j == 0 else -3.14, 10000.0 if j == 0 else 3.14)
+
+    fake, old = P(), real_env.p
+    real_env.p = fake
+    try:
+        sim = real_env.Environment.__new__(real_env.Environment)
+        sim.params, sim.ur5e, sim.ur5e_ee_id = SimParams(), 0, 9
+        sim.activated, sim.contact_constraint = True, 1
+        sim._remember_grip(7, ((0.0, 0.0, -0.05), (0, 0, 0, 1)))  # grasped 5 cm below the cup
+        assert sim.suction_holds()
+        fake.obj_pos = (0.5, 0.0, -0.1)          # the object sagged 5 cm: grasp lost
+        assert not sim.suction_holds()
+        sim.ur5e_joints, sim.ik_rest_joints = [0, 1, 2], np.zeros(3)
+        kw = sim._build_ik_kwargs()
+        assert kw['lowerLimits'][0] == -0.5 and kw['upperLimits'][0] == 0.5   # base slide limited to the workspace
+        assert kw['jointRanges'][1] == 6.28 and len(kw['restPoses']) == 3
+    finally:
+        real_env.p = old
+
+
 def test_belief_tracker():
     from belief import BeliefTracker, compact_belief, BELIEF_CHANNELS
     tr = BeliefTracker(age_horizon=5)
     sim = FakeSim()
     o1 = sim.get_observation()
-    b1 = tr.update(o1)
+    tr.update(o1)
     o2 = sim.get_observation()
     o2['colormap'][:, 60:] = 105  # cells seen before become occluded
     b2 = tr.update(o2, {'primitive': 'push', 'pix': (0, 50, 60), 'place_pix': None})
@@ -95,7 +159,6 @@ def test_belief_tracker():
 def test_models():
     import torch
     from models import QNet
-    x = torch.randn(2, 4, 160, 160)
     for belief, ch in (('none', 4), ('spatial', 11), ('recurrent', 4)):
         net = QNet(ch, belief, 8)
         x_ = torch.randn(2, ch, 160, 160)
@@ -173,6 +236,8 @@ def test_train_and_evaluate(belief='none', placement='heuristic'):
 
 if __name__ == '__main__':
     test_replay()
+    test_force_monitor()
+    test_suction_and_ik_helpers()
     test_belief_tracker()
     test_models()
     for mode in ('none', 'spatial', 'recurrent'):

@@ -23,8 +23,7 @@ from trainer import Trainer
 
 def main(args):
     cfg = Config(placement=args.placement, max_actions=10 ** 6)
-    params = SimParams.preset(args.physics)
-    params.step_distance, params.move_joints_max_steps = args.step_distance, args.move_budget
+    params = SimParams.from_args(args)
     sim_module.configure_cabinet(params)
     np.random.seed(args.seed)
     env = RearrangeEnv(cfg, num_obj=args.num_obj, params=params)
@@ -62,8 +61,6 @@ if __name__ == '__main__':
     parser.add_argument('--num_obj', type=int, default=3)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--top', type=int, default=15)
-    parser.add_argument('--step_distance', type=float, default=0.002)
-    parser.add_argument('--move_budget', type=int, default=1000)
-    parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy')
+    SimParams.add_arguments(parser)
     parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic')
     main(parser.parse_args())

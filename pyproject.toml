@@ -1,0 +1,16 @@
+[project]
+name = "learning2rearrange"
+version = "0.2.0"
+description = "Learning to rearrange objects in confined environments (pushing + pick-and-place, double DQN)"
+requires-python = ">=3.9"
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["docs", "assets"]
+
+[tool.ruff.lint]
+# real errors and undefined names; style rules are intentionally not enforced on the legacy simulator code
+select = ["E9", "F"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -88,6 +88,15 @@ class SimParams:
     step_distance: float = 0.002            # m between IK waypoints of straight-line moves
     move_joints_max_steps: int = 1000       # simulation-step budget of one joint move
 
+    # simulation quality options ('improved' preset). All default to the original behaviour.
+    ik_limits: bool = False                 # IK with joint limits, rest pose and tighter solver tolerances
+    filtered_force: bool = False            # contact stop from tared, median-filtered, debounced F/T readings
+    force_window: int = 5                   # samples of the median filter
+    force_debounce: int = 2                 # consecutive samples above the limit before a contact is reported
+    suction_min_alignment: float = 0.5      # min cos(angle) between cup axis and surface normal to seal (0.5 = 60 deg)
+    suction_verify: bool = False            # after lifting, check that the object is still held at its grasp offset
+    suction_hold_tolerance: float = 0.04    # m the object may drift from the grasp offset before the grasp is lost
+
     # domain randomisation (applied at every reset)
     randomize: bool = False
     friction_range: tuple = (0.3, 0.8)      # lateral friction of the objects
@@ -102,3 +111,25 @@ class SimParams:
             return SimParams(name='paper', cabinet_depth=0.40, cabinet_height=0.27, suction_max_force=50.0,
                              block_mass=0.3, cylinder_mass=0.25, randomize=randomize, sensor_noise=randomize)
         return SimParams(randomize=randomize, sensor_noise=randomize)
+
+    @classmethod
+    def from_args(cls, args):
+        """Build the parameters from the command-line flags shared by train / evaluate / profile."""
+        params = cls.preset(args.physics, randomize=getattr(args, 'randomize', False))
+        params.step_distance, params.move_joints_max_steps = args.step_distance, args.move_budget
+        if getattr(args, 'sim_quality', 'legacy') == 'improved':
+            params.ik_limits = params.filtered_force = params.suction_verify = True
+            params.suction_min_alignment = 0.8
+        return params
+
+    @staticmethod
+    def add_arguments(parser):
+        """Command-line flags that configure the simulation."""
+        parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy',
+                            help="'paper': 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated)")
+        parser.add_argument('--sim_quality', choices=['legacy', 'improved'], default='legacy',
+                            help="'improved': IK with joint limits, filtered force contact detection, verified suction "
+                                 "grasps (opt-in, not yet validated against the legacy behaviour)")
+        parser.add_argument('--step_distance', type=float, default=0.002,
+                            help='m between IK waypoints of straight moves (larger = faster, coarser; try 0.004)')
+        parser.add_argument('--move_budget', type=int, default=1000, help='simulation steps allowed per joint move')

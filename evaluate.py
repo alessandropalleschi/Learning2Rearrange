@@ -62,8 +62,7 @@ def evaluate(trainer, venv, cfg, num_obj, episodes, base_seed):
 
 def main(args):
     cfg = Config(max_actions=args.max_actions, belief=args.belief, placement=args.placement)
-    params = SimParams.preset(args.physics)
-    params.step_distance, params.move_joints_max_steps = args.step_distance, args.move_budget
+    params = SimParams.from_args(args)
     sim_module.configure_cabinet(params)
     seed_everything(args.seed)
     trainer = Trainer(cfg, is_testing=True, load_snapshot=True, snapshot=args.snapshot)
@@ -93,10 +92,7 @@ if __name__ == '__main__':
                         help='must match the snapshot')
     parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
                         help='must match the belief the snapshot was trained with')
-    parser.add_argument('--step_distance', type=float, default=0.002,
-                        help='m between IK waypoints of straight moves (larger = faster, coarser; try 0.004)')
-    parser.add_argument('--move_budget', type=int, default=1000, help='simulation steps allowed per joint move')
-    parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy')
+    SimParams.add_arguments(parser)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--logging_directory', default='eval')
     main(parser.parse_args())
