@@ -24,10 +24,11 @@ def select_placement(trainer, obs, place_q, explore_prob, cfg):
     return 'place', pix, float(q[pix[1], pix[2]])
 
 
-def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg):
+def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg, ws):
     """Epsilon-greedy over the primitives (push / pick; place while an object is held).
 
     push_q (2,h,w), pick_q (1,h,w) and place_q (1,h,w) are the raw Q-maps of the network for `obs`.
+    `ws` is the `Workspace` (needed to check that an explored push touches something).
     Returns (primitive, (rotation, row, col), predicted_value). explore_prob=0 gives the greedy policy.
     """
     if obs.get('held_class'):
@@ -46,7 +47,7 @@ def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg):
             if primitive == 'push':  # prefer pushes that actually touch something
                 for _ in range(100):
                     angle, length = decode_push(pix[0], cfg.push_lengths)
-                    if check_push(obs['depthmap'], pix[2], pix[1], angle, length):
+                    if check_push(ws, obs['depthmap'], pix[2], pix[1], angle, length):
                         break
                     pix = np.unravel_index(np.random.choice(valid), q[primitive].shape)
         else:

@@ -20,16 +20,9 @@ GOLDEN = os.path.join(ROOT, 'tests', 'golden')
 
 
 def _imports():
-    """Works with the flat (old) and the packaged (new) layout."""
-    try:
-        from l2r.config import Config, SimParams
-        from l2r.rearrange_env import RearrangeEnv
-        return Config, SimParams, RearrangeEnv, None
-    except ImportError:
-        from l2r.config import Config, SimParams
-        from l2r.sim.environment import configure_cabinet
-        from l2r.envs.rearrange import RearrangeEnv
-        return Config, SimParams, RearrangeEnv, configure_cabinet
+    from l2r.config import Config, SimParams
+    from l2r.envs.rearrange import RearrangeEnv
+    return Config, SimParams, RearrangeEnv
 
 
 def scripted_action(classmap, i):
@@ -45,20 +38,18 @@ def scripted_action(classmap, i):
 
 
 def run(quality='legacy', seed=3, steps=4):
-    Config, SimParams, RearrangeEnv, configure_cabinet = _imports()
+    Config, SimParams, RearrangeEnv = _imports()
     args = SimpleNamespace(physics='legacy', randomize=False, step_distance=0.002, move_budget=1000,
                            sim_quality=quality, camera_scale=1.0, force_limit=300.0, force_sense_x=None,
                            adaptive_step=False, velocity_scale=1.0)
     params = SimParams.from_args(args)
-    if configure_cabinet:
-        configure_cabinet(params)
     env = RearrangeEnv(Config(max_actions=50), num_obj=3, params=params)
     obs = env.reset(seed=seed)
     log = [{'reset_depth': round(float(obs['depthmap'].sum()), 3), 'reset_color': int(obs['colormap'].sum())}]
     for i in range(steps):
         action = scripted_action(env.obs['classmap'], i)
         obs, reward, terminated, truncated, info = env.step(action)
-        positions = sorted([[round(float(v), 4) for v in pos] for pos, *_ in env.sim.info.values()])
+        positions = sorted([[round(float(v), 4) for v in pos] for pos, _ in env.sim.scene.poses().values()])
         log.append({'step': i, 'action': [action['primitive'], list(action['pix'])], 'reward': reward,
                     'executed': bool(info['executed']), 'attempted': bool(info['attempted']),
                     'sorted': bool(info['sorted']), 'depth': round(float(obs['depthmap'].sum()), 3),

@@ -1,7 +1,8 @@
 """Object classes, colours and target regions of the rearrangement task."""
 import numpy as np
 
-CLASSES = ('blue', 'green', 'yellow')  # the three classes of the task, in the order of the target regions below
+CLASSES = ('blue', 'green', 'yellow')  # the three classes of the task
+TARGET_ORDER = ('blue', 'yellow', 'green')  # order in which the shuffled target regions are assigned to the classes
 
 COLORS = {  # RGBA of the class colours
     'blue': (78 / 255, 121 / 255, 167 / 255, 1.0),

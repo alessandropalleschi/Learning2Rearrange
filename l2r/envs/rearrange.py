@@ -1,4 +1,4 @@
-"""Gym-style wrapper around the PyBullet simulation (`env.Environment`).
+"""Gym-style wrapper around the PyBullet simulation (`l2r.sim.environment.Environment`).
 
     env = RearrangeEnv(cfg, gui=False, num_obj=1)
     obs = env.reset()
@@ -12,9 +12,10 @@ import random
 import numpy as np
 from skimage.draw import line
 
-from l2r.learning.belief import BeliefTracker, compact_belief
 from l2r.config import Config
-from l2r.sim.environment import Environment, BOUNDS, PIXEL_SIZE
+from l2r.learning.belief import BeliefTracker, compact_belief
+from l2r.sim.constants import LABELS, TARGET_ORDER
+from l2r.sim.environment import Environment
 
 
 def decode_push(index, push_lengths):
@@ -23,20 +24,12 @@ def decode_push(index, push_lengths):
     return np.deg2rad(direction * 180.0 - 90), push_lengths[length]
 
 
-def px_to_xy(px, py):
-    """Heightmap pixel -> workspace (x, y) in metres (pure geometry, no simulator needed)."""
-    return [px * PIXEL_SIZE + BOUNDS[0][0], py * PIXEL_SIZE + BOUNDS[1][0]]
-
-
-def y_to_pix(y):
-    return int(np.round((y - BOUNDS[1, 0]) / PIXEL_SIZE))
-
-
-def check_push(depth, pix_x, pix_y, angle, push_length=0.08):
-    """True if there is something in the way of the push (there must be an object to push)."""
-    y_end = px_to_xy(pix_x, pix_y)[1] + push_length * np.sin(angle)
+def check_push(ws, depth, pix_x, pix_y, angle, push_length=0.08):
+    """True if there is something in the way of the push (there must be an object to push).
+    `ws` is the `Workspace` (pixel <-> metre conversion); pixel coordinates are those of the Q-maps."""
+    y_end = ws.px_to_xy(pix_x, pix_y)[1] + push_length * np.sin(angle)
     depth_new = depth[4:depth.shape[0] - 4, 4:depth.shape[1]]
-    end_px = min(y_to_pix(y_end), depth_new.shape[0] - 1)
+    end_px = min(ws.y_to_row(y_end), depth_new.shape[0] - 1)
     rr, cc = line(pix_y, pix_x, end_px, pix_x)
     local_region_push = depth_new[rr, pix_x:]
     local_region_push = local_region_push[local_region_push > 0.02]
@@ -59,10 +52,10 @@ def select_placement(y_up, y_down, freespace, no_obj=False):
     return ind[1][k], ind[0][k]
 
 
-def get_place_pose(env, obj_class, freespace):
-    """Target region index follows the order of the environment's target dict (blue=1, yellow=5, green=3)."""
-    y_down, y_up, _ = env.add_target_pixels()
-    index = {1: 0, 5: 1, 3: 2}[int(obj_class)]
+def get_place_pose(sim, obj_class, freespace):
+    """Heuristic placement pixel (col, row) for an object of class label `obj_class`."""
+    y_down, y_up, _ = sim.target_pixels()  # in TARGET_ORDER
+    index = [LABELS[name] for name in TARGET_ORDER].index(int(obj_class))
     return select_placement(y_up[index], y_down[index], freespace)
 
 
@@ -71,6 +64,7 @@ class RearrangeEnv:
         self.cfg = cfg or Config()
         self.num_obj = num_obj
         self.sim = Environment(gui=gui, num_obj=[num_obj], params=params)
+        self.ws = self.sim.ws
         self.obs = None  # full (internal) observation of the current state
         self.tracker = BeliefTracker(self.cfg.belief_age_horizon)
         self.actions = 0
@@ -86,7 +80,7 @@ class RearrangeEnv:
             self.num_obj = num_obj
             self.sim.num_obj = [num_obj]
         while True:  # resample until the scene is valid and not already sorted
-            if self.sim.reset() and self.sim.check_sorted() < 1:
+            if self.sim.reset() and self.sim.fraction_sorted() < 1:
                 break
         self.actions = 0
         self.episode_return = 0.0
@@ -107,7 +101,7 @@ class RearrangeEnv:
         obs, sim, cfg = self.obs, self.sim, self.cfg
         prim, pix = action['primitive'], action['pix']
         px_x, px_y = pix[2], pix[1]
-        position = sim.px_to_xy(px_x, px_y)
+        position = self.ws.px_to_xy(px_x, px_y)
         executed, place_pix, attempted = False, None, False
         stops_before = sim.force_stops
         learned = cfg.placement == 'learned'
@@ -116,7 +110,7 @@ class RearrangeEnv:
 
         if prim == 'push':
             angle, length = decode_push(pix[0], cfg.push_lengths)
-            if check_push(obs['depthmap'], px_x, px_y, angle, length):
+            if check_push(self.ws, obs['depthmap'], px_x, px_y, angle, length):
                 attempted = True
                 executed = sim.push(position, angle, push_length=length)
         elif prim == 'place':
@@ -128,7 +122,7 @@ class RearrangeEnv:
             attempted = True
             held_class, held_id = obs['classmap'][px_y, px_x], obs['idmap'][px_y, px_x]
             executed = sim.pick(position)
-            if executed and learned and sim.check_sim():  # hold the object, ask for the placement
+            if executed and learned and sim.is_valid():  # hold the object, ask for the placement
                 self.holding = True
                 mid = self._full_obs(action)
                 mid['held_class'], mid['held_id'] = int(held_class), float(held_id)
@@ -138,13 +132,13 @@ class RearrangeEnv:
                         'episode_return': self.episode_return, 'actions': self.actions, 'phase': 'place'}
                 return self.compact(mid), 0.0, False, False, info
             if executed and not learned:
-                freespace = sim.get_observation()['freespace']
+                freespace = sim.observe()['freespace']
                 place_pix = get_place_pose(sim, held_class, freespace)
-                executed = sim.place(sim.px_to_xy(*place_pix))
+                executed = sim.place(self.ws.px_to_xy(*place_pix))
 
         sim.wait_static()
-        sorted_ = sim.check_sorted() == 1
-        valid = sim.check_sim()
+        sorted_ = sim.fraction_sorted() == 1
+        valid = sim.is_valid()
         self.actions += 1
 
         if not valid:
@@ -173,7 +167,7 @@ class RearrangeEnv:
     # ------------------------------------------------------------------ observations
     def _full_obs(self, last_action, executed=True, place_pix=None):
         """Simulator observation plus (if enabled) the spatial belief. Internal use only (large)."""
-        obs = self.sim.get_observation()
+        obs = self.sim.observe()
         if self.cfg.belief == 'spatial':
             if last_action is not None:
                 last_action = dict(last_action, place_pix=place_pix)
@@ -194,22 +188,22 @@ class RearrangeEnv:
 
     # ------------------------------------------------------------------ hindsight relabelling
     def _relabel_status(self):
-        possible = self.sim.check_relabel() == 1
-        return possible, list(self.sim.new_class) if possible else None
+        possible = self.sim.relabel_candidates() == 1
+        return possible, list(self.sim.scene.relabel_classes) if possible else None
 
     def relabel(self, obs, next_obs):
         """Compact copies of (obs, next_obs) -- full internal observations -- whose colours (including the
         remembered colours of the spatial belief) use the post-hoc class assignment of the current scene."""
-        sim = self.sim
+        ids, classes = list(self.sim.scene.relabel_ids), list(self.sim.scene.relabel_classes)
         pair = []
         for o in (obs, next_obs):
             new = self.compact(o)
-            if o.get('held_class') and o.get('held_id') in list(sim.id_list):
-                new['held_class'] = int(sim.new_class[list(sim.id_list).index(o['held_id'])])
-            new['colormap'] = sim.relabel_image([o['colormap']], [o['idmap']], sim.id_list, sim.new_class)[0]
+            if o.get('held_class') and o.get('held_id') in ids:
+                new['held_class'] = int(classes[ids.index(o['held_id'])])
+            new['colormap'] = self.sim.relabel_colormap(o['colormap'], o['idmap'])
             if 'belief_full' in o:
                 b = dict(o['belief_full'])
-                b['rgb'] = sim.relabel_image([b['rgb']], [b['id']], sim.id_list, sim.new_class)[0]
+                b['rgb'] = self.sim.relabel_colormap(b['rgb'], b['id'])
                 new['belief'] = compact_belief(b, self.cfg.belief_age_horizon)
             pair.append(new)
         return tuple(pair)

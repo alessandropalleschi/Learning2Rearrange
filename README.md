@@ -87,29 +87,44 @@ Evaluate a snapshot on fixed seeds (success rate and mean number of actions per 
 python evaluate.py --snapshot logs/train/models/snapshot-0010000.pth --objects 3 5 8 --episodes 20 --num_envs 4
 ```
 
-Tests (no PyBullet needed, uses a fake simulator): `pytest -q` (or `python tests/test_training_loop.py`); lint: `ruff check .`. CI runs both.
+Tests (no PyBullet needed, uses a fake simulator): `pytest -q`; lint: `ruff check .`. CI runs both.
 
 ## Without a container
 `pip install torch` (CUDA build if you have a GPU) and `pip install -r requirements.txt`.
 
 ## Code layout
-| file | purpose |
-|---|---|
-| `config.py` | all hyper-parameters, plus `SimParams` (physics presets, domain randomisation) |
-| `env.py` | PyBullet scene: UR5, cabinet, objects, suction, camera, heightmaps (physics constants at the top) |
-| `rearrange_env.py` | Gym-style `reset()/step()` wrapper: action execution, reward, termination, relabelling |
-| `models.py` | `QNet`: 4-channel input, GroupNorm, global-context block, shared backbone + push/pick heads |
-| `belief.py` | spatial belief tracker |
-| `force_sensing.py` | tared / filtered / debounced force-torque contact detection |
-| `demo_sim.py` | manual check of the simulator with the GUI (spawn objects, run the primitives, show a Q-map) |
-| `SIMULATION_NOTES.md` | review of the simulator, rendering and networks: errors fixed, findings, open issues |
-| `profile_sim.py` | timing breakdown of the simulator (where does the time go?) |
-| `trainer.py` | batched double DQN: prioritized replay, Huber loss on the taken pixel, clipped targets, mixed precision, Polyak target update |
-| `policy.py` | epsilon-greedy action selection shared by training and evaluation |
-| `vec_env.py` | parallel simulators in worker processes |
-| `evaluate.py` | fixed-seed evaluation per object count |
-| `logger.py` | episode CSV + TensorBoard |
-| `train.py` | training / testing loop, curriculum 1 -> 8 objects, episode CSV log, snapshots |
-| `tests/test_training_loop.py` | smoke test of the learning stack with a fake simulator (no PyBullet) |
+```
+train.py  evaluate.py  profile_sim.py  demo_sim.py      thin entry points (logic lives in l2r/)
+l2r/
+  config.py        Config (learning) and SimParams (physics, controller, camera options, presets)
+  training.py      TrainingLoop + Curriculum: parallel simulators, replay, hindsight relabelling, snapshots
+  evaluation.py    fixed-seed greedy evaluation per object count
+  profiling.py     timing and behaviour breakdown of the simulator
+  logger.py utils.py
+  envs/
+    rearrange.py   RearrangeEnv: Gym-style reset()/step(): action execution, reward, termination, relabelling
+    vec.py         parallel simulators in worker processes
+  learning/
+    models.py      QNet: 4-channel input, GroupNorm, global context, shared backbone, push/pick/place heads
+    trainer.py     batched double DQN (prioritized replay, Huber loss on the taken pixel, clipped targets, AMP)
+    policy.py      epsilon-greedy action selection, recurrent-belief bookkeeping
+    memory.py belief.py
+  sim/
+    environment.py Environment: wires the parts below to one PyBullet client (injectable for tests)
+    workspace.py   Workspace: cabinet bounds, heightmap grid, pixel <-> metre conversions (no global state)
+    constants.py   classes, colours, object catalogue, target-region candidates
+    scene.py       Scene: cabinet, objects, target regions, goal / invalid-state checks
+    camera.py      Camera: RGB-D rendering and its randomisation
+    vision.py      point cloud -> heightmaps, object masks, free-space map (pure numpy)
+    arm.py         Arm: joint control (legacy / rate-limited), IK, straight moves, force-limit stop
+    suction.py     SuctionCup: constraint-based vacuum model
+    primitives.py  Manipulator: push / pick / place
+    arm_control.py force_sensing.py   rate limiter and URDF limits; tared/filtered contact detection
+tests/             pytest: components against fakes, pipeline with a fake simulator, real-simulator regression
+SIMULATION_NOTES.md  review of the simulator, rendering and networks: errors fixed, findings, open issues
+```
+
+Tests: `pytest -q` (no PyBullet needed). With PyBullet and a recorded golden file, `L2R_GOLDEN=1 pytest tests/test_sim_regression.py`
+replays a seeded, scripted scenario on the real simulator (`python tests/sim_scenario.py record|check`).
 
 Snapshots saved by older versions (two separate BatchNorm networks, 6 input channels) are not compatible.
