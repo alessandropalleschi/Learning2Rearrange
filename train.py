@@ -9,15 +9,15 @@ from functools import partial
 
 import cv2
 
-import env as sim_module
-from config import Config, SimParams
-from logger import Logger
-from memory import Transition
-from policy import attach_initial, carry, carry_over, select_action
-from rearrange_env import make_env
-from trainer import Trainer
-from utils import seed_everything
-from vec_env import VecEnv
+import l2r.sim.environment as sim_module
+from l2r.config import Config, SimParams
+from l2r.logger import Logger
+from l2r.learning.memory import Transition
+from l2r.learning.policy import attach_initial, carry, carry_over, select_action
+from l2r.envs.rearrange import make_env
+from l2r.learning.trainer import Trainer
+from l2r.utils import seed_everything
+from l2r.envs.vec import VecEnv
 
 
 def main(args):

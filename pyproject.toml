@@ -3,6 +3,7 @@ name = "learning2rearrange"
 version = "0.2.0"
 description = "Learning to rearrange objects in confined environments (pushing + pick-and-place, double DQN)"
 requires-python = ">=3.9"
+dependencies = ["numpy", "scipy", "scikit-image", "opencv-python-headless", "pybullet", "torch"]
 
 [tool.ruff]
 line-length = 120
@@ -14,3 +15,7 @@ select = ["E9", "F"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["l2r*"]

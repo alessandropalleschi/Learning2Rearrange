@@ -14,11 +14,11 @@ import time
 
 import numpy as np
 
-import env as sim_module
-from config import Config, SimParams
-from policy import select_action
-from rearrange_env import RearrangeEnv
-from trainer import Trainer
+import l2r.sim.environment as sim_module
+from l2r.config import Config, SimParams
+from l2r.learning.policy import select_action
+from l2r.envs.rearrange import RearrangeEnv
+from l2r.learning.trainer import Trainer
 
 
 def main(args):

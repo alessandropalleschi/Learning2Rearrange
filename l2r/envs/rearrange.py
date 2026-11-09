@@ -12,9 +12,9 @@ import random
 import numpy as np
 from skimage.draw import line
 
-from belief import BeliefTracker, compact_belief
-from config import Config
-from env import Environment, BOUNDS, PIXEL_SIZE
+from l2r.learning.belief import BeliefTracker, compact_belief
+from l2r.config import Config
+from l2r.sim.environment import Environment, BOUNDS, PIXEL_SIZE
 
 
 def decode_push(index, push_lengths):

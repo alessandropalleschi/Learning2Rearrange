@@ -4,8 +4,8 @@
 """
 import numpy as np
 import matplotlib.pyplot as plt
-from rearrange_env import RearrangeEnv
-from trainer import Trainer
+from l2r.envs.rearrange import RearrangeEnv
+from l2r.learning.trainer import Trainer
 
 env = RearrangeEnv(gui=True, num_obj=5)
 obs = env.reset()

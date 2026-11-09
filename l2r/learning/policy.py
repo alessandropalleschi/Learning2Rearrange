@@ -1,7 +1,7 @@
 """Action selection shared by training and evaluation."""
 import numpy as np
 
-from rearrange_env import check_push, decode_push
+from l2r.envs.rearrange import check_push, decode_push
 
 
 def select_placement(trainer, obs, place_q, explore_prob, cfg):

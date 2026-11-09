@@ -19,13 +19,13 @@ except ImportError:  # stub the simulator modules so the code can be imported
         sys.modules[name] = types.ModuleType(name)
     sys.modules['pybullet_utils'].bullet_client = sys.modules['pybullet_utils.bullet_client']
 
-import rearrange_env  # noqa: E402
+import l2r.envs.rearrange as rearrange_env  # noqa: E402
 import train  # noqa: E402
 import evaluate  # noqa: E402
-from config import Config  # noqa: E402
-from memory import PrioritizedReplay  # noqa: E402
-from trainer import Trainer  # noqa: E402
-from vec_env import VecEnv  # noqa: E402
+from l2r.config import Config  # noqa: E402
+from l2r.learning.memory import PrioritizedReplay  # noqa: E402
+from l2r.learning.trainer import Trainer  # noqa: E402
+from l2r.envs.vec import VecEnv  # noqa: E402
 from functools import partial  # noqa: E402
 
 H, W = 100, 120
@@ -90,7 +90,7 @@ class FakePhysics:
 
 
 def test_force_monitor():
-    from force_sensing import ForceMonitor
+    from l2r.sim.force_sensing import ForceMonitor
     # static offset of 40 N (weight of the tool): must not trigger once tared
     base = [40, 0, 0, 0, 0, 0]
     seq = [base] * 4 + [[40, 0, 400, 0, 0, 0]] + [base] * 6 + [[40, 0, 400, 0, 0, 0]] * 4
@@ -107,8 +107,8 @@ def test_force_monitor():
 
 def test_suction_and_ik_helpers():
     """Suction hold verification and IK argument construction, against a fake physics backend."""
-    import env as real_env
-    from config import SimParams
+    import l2r.sim.environment as real_env
+    from l2r.config import SimParams
 
     class P:
         JOINT_PRISMATIC, JOINT_REVOLUTE = 1, 0
@@ -144,8 +144,8 @@ def test_suction_and_ik_helpers():
 def test_push_lengths():
     """Learned push: direction x length action space (network, masks, decoding)."""
     import torch
-    from models import QNet
-    from rearrange_env import decode_push
+    from l2r.learning.models import QNet
+    from l2r.envs.rearrange import decode_push
     L = 3
     net = QNet(4, 'none', 8, L)
     x = torch.randn(2, 4, 160, 160)
@@ -168,8 +168,8 @@ def test_push_lengths():
 
 def test_waypoints():
     """Straight-move waypoints: legacy spacing is unchanged, adaptive spacing is coarse only where nothing is touched."""
-    import env as real_env
-    from config import SimParams
+    import l2r.sim.environment as real_env
+    from l2r.config import SimParams
     sim = real_env.Environment.__new__(real_env.Environment)
     sim.bounds, sim.params = real_env.BOUNDS, SimParams()
     a, b = np.array([0.35, 0.0, 0.45]), np.array([-0.1, 0.0, 0.45])
@@ -187,9 +187,9 @@ def test_waypoints():
 
 def test_rate_limited_arm_controller():
     """The 'pd' controller: commands never jump, the arm converges without overshoot, limits come from the URDF."""
-    import env as real_env
-    from arm_control import joint_limits, rate_limited_command
-    from config import SimParams
+    import l2r.sim.environment as real_env
+    from l2r.sim.arm_control import joint_limits, rate_limited_command
+    from l2r.config import SimParams
 
     cmd = rate_limited_command(np.zeros(3), np.array([1.0, -1.0, 0.001]), np.array([2.0, 2.0, 2.0]), 0.01)
     assert np.allclose(cmd, [0.02, -0.02, 0.001])  # at most v_max * dt, never past the goal
@@ -238,7 +238,7 @@ def test_rate_limited_arm_controller():
 
 def test_class_masks():
     """Recolouring/labelling of the camera image: robust against ids that look like class labels."""
-    import env as real_env
+    import l2r.sim.environment as real_env
     sim = real_env.Environment.__new__(real_env.Environment)
     # object ids 3 and 5 are *also* class labels (green = 3, yellow = 5): the old in-place relabelling could confuse them
     sim.body_ids = [3, 5, 9]
@@ -259,7 +259,7 @@ def test_class_masks():
 
 
 def test_belief_tracker():
-    from belief import BeliefTracker, compact_belief, BELIEF_CHANNELS
+    from l2r.learning.belief import BeliefTracker, compact_belief, BELIEF_CHANNELS
     tr = BeliefTracker(age_horizon=5)
     sim = FakeSim()
     o1 = sim.get_observation()
@@ -276,7 +276,7 @@ def test_belief_tracker():
 
 def test_models():
     import torch
-    from models import QNet
+    from l2r.learning.models import QNet
     for belief, ch in (('none', 4), ('spatial', 11), ('recurrent', 4)):
         net = QNet(ch, belief, 8)
         x_ = torch.randn(2, ch, 160, 160)
@@ -311,7 +311,7 @@ def test_learned_placement_env():
     nxt, r, term, trunc, info = env.step({'primitive': 'place', 'pix': (0, 30, 40)})
     assert r == cfg.reward_step and not env.holding and env.actions == 1 and 'held_class' not in nxt
     # the policy: only free cells, held object -> place
-    import policy
+    import l2r.learning.policy as policy
     trainer = Trainer(cfg)
     q = trainer.forward_batch([mid])
     prim, pix, _ = policy.select_action(trainer, mid, q.push[0], q.pick[0], q.place[0], 0.0, cfg)
@@ -331,7 +331,7 @@ def test_train_and_evaluate(belief='none', placement='heuristic', push_lengths=(
         save_visualizations=False, updates_per_step=1, physics='legacy', randomize=False, max_iterations=24,
         start_method='fork', belief=belief, placement=placement, eps_decay=0.9995, push_lengths=push_lengths,
         step_distance=0.002, move_budget=1000)
-    import config
+    import l2r.config as config
     orig = config.Config
     # tiny batch so the buffer is large enough to optimise within a few steps
     train.Config = lambda **kw: orig(batch_size=4, **kw)

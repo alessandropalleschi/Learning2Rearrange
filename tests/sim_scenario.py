@@ -26,9 +26,9 @@ def _imports():
         from l2r.rearrange_env import RearrangeEnv
         return Config, SimParams, RearrangeEnv, None
     except ImportError:
-        from config import Config, SimParams
-        from env import configure_cabinet
-        from rearrange_env import RearrangeEnv
+        from l2r.config import Config, SimParams
+        from l2r.sim.environment import configure_cabinet
+        from l2r.envs.rearrange import RearrangeEnv
         return Config, SimParams, RearrangeEnv, configure_cabinet
 
 

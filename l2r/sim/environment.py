@@ -6,9 +6,9 @@ import random
 from scipy import ndimage
 from copy import deepcopy
 import cv2
-from config import SimParams
-from arm_control import joint_limits, rate_limited_command
-from force_sensing import ForceMonitor
+from l2r.config import SimParams
+from l2r.sim.arm_control import joint_limits, rate_limited_command
+from l2r.sim.force_sensing import ForceMonitor
 from random import sample
 PIXEL_SIZE = 0.005
 

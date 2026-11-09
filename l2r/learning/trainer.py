@@ -7,10 +7,10 @@ import torch
 import torch.nn.functional as F
 from scipy import ndimage
 
-from config import Config
-from memory import ReplayMemory, PrioritizedReplay
-from belief import BELIEF_CHANNELS
-from models import QNet, DEVICE, ACTION_CHANNELS, HELD_CLASSES
+from l2r.config import Config
+from l2r.learning.memory import ReplayMemory, PrioritizedReplay
+from l2r.learning.belief import BELIEF_CHANNELS
+from l2r.learning.models import QNet, DEVICE, ACTION_CHANNELS, HELD_CLASSES
 
 QMaps = namedtuple('QMaps', ['push', 'pick', 'place', 'hidden'])
 

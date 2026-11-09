@@ -11,13 +11,13 @@ from functools import partial
 
 import numpy as np
 
-import env as sim_module
-from config import Config, SimParams
-from policy import attach_initial, carry, select_action
-from rearrange_env import make_env
-from trainer import Trainer
-from utils import seed_everything
-from vec_env import VecEnv
+import l2r.sim.environment as sim_module
+from l2r.config import Config, SimParams
+from l2r.learning.policy import attach_initial, carry, select_action
+from l2r.envs.rearrange import make_env
+from l2r.learning.trainer import Trainer
+from l2r.utils import seed_everything
+from l2r.envs.vec import VecEnv
 
 
 def evaluate(trainer, venv, cfg, num_obj, episodes, base_seed):
