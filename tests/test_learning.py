@@ -158,10 +158,15 @@ import pytest  # noqa: E402
 
 
 @pytest.mark.parametrize('decoder,backbone', [('plain', 'ppm'), ('fpn', 'conv'), ('attn_unet', 'conv'), ('unet_attn4', 'conv'),
-                                              ('fpn', 'hybrid'), ('attn_unet', 'ppm')])
+                                              ('fpn', 'hybrid'), ('attn_unet', 'ppm'), ('unet', 'aspp'), ('unet', 'ppm_aspp'), ('unet', 'os4+ppm'),
+                                              ('unet_attn4', 'os4+aspp')])
 def test_decoder_variants_are_consistent_and_trainable(decoder, backbone):
     torch.manual_seed(0)
-    net = QNet(4, 'none', 8, 1, False, backbone=backbone, transformer_dim=32, transformer_layers=1, decoder=decoder)
+    stride4 = backbone.startswith('os4+')
+    backbone = backbone.replace('os4+', '')
+    net = QNet(4, 'none', 8, 1, False, backbone=backbone, transformer_dim=32, transformer_layers=1, decoder=decoder, stride4=stride4)
+    if stride4:
+        assert net.encode(torch.randn(1, 4, 128, 104)).shape[-2:] == (32, 26)
     for p in net.context.parameters():  # zero-initialised residual outputs (pyramid pooling / transformer): make them active
         if p.dim() > 1 and p.abs().sum() == 0:
             torch.nn.init.normal_(p, std=0.05)

@@ -83,6 +83,25 @@ class PyramidPooling(nn.Module):
         return x + self.fuse(torch.cat([x, *pooled], dim=1))
 
 
+class ASPP(nn.Module):
+    """Atrous spatial pyramid pooling (DeepLab): parallel 3x3 convs with different dilations plus a global-pool branch, fused back into the
+    map (residual, zero-initialised). Multi-scale context that keeps local detail. The rates are small: the bottleneck map is small."""
+
+    def __init__(self, channels, rates=(1, 2, 4)):
+        super().__init__()
+        inner = channels // 4
+        self.branches = nn.ModuleList([nn.Sequential(nn.Conv2d(channels, inner, 3, padding=r, dilation=r, bias=False), norm(inner),
+                                                     nn.ReLU(inplace=True)) for r in rates])
+        self.pool = nn.Sequential(nn.Conv2d(channels, inner, 1), nn.ReLU(inplace=True))
+        self.fuse = nn.Conv2d((len(rates) + 1) * inner, channels, 1)
+        nn.init.zeros_(self.fuse.weight)
+        nn.init.zeros_(self.fuse.bias)
+
+    def forward(self, x):
+        pooled = self.pool(F.adaptive_avg_pool2d(x, 1)).expand(-1, -1, *x.shape[-2:])
+        return x + self.fuse(torch.cat([branch(x) for branch in self.branches] + [pooled], dim=1))
+
+
 class AttentionGate(nn.Module):
     """Attention U-Net gate: a skip feature is scaled by a map computed from the skip and the (upsampled) decoder feature, so the skip
     passes only what is relevant for the current context. The gate starts at about 1/2 everywhere and is learned."""
@@ -277,7 +296,8 @@ class QNet(nn.Module):
     nr_rotations = 2  # push left / right (0 and 180 degrees)
 
     def __init__(self, in_channels=IN_CHANNELS, belief='none', hidden=64, n_push_lengths=1, learned_placement=True,
-                 backbone='conv', transformer_dim=192, transformer_layers=3, hierarchical=False, n_pick=1, skips=False, policy_heads=False, decoder='plain', encoder='resnet'):
+                 backbone='conv', transformer_dim=192, transformer_layers=3, hierarchical=False, n_pick=1, skips=False, policy_heads=False, decoder='plain', encoder='resnet',
+                 stride4=False):
         """learned_placement: build the place head (conditioned on the held class). Without it `forward` returns
         `None` as place map: the head would cost about as much as the pick head for nothing.
         n_pick: pick Q-map channels (parallel-jaw gripper: one per jaw yaw; suction cup: 1)."""
@@ -289,6 +309,8 @@ class QNet(nn.Module):
         assert decoder in DECODERS, decoder
         self.decoder_kind, self.skips = decoder, decoder != 'plain'
         self.policy_heads = policy_heads
+        self.stride4 = stride4  # bottleneck at 1/4 instead of 1/8 resolution (4x more cells): the last encoder stage does not downsample
+        assert not stride4 or (decoder in ('unet', 'attn_unet', 'unet_attn4') and encoder in ('resnet', 'convnext')), 'stride4: U-Net decoders, ResNet/ConvNeXt encoders'
         self.encoder_kind = encoder
         if decoder == 'hrnet':
             self.trunk = HRNetTrunk(in_channels)
@@ -307,7 +329,8 @@ class QNet(nn.Module):
                 self.rb1, self.rb2, self.rb3 = ResidualBlock(64, 128), ResidualBlock(128, 256), ResidualBlock(256, 512)
         # bottleneck: pooled global context (conv backbone) or global self-attention (hybrid conv + transformer)
         self.context = (TransformerBottleneck(512, transformer_dim, transformer_layers) if backbone == 'hybrid'
-                        else PyramidPooling(512) if backbone == 'ppm' else GlobalContext(512))
+                        else PyramidPooling(512) if backbone == 'ppm' else ASPP(512) if backbone == 'aspp'
+                        else nn.Sequential(PyramidPooling(512), ASPP(512)) if backbone == 'ppm_aspp' else GlobalContext(512))
         if belief == 'recurrent':
             self.rec_in = nn.Conv2d(512 + ACTION_CHANNELS, hidden, 1)
             self.gru = ConvGRUCell(hidden, hidden)
@@ -366,7 +389,7 @@ class QNet(nn.Module):
         s0 = self.stem(x)
         s1 = self.rb1(F.max_pool2d(s0, 2))
         s2 = self.rb2(F.max_pool2d(s1, 2))
-        return self.rb3(F.max_pool2d(s2, 2)), (s0, s1, s2)
+        return self.rb3(s2 if self.stride4 else F.max_pool2d(s2, 2)), (s0, s1, s2)
 
     def encode(self, x):
         """Input -> bottleneck features (B,512,H/8,W/8)."""
@@ -398,7 +421,7 @@ class QNet(nn.Module):
                                                        for l in levels[:-1]], dim=1))
         if self.decoder_kind == 'unet_attn4':
             s2 = self.attn4(s2)
-        up = self._up(x)
+        up = x if self.stride4 else self._up(x)
         if self.decoder_kind == 'attn_unet':
             s2 = self.gates[0](s2, up)
         x = self.rb5(torch.cat([up, s2], dim=1))

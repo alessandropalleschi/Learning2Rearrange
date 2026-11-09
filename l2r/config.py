@@ -48,6 +48,7 @@ class Config:
     # --- Network architecture (ablation): U-Net skip connections; explicit task-geometry input channels (target-region bands per
     #     class + row / column coordinates) ---
     arch_skips: bool = False
+    arch_stride4: bool = False  # bottleneck at 1/4 resolution (U-Net decoders): 4x more cells at the context / belief level
     arch_encoder: str = 'resnet'  # 'resnet' | 'convnext' (blocks of the encoder stages)
     arch_decoder: str = 'plain'  # 'plain' | 'unet' | 'fpn' | 'attn_unet' | 'unet_attn4'  (arch_skips is the same as 'unet')
     equiv_sigma: float = 0.0  # 0: equivalent cells all weigh 1 (hard); s > 0: weight exp(-d^2 / 2 s^2) by distance (cells) to the taken cell
@@ -134,7 +135,7 @@ class Config:
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
                    footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
-                   hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), arch_decoder=get('arch_decoder', 'plain'), arch_encoder=get('arch_encoder', 'resnet'), policy_topk=get('policy_topk', 10), arch_skips=get('arch_skips', False),
+                   hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), arch_decoder=get('arch_decoder', 'plain'), arch_encoder=get('arch_encoder', 'resnet'), policy_topk=get('policy_topk', 10), arch_skips=get('arch_skips', False), arch_stride4=get('arch_stride4', False),
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
                    equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
                    grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
@@ -151,7 +152,7 @@ class Config:
                             help="'learned': a Q-head chooses where to place the held object (default: rule from the paper)")
         parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
                             help='belief state ablation: memoryless / spatial memory map / ConvGRU latent')
-        parser.add_argument('--backbone', choices=['conv', 'hybrid', 'ppm'], default='conv',
+        parser.add_argument('--backbone', choices=['conv', 'hybrid', 'ppm', 'aspp', 'ppm_aspp'], default='conv',
                             help="'hybrid': transformer encoder on the 1/8-resolution bottleneck of the conv network")
         parser.add_argument('--jaw_yaws', type=int, default=5,
                             help='jaw orientations of the gripper over +-60 degrees (--end_effector gripper)')
@@ -175,6 +176,7 @@ class Config:
         parser.add_argument('--arch_decoder', choices=['plain', 'unet', 'fpn', 'attn_unet', 'unet_attn4', 'hrnet'], default='plain',
                             help='decoder: plain (original), unet skips, fpn pyramid, attn_unet (attention-gated skips), unet_attn4 '
                                  '(plus global attention at 1/4 resolution)')
+        parser.add_argument('--arch_stride4', action='store_true', help='bottleneck at 1/4 resolution instead of 1/8 (needs a U-Net decoder)')
         parser.add_argument('--arch_skips', action='store_true', help='U-Net skip connections from the encoder to the decoder')
         parser.add_argument('--equiv_targets', action='store_true',
                             help='regress the TD target at every cell equivalent to the taken action (the whole front band of the '
