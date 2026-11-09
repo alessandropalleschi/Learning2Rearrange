@@ -12,7 +12,7 @@ from l2r.envs.rearrange import make_env
 from l2r.envs.vec import VecEnv
 from l2r.learning.memory import Transition
 from l2r.learning.policy import attach_initial, carry, carry_over, select_for
-from l2r.learning.trainer import Trainer
+from l2r.learning.factory import make_trainer
 from l2r.logger import Logger
 from l2r.sim.workspace import Workspace
 from l2r.utils import seed_everything
@@ -65,7 +65,7 @@ class TrainingLoop:
         n = args.num_envs
         self.venv = VecEnv([partial(make_env, self.cfg, args.gui and r == 0, self.cfg.start_objects, params,
                                     args.random_seed + r) for r in range(n)], start_method=args.start_method)
-        self.trainer = Trainer(self.cfg, is_testing=args.is_testing, load_snapshot=args.load_snapshot,
+        self.trainer = make_trainer(self.cfg, is_testing=args.is_testing, load_snapshot=args.load_snapshot,
                                snapshot=args.snapshot, snapshot_target=args.snapshot_target)
         self.logger = Logger(self.log_dir)
         if args.demos:

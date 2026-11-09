@@ -47,7 +47,7 @@ class Trainer(object):
             torch.backends.cudnn.benchmark = True  # the input size is fixed: let cuDNN pick the fastest kernels
         net_args = (in_channels, self.belief, self.cfg.recurrent_hidden, n_len, self.learned_placement, self.cfg.backbone,
                     self.cfg.transformer_dim, self.cfg.transformer_layers, self.cfg.hierarchy, self.cfg.pick_channels,
-                    self.cfg.arch_skips)
+                    self.cfg.arch_skips, self.cfg.agent == 'policy_critic')
         self.model, self.model_target = QNet(*net_args).to(DEVICE), QNet(*net_args).to(DEVICE)
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
@@ -358,6 +358,7 @@ class Trainer(object):
         if demo is not None and np.any(demo):
             loss = loss + self.cfg.demo_margin_weight * self._margin_loss(x, states, prim, rot, rows, cols, np.asarray(demo),
                                                                          (hp, ap, held), h, w)
+        loss = loss + self._extra_loss(x, states, transitions, demo, (hp, ap, held), h, w)
         self.last_td = (pred - label).detach().cpu().numpy()
 
         self.optimizer.zero_grad()
@@ -410,6 +411,10 @@ class Trainer(object):
                 weights[rr, cc] = np.exp(-((rr - r) ** 2 + (cc - c) ** 2) / (2 * self.cfg.equiv_sigma ** 2))
             out[i] = weights
         return torch.from_numpy(out).to(DEVICE)
+
+    def _extra_loss(self, x, states, transitions, demo, inputs, h, w):
+        """Hook for agents with additional objectives (policy-critic: behaviour cloning of the policy heads). Default: none."""
+        return 0.0
 
     def _margin_loss(self, x, states, prim, rot, rows, cols, demo, inputs, h, w):
         """DQfD: max_a [Q(s,a) + l * (a != a_E)] - Q(s, a_E), over the feasible actions, averaged over demonstration samples.

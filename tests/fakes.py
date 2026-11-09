@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from l2r.learning.object_centric import CLASS_RGB
 from l2r.sim.vision import relabel_colormap
 from l2r.sim.workspace import Workspace
 
@@ -39,6 +40,7 @@ class FakeSim:
         classes = (depth > 0).astype(np.uint8)[4:-4, 4:]
         color = np.random.randint(0, 254, (H, W, 3), dtype=np.uint8)
         color[:, :30] = 105  # occluded (grey) cells
+        color[40:60, 50:70] = CLASS_RGB[0]  # the object is blue (a class colour), so colour-based instance extraction finds it
         return {'colormap': color, 'depthmap': depth, 'classmap': classes, 'idmap': classes.astype(np.float32),
                 'freespace': np.ones((ROWS, COLS), np.float32)}
 

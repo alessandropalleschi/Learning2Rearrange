@@ -15,7 +15,7 @@ import numpy as np
 from l2r.config import Config, SimParams
 from l2r.envs.rearrange import RearrangeEnv
 from l2r.learning.policy import select_for
-from l2r.learning.trainer import Trainer
+from l2r.learning.factory import make_trainer
 from l2r.sim.workspace import Workspace
 
 
@@ -25,7 +25,7 @@ def analyse(args):
     params = SimParams.from_args(args)
     ws = Workspace.from_params(params)
     np.random.seed(args.seed)
-    env, trainer = RearrangeEnv(cfg, num_obj=args.num_obj, params=params), Trainer(cfg, is_testing=True)
+    env, trainer = RearrangeEnv(cfg, num_obj=args.num_obj, params=params), make_trainer(cfg, is_testing=True)
     obs, rows = env.reset(), []
     for _ in range(args.actions):
         before = env.sim.scene.progress(), env.sim.scene.positions()

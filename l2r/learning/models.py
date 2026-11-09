@@ -124,14 +124,14 @@ class ConvGRUCell(nn.Module):
         return (1 - z) * h + z * n
 
 
-Outputs = namedtuple('Outputs', ['push', 'pick', 'place', 'hidden', 'lengths', 'prim'])
+Outputs = namedtuple('Outputs', ['push', 'pick', 'place', 'hidden', 'lengths', 'prim', 'policy'], defaults=(None,))
 
 
 class QNet(nn.Module):
     nr_rotations = 2  # push left / right (0 and 180 degrees)
 
     def __init__(self, in_channels=IN_CHANNELS, belief='none', hidden=64, n_push_lengths=1, learned_placement=True,
-                 backbone='conv', transformer_dim=192, transformer_layers=3, hierarchical=False, n_pick=1, skips=False):
+                 backbone='conv', transformer_dim=192, transformer_layers=3, hierarchical=False, n_pick=1, skips=False, policy_heads=False):
         """learned_placement: build the place head (conditioned on the held class). Without it `forward` returns
         `None` as place map: the head would cost about as much as the pick head for nothing.
         n_pick: pick Q-map channels (parallel-jaw gripper: one per jaw yaw; suction cup: 1)."""
@@ -140,6 +140,7 @@ class QNet(nn.Module):
         self.belief, self.hidden, self.n_push_lengths = belief, hidden, n_push_lengths
         self.learned_placement, self.backbone, self.hierarchical = learned_placement, backbone, hierarchical
         self.skips = skips
+        self.policy_heads = policy_heads
         self.stem = nn.Sequential(nn.Conv2d(in_channels, 64, 3, padding=1, bias=False), norm(64), nn.ReLU(inplace=True))
         self.rb1, self.rb2, self.rb3 = ResidualBlock(64, 128), ResidualBlock(128, 256), ResidualBlock(256, 512)
         # bottleneck: pooled global context (conv backbone) or global self-attention (hybrid conv + transformer)
@@ -166,6 +167,11 @@ class QNet(nn.Module):
         else:
             self.push_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, n_push_lengths, 1))
         self.pick_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, n_pick, 1))
+        if policy_heads:  # policy heatmaps (logits) next to the Q critic: trained on demonstrations, they propose the cells
+            self.pi_push = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, n_push_lengths, 1))
+            self.pi_pick = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, n_pick, 1))
+            if learned_placement:
+                self.pi_place = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
         if learned_placement:  # Q-map over the free cells, conditioned on the class of the object in the gripper
             self.place_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
             self.held_embed = nn.Linear(len(HELD_CLASSES), 512)
@@ -249,7 +255,11 @@ class QNet(nn.Module):
         place = self.place_head(f0) if self.learned_placement else None
         if not self.hierarchical:
             push = torch.cat([self.push_head(f0), self.flip(self.push_head(f1))], dim=1)
-            return Outputs(push, self.pick_head(f0), place, h, None, None)
+            policy = None
+            if self.policy_heads:
+                policy = (torch.cat([self.pi_push(f0), self.flip(self.pi_push(f1))], dim=1), self.pi_pick(f0),
+                          self.pi_place(f0) if self.learned_placement else None)
+            return Outputs(push, self.pick_head(f0), place, h, None, None, policy)
         l0, l1 = torch.sigmoid(self.length_head(f0)), torch.sigmoid(self.length_head(f1))
         push = torch.cat([self._push_critic(f0, l0), self.flip(self._push_critic(f1, l1))], dim=1)
         lengths = torch.cat([l0, self.flip(l1)], dim=1)

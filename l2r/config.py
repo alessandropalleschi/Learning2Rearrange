@@ -40,6 +40,8 @@ class Config:
     # --- Agent (architecture comparison): 'dense' = pixel Q-maps (default); 'object' = object-centric Q (one token per visible object,
     #     Q per object-action slot); 'policy_critic' = dense Q critic + a policy heatmap trained on demonstrations that proposes cells ---
     agent: str = 'dense'
+    policy_topk: int = 10  # policy_critic: cells proposed per primitive
+    policy_bc_weight: float = 1.0  # policy_critic: weight of the behaviour-cloning loss on demonstration samples
     object_dim: int = 64
     object_layers: int = 2
 
@@ -130,7 +132,7 @@ class Config:
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
                    footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
-                   hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), arch_skips=get('arch_skips', False),
+                   hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), policy_topk=get('policy_topk', 10), arch_skips=get('arch_skips', False),
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
                    equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
                    grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
@@ -164,6 +166,7 @@ class Config:
         parser.add_argument('--agent', choices=['dense', 'object', 'policy_critic'], default='dense',
                             help="'object': object-centric Q (transformer over visible objects, Q per object-action slot; heuristic "
                                  "placement); 'policy_critic': dense critic + demonstration-trained policy heatmap proposing cells")
+        parser.add_argument('--policy_topk', type=int, default=10, help='policy_critic: cells the policy proposes per primitive')
         parser.add_argument('--arch_skips', action='store_true', help='U-Net skip connections from the encoder to the decoder')
         parser.add_argument('--equiv_targets', action='store_true',
                             help='regress the TD target at every cell equivalent to the taken action (the whole front band of the '
