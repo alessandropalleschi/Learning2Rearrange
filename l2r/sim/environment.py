@@ -2,17 +2,19 @@
 YCB objects and an RGB-D camera. Components live in the sibling modules; this class wires them to one client."""
 import logging
 
+import numpy as np
 import pybullet
 import pybullet_data
 from pybullet_utils import bullet_client
 
 from l2r.config import SimParams
+from l2r.perception import make_perception
 from l2r.sim.arm import Arm
 from l2r.sim.camera import Camera
 from l2r.sim.primitives import Manipulator
 from l2r.sim.scene import Scene
 from l2r.sim.suction import SuctionCup
-from l2r.sim.vision import build_observation, relabel_colormap
+from l2r.sim.vision import build_observation, relabel_colormap, top_view_ids
 from l2r.sim.workspace import Workspace
 
 log = logging.getLogger(__name__)
@@ -24,18 +26,20 @@ WAIT_STATIC_MAX_STEPS = 480  # simulation-step budget of wait_static (1 s of sim
 class Environment:
     """One simulated cabinet. All randomness comes from `numpy.random` / `random` (seed them for reproducibility)."""
 
-    def __init__(self, gui=False, time_step=TIME_STEP, num_obj=(9,), params=None, client=None):
+    def __init__(self, gui=False, time_step=TIME_STEP, num_obj=(9,), params=None, client=None, perception=None):
         """
         Args:
             gui: show the PyBullet viewer (needs a display); headless runs use the CPU renderer.
             num_obj: the number of objects of an episode is sampled from this sequence.
             params: `SimParams` (physics, controller and camera options).
             client: an existing PyBullet client (dependency injection for tests); default: a new one.
+            perception: object-mask source (`l2r.perception`); default from `params.perception`.
         """
         self.params = params or SimParams()
         self.num_obj = list(num_obj)
         self.time_step = time_step
         self.ws = Workspace.from_params(self.params)
+        self.perception = perception or make_perception(self.params)
         self.p = client or bullet_client.BulletClient(connection_mode=pybullet.GUI if gui else pybullet.DIRECT)
         self.p.setAdditionalSearchPath(pybullet_data.getDataPath())
         self.p.setTimeStep(time_step)
@@ -90,8 +94,23 @@ class Environment:
 
     # ------------------------------------------------------------------ observation and task state
     def observe(self):
-        """Maps of the current scene: 'colormap' / 'depthmap' (padded) and 'idmap' / 'classmap' / 'freespace'."""
-        return build_observation(self.camera.render(), self.scene.names, self.ws, self.scene.target_pixels())
+        """Maps of the current scene: 'colormap' / 'depthmap' (padded) and 'idmap' / 'classmap' / 'freespace'.
+
+        The object masks come from `self.perception`. With a learned perception the observation also carries the privileged
+        ground truth ('gt_idmap': PyBullet object id per cell, 'instance_to_object': predicted instance -> object id): they
+        serve the learning signals that need them (hindsight relabelling), never the policy."""
+        color, depth, object_ids, position, rotation, intrinsics = self.camera.render()
+        seg = self.perception.segment(color, depth, object_ids, self.scene)
+        rows = self.scene.target_pixels()
+        learned = not self.perception.is_ground_truth
+        obs = build_observation((color, depth, seg.instances, position, rotation, intrinsics), seg.names, self.ws, rows,
+                                split_instances=learned)
+        if seg.to_object is not None:
+            origin = obs.pop('instance_origin', {})
+            seg.to_object = {int(i): seg.to_object.get(origin.get(int(i), int(i))) for i in np.unique(obs['idmap']) if i != 0}
+            obs['gt_idmap'] = top_view_ids(depth, intrinsics, position, rotation, object_ids, self.scene.names, self.ws)
+            obs['instance_to_object'] = seg.to_object
+        return obs
 
     def is_valid(self):
         return self.scene.is_valid()
@@ -103,9 +122,12 @@ class Environment:
         """See `Scene.relabel_candidates`; ids and classes are in `scene.relabel_ids` / `scene.relabel_classes`."""
         return self.scene.relabel_candidates()
 
-    def relabel_colormap(self, colormap, id_map):
-        """Recolour the objects of the current relabelling in a colormap (see `vision.relabel_colormap`)."""
-        return relabel_colormap(colormap, id_map, self.scene.relabel_ids, self.scene.relabel_classes)
+    def relabel_colormap(self, colormap, id_map, ids=None, classes=None):
+        """Recolour the objects of the current relabelling in a colormap (see `vision.relabel_colormap`). `ids` / `classes`
+        default to the ground-truth object ids of the scene (use the instance ids of `id_map` for a learned perception)."""
+        ids = self.scene.relabel_ids if ids is None else ids
+        classes = self.scene.relabel_classes if classes is None else classes
+        return relabel_colormap(colormap, id_map, ids, classes)
 
     def target_pixels(self):
         return self.scene.target_pixels()

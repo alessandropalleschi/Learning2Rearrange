@@ -34,7 +34,7 @@ class BeliefTracker:
                           'id': np.zeros((h, w), np.float32),
                           'age': np.full((h, w), self.age_horizon, np.float32)}
         s = self.state
-        idmap = obs['idmap']
+        idmap = obs.get('gt_idmap', obs['idmap'])  # remembered ids serve the relabelling: use the ground-truth ids
         if idmap.shape != (h, w):  # idmap is not padded like colormap/depthmap: align it
             full = np.zeros((h, w), np.float32)
             o = self.offset_px

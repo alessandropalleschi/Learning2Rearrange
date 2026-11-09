@@ -78,12 +78,40 @@ def recolor_by_class(color, segm, object_names):
     return color, objects
 
 
-def object_maps(points, objects, object_names, ws, target_rows):
+MIN_PIECE_CELLS = 8  # heightmap cells (5 mm): smaller fragments of a split instance are noise
+
+
+def split_components(top):
+    """Give every 8-connected piece of an instance in the top view its own id (the first piece keeps the id).
+
+    A segmentation network sees the image, where objects in front of / behind each other overlap and merge; in the
+    top view they are separated. Returns the new id map and {new id: original id}."""
+    out, origin, next_id = np.zeros_like(top), {}, int(top.max()) + 1
+    for uid in np.unique(top[top != 0]):
+        labels, count = ndimage.label(top == uid, structure=np.ones((3, 3)))
+        first = True
+        for k in range(1, count + 1):
+            piece = labels == k
+            if piece.sum() < MIN_PIECE_CELLS:
+                continue
+            new = uid if first else next_id
+            if not first:
+                next_id += 1
+            first = False
+            out[piece] = new
+            origin[new] = uid
+    return out, origin
+
+
+def object_maps(points, objects, object_names, ws, target_rows, split=False):
     """Per-object maps on the heightmap grid, from ONE projection of the object-id image: the id of the highest point
     of every cell gives the visible objects (no per-object pass over the point cloud).
 
-    Returns the id map, the class-label map, the occupancy of all visible objects and the cells of the objects that
-    already stand inside the target region of their class (their centroid row is inside it).
+    split: split instances into their pieces in the top view (for a learned perception, see `split_components`).
+
+    Returns the id map, the class-label map, the occupancy of all visible objects, the cells of the objects that
+    already stand inside the target region of their class (their centroid row is inside it) and {id: original id} of the
+    split instances (empty without `split`).
     """
     shape = ws.heightmap_shape
     id_map = np.zeros(shape, np.float32)
@@ -91,17 +119,27 @@ def object_maps(points, objects, object_names, ws, target_rows):
     _, ids, px, py, _ = _project(points, objects, ws.bounds, ws.pixel_size, inclusive=False)
     top = np.zeros(shape, np.int64)
     top[py, px] = ids  # points are sorted by height: the highest point of a cell is written last
+    origin = {}
+    if split:
+        top, origin = split_components(top)
     low, high = target_rows[0], target_rows[1]
     for uid in np.unique(top[top != 0]):
         cells = top == uid
-        name = object_names[uid].split(' ')[0]
+        name = object_names[origin.get(uid, uid)].split(' ')[0]
         rows = np.nonzero(cells)[0]
         centroid = int(rows.sum() / rows.size)  # centroid row of the visible part
         k = TARGET_ORDER.index(name)
         id_map[cells], class_map[cells], binary[cells] = uid, LABELS[name], 1
         if low[k] <= centroid <= high[k]:
             on_target[cells] = -1
-    return id_map, class_map, binary, on_target
+    return id_map, class_map, binary, on_target, origin
+
+
+def top_view_ids(depth, intrinsics, position, rotation, object_ids, object_names, ws):
+    """Object id of the highest point of every heightmap cell for a ground-truth id image (privileged information)."""
+    points = camera_to_world(depth_to_points(depth, intrinsics), position, rotation)
+    objects = np.where(np.isin(object_ids, list(object_names)), object_ids, 0)
+    return object_maps(points, objects, object_names, ws, ([0, 0, 0], [0, 0, 0], None))[0]
 
 
 def free_space_map(binary, on_target):
@@ -141,19 +179,24 @@ def pad_maps(colormap, heightmap):
     return np.stack(channels, axis=-1), np.pad(heightmap, padding, 'constant', constant_values=0.3)
 
 
-def build_observation(render, object_names, ws, target_rows):
+def build_observation(render, object_names, ws, target_rows, split_instances=False):
     """All observation maps from one camera render.
 
-    Returns a dict with 'colormap' / 'depthmap' (padded) and 'idmap' / 'classmap' / 'freespace' (not padded).
+    Returns a dict with 'colormap' / 'depthmap' (padded) and 'idmap' / 'classmap' / 'freespace' (not padded), and
+    'instance_origin' ({id: original id} of split instances) when `split_instances` is set.
     """
     color, depth, segm, position, rotation, intrinsics = render
     color, objects = recolor_by_class(color, segm, object_names)
     points = camera_to_world(depth_to_points(depth, intrinsics), position, rotation)
     heightmap, colormap = top_down_maps(points, color, ws, target_rows)
-    id_map, class_map, binary, on_target = object_maps(points, objects, object_names, ws, target_rows)
+    id_map, class_map, binary, on_target, origin = object_maps(points, objects, object_names, ws, target_rows,
+                                                               split_instances)
     colormap, heightmap = pad_maps(colormap, heightmap)
-    return {'colormap': colormap, 'depthmap': heightmap, 'idmap': id_map, 'classmap': class_map,
-            'freespace': free_space_map(binary, on_target)}
+    obs = {'colormap': colormap, 'depthmap': heightmap, 'idmap': id_map, 'classmap': class_map,
+           'freespace': free_space_map(binary, on_target)}
+    if split_instances:
+        obs['instance_origin'] = origin
+    return obs
 
 
 def relabel_colormap(colormap, id_map, ids, classes):

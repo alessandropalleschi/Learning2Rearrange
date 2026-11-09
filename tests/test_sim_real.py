@@ -52,3 +52,27 @@ def test_primitives_execute_and_leave_a_valid_scene(sim):
     sim.suction.release()
     sim.arm.go_home()
     assert sim.is_valid()
+
+
+def test_learned_perception_path_with_an_oracle(sim):
+    """A perception that returns the true masks but is treated as learned: the instances are split in the top view and
+    the privileged ground truth (gt_idmap, instance_to_object) is attached; the maps equal the ground-truth ones."""
+    from l2r.perception.base import GroundTruthPerception, Segmentation
+
+    class Oracle:
+        is_ground_truth = False
+
+        def segment(self, color, depth, object_ids, scene):
+            instances = np.where(np.isin(object_ids, list(scene.names)), object_ids, 0)
+            return Segmentation(instances, dict(scene.names), {uid: uid for uid in scene.names})
+
+    reference = sim.observe()
+    sim.perception = Oracle()
+    try:
+        learned = sim.observe()
+    finally:
+        sim.perception = GroundTruthPerception()
+    assert (learned['classmap'] == reference['classmap']).all()
+    assert (learned['gt_idmap'] == reference['idmap']).all()
+    assert all(uid in sim.scene.names for uid in learned['instance_to_object'].values())
+    assert set(learned['instance_to_object']) == {int(i) for i in np.unique(learned['idmap']) if i != 0}

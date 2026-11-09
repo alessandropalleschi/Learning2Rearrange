@@ -152,5 +152,5 @@ def test_single_pass_object_maps_equal_the_per_object_reference():
         color_ref, masks, labels, colors, ids = ref.class_masks(np.zeros(segm.shape + (3,), np.uint8), segm.copy(), names)
         assert (color_new == color_ref).all()
         expected = ref.object_maps(points, masks, labels, colors, ids, ws, rows)
-        for got, want in zip(object_maps(points, objects, names, ws, rows), expected):
+        for got, want in zip(object_maps(points, objects, names, ws, rows)[:4], expected):
             assert np.array_equal(got, want), seed

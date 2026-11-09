@@ -136,13 +136,14 @@ class RearrangeEnv:
             attempted = True
             held_class, held_id = obs['classmap'][px_y, px_x], obs['idmap'][px_y, px_x]
             held_depth = object_depth_px(obs, held_id) if cfg.footprint_placement else 0
+            held_object = obs.get('instance_to_object', {}).get(int(held_id), held_id)  # ground-truth id (relabelling)
             executed = sim.pick(position)
             if executed and learned and sim.is_valid():  # hold the object, ask for the placement
                 self.holding = True
                 mid = self._full_obs(action)
                 if cfg.footprint_placement:
                     mid['freespace'] = clear_of_back_wall(mid['freespace'], held_depth)
-                mid['held_class'], mid['held_id'] = int(held_class), float(held_id)
+                mid['held_class'], mid['held_id'] = int(held_class), float(held_object)
                 mid['heuristic_place'] = get_place_pose(sim, held_class, mid['freespace'])
                 self.obs = mid
                 info = {'executed': True, 'attempted': True, 'sorted': False, 'invalid': False, 'place_pix': None, 'relabel': False,
@@ -210,16 +211,27 @@ class RearrangeEnv:
         possible = self.sim.relabel_candidates() == 1
         return possible, list(self.sim.scene.relabel_classes) if possible else None
 
+    def _relabel_instances(self, obs):
+        """(instance ids in obs['idmap'], new classes) of the objects to recolour. With a learned perception the instance
+        ids are not object ids: they are translated with the privileged `instance_to_object` match."""
+        gt = dict(zip(self.sim.scene.relabel_ids, self.sim.scene.relabel_classes))
+        mapping = obs.get('instance_to_object')
+        if mapping is None:
+            return list(gt), list(gt.values())
+        pairs = [(instance, gt[uid]) for instance, uid in mapping.items() if uid in gt]
+        return [p[0] for p in pairs], [p[1] for p in pairs]
+
     def relabel(self, obs, next_obs):
         """Compact copies of (obs, next_obs) -- full internal observations -- whose colours (including the
         remembered colours of the spatial belief) use the post-hoc class assignment of the current scene."""
-        ids, classes = list(self.sim.scene.relabel_ids), list(self.sim.scene.relabel_classes)
+        gt_ids, gt_classes = list(self.sim.scene.relabel_ids), list(self.sim.scene.relabel_classes)
         pair = []
         for o in (obs, next_obs):
             new = self.compact(o)
-            if o.get('held_class') and o.get('held_id') in ids:
-                new['held_class'] = int(classes[ids.index(o['held_id'])])
-            new['colormap'] = self.sim.relabel_colormap(o['colormap'], o['idmap'])
+            if o.get('held_class') and o.get('held_id') in gt_ids:
+                new['held_class'] = int(gt_classes[gt_ids.index(o['held_id'])])
+            ids, classes = self._relabel_instances(o)
+            new['colormap'] = self.sim.relabel_colormap(o['colormap'], o['idmap'], ids, classes)
             if 'belief_full' in o:
                 b = dict(o['belief_full'])
                 b['rgb'] = self.sim.relabel_colormap(b['rgb'], b['id'])

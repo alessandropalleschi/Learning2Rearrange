@@ -119,3 +119,34 @@ the parameters: per pass 21 ms encoder, 11 ms decoder, 21 ms for the three heads
 * Open: lighter heads (they cost as much as the encoder; a 1x1 / half-resolution head risks the 5 mm precision of the Q-maps, test it),
   `channels_last` + bf16, `torch.compile` of `QNet.features` on GPU, an asynchronous actor / learner split (simulation, ~1 s per action,
   dominates the wall-clock; the learner is idle while the workers act).
+
+## Learned perception instead of the simulator's ground-truth masks
+`--perception network` replaces the PyBullet segmentation buffer by a small U-Net (0.39 M parameters, `l2r/perception`).
+Design points:
+* An object's class is part of the task (its target region), not of its appearance. The network predicts the object **type** (4 YCB types +
+  background); the episode's specification (type -> class) maps types to classes, types that are not part of the episode are ignored.
+* Instances are the connected components of every type, **split in the top view** (`vision.split_components`): in the image, objects in
+  front of / behind each other overlap and merge, in 3D they do not.
+* The policy only sees what the network produced. The ground truth survives as *privileged* information for the learning signals that need
+  it (`gt_idmap`, `instance_to_object`: hindsight relabelling, the belief's id memory), never as policy input.
+
+Measured (300 training scenes, camera pose jitter + sensor noise, 9 minutes of CPU training; evaluated on 25 fresh
+scenes with 2-8 objects):
+| | value |
+|---|---|
+| pixel IoU of the object types | 0.948 / 0.963 / 0.969 / 0.965 (background 0.997) |
+| instance recall / precision, connected components in the image | 0.844 / 0.945 |
+| instance recall / precision, split in the top view (what the policy sees) | **0.959 / 0.860** |
+| class-map agreement with the ground-truth observation (object cells) | 0.886 -> **0.928** with the top-view split |
+| free-space map IoU with the ground-truth observation | 0.757 -> **0.969** with the top-view split |
+| inference | 63 ms per image on 4 CPU threads (the observation grows from ~250 to ~320 ms) |
+
+Limits (open): only the 4 YCB types of the simulator were seen (no "unknown objects": that needs a class-agnostic instance
+segmentation, e.g. the methods the paper cites); the training scenes are initial arrangements (no arm in motion, no objects pressed against
+the walls); touching objects of one type stay merged; precision 0.86 comes from objects visible in several pieces. Whether a policy
+trained on the network's observations matches one trained on the ground truth has **not** been measured (it needs a full training run each);
+`tests/test_sim_real.py::test_learned_perception_path_with_an_oracle` and a scripted run with both placement modes, the spatial belief and
+the relabelling check that the whole stack works with the network as the only source of masks.
+
+The trained weights are in `assets/perception/segnet.pth` (1.5 MB, legacy cabinet / camera; retrain with `train_perception.py` after
+changing the scene, e.g. `--physics paper`, or the camera).

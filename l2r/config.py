@@ -114,6 +114,10 @@ class SimParams:
     suction_verify: bool = False            # after lifting, check that the object is still held at its grasp offset
     suction_hold_tolerance: float = 0.04    # m the object may drift from the grasp offset before the grasp is lost
 
+    # perception: where the object masks come from
+    perception: str = 'gt'                  # 'gt' = PyBullet ground truth, 'network' = trained segmentation network
+    perception_weights: str = 'assets/perception/segnet.pth'
+
     # domain randomisation (applied at every reset)
     randomize: bool = False
     friction_range: tuple = (0.3, 0.8)      # lateral friction of the objects
@@ -149,6 +153,8 @@ class SimParams:
             params.deterministic = params.strict_place = params.adaptive_step = True
             params.force_sense_x = 0.27  # do not check forces while the tool is still outside the cabinet
         params.velocity_scale = getattr(args, 'velocity_scale', 1.0)
+        params.perception = getattr(args, 'perception', 'gt')
+        params.perception_weights = getattr(args, 'perception_weights', params.perception_weights)
         return params
 
     @staticmethod
@@ -161,6 +167,9 @@ class SimParams:
                                  "grasps. 'modern': improved + rate-limited joint controller, 100 solver iterations, "
                                  "deterministic contacts, strict place errors, adaptive waypoints, force check only near the "
                                  "cabinet (all opt-in, not yet validated against the legacy behaviour)")
+        parser.add_argument('--perception', choices=['gt', 'network'], default='gt',
+                            help="object masks: PyBullet ground truth, or a trained segmentation network (train_perception.py)")
+        parser.add_argument('--perception_weights', default='assets/perception/segnet.pth', help='weights of the network')
         parser.add_argument('--velocity_scale', type=float, default=1.0,
                             help="'modern' controller: fraction of the URDF joint velocity limits")
         parser.add_argument('--force_limit', type=float, default=300.0,

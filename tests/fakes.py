@@ -50,8 +50,10 @@ class FakeSim:
     def relabel_candidates(self):
         return 1.0 if self.t == 2 else 0.0
 
-    def relabel_colormap(self, colormap, id_map):  # the real implementation: exercises padded / un-padded shapes
-        return relabel_colormap(colormap, id_map, self.scene.relabel_ids, self.scene.relabel_classes)
+    def relabel_colormap(self, colormap, id_map, ids=None, classes=None):  # the real implementation: padded / un-padded shapes
+        ids = self.scene.relabel_ids if ids is None else ids
+        classes = self.scene.relabel_classes if classes is None else classes
+        return relabel_colormap(colormap, id_map, ids, classes)
 
     def wait_static(self):
         self.t += 1

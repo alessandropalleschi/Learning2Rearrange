@@ -47,6 +47,19 @@ for the review of the simulator (errors fixed, findings, open issues). Compare m
 Not changed (needs tuning on your setup): explicit motor forces / velocity limits of the joint controller, and a force-limited
 vacuum model instead of the fixed constraint (`suction_max_force` is already a parameter; the `paper` preset uses 50 N).
 
+### Perception: a segmentation network instead of the simulator's ground truth (`--perception network`)
+The policy sees colour-coded class maps built from object masks. By default the masks are PyBullet's ground truth; with
+`--perception network` a trained U-Net (`l2r/perception`) provides them. An object's *class* (which target region it belongs to) is part
+of the task, not of its appearance, so the network predicts the object **type** and the episode's specification (type -> class) turns it
+into a class; instances are the connected components of each type. Ground truth stays available only as *privileged* information for
+the learning signals that need it (rewards, hindsight relabelling) -- the policy never sees it.
+```bash
+python train_perception.py collect  --scenes 300 --out data/perception      # random scenes from the simulator (camera jitter + noise)
+python train_perception.py train    --data data/perception --minutes 9      # -> assets/perception/segnet.pth
+python train_perception.py evaluate --weights assets/perception/segnet.pth    # IoU, instance recall / precision, effect on the observation
+python train.py --perception network --perception_weights assets/perception/segnet.pth ...
+```
+
 ### Learned push (`--push_lengths`)
 The push primitive has two directions (left/right, the arm only has lateral access) and, by default, a fixed 8 cm length. With
 several lengths (e.g. `--push_lengths 0.04 0.08 0.12`) the push head outputs one Q-map per length for each direction
@@ -102,6 +115,11 @@ l2r/
   evaluation.py    fixed-seed greedy evaluation per object count
   profiling.py     timing and behaviour breakdown of the simulator
   logger.py utils.py
+  perception/
+    base.py        Perception interface: ground truth (PyBullet) or network; Segmentation (instances, names, privileged match)
+    unet.py        small U-Net (0.4 M parameters) for the object types
+    network.py     NetworkPerception: types -> classes (task specification) -> instances
+    training.py    collect data, train, evaluate (also the effect on the policy's observation)
   envs/
     rearrange.py   RearrangeEnv: Gym-style reset()/step(): action execution, reward, termination, relabelling
     vec.py         parallel simulators in worker processes
