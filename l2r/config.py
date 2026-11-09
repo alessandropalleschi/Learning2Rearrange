@@ -183,6 +183,7 @@ class SimParams:
     cylinder_mass: float = 0.7      # kg
 
     # motion / speed (defaults reproduce the original behaviour; larger step / smaller budget = faster, coarser)
+    joint_tolerance: float = 1e-3           # rad: a joint move is done when every joint is this close to its goal
     step_distance: float = 0.002            # m between IK waypoints of straight-line moves
     move_joints_max_steps: int = 1000       # simulation-step budget of one joint move
 
@@ -249,6 +250,7 @@ class SimParams:
             params.deterministic = params.strict_place = params.adaptive_step = True
             params.force_sense_x = 0.27  # do not check forces while the tool is still outside the cabinet
         params.velocity_scale = getattr(args, 'velocity_scale', 1.0)
+        params.joint_tolerance = getattr(args, 'joint_tolerance', params.joint_tolerance)
         params.perception = getattr(args, 'perception', 'gt')
         params.end_effector = getattr(args, 'end_effector', 'suction')
         params.perception_weights = getattr(args, 'perception_weights', params.perception_weights)
@@ -271,6 +273,8 @@ class SimParams:
         parser.add_argument('--perception_weights', default='assets/perception/segnet.pth', help='weights of the network')
         parser.add_argument('--end_effector', choices=['suction', 'gripper'], default='suction',
                             help='suction cup, or a parallel-jaw gripper (the pick Q-map gets one channel per jaw yaw, --jaw_yaws)')
+        parser.add_argument('--joint_tolerance', type=float, default=1e-3,
+                            help='rad: a joint move is finished when all joints are this close (larger = fewer physics steps)')
         parser.add_argument('--velocity_scale', type=float, default=1.0,
                             help="'modern' controller: fraction of the URDF joint velocity limits")
         parser.add_argument('--force_limit', type=float, default=300.0,

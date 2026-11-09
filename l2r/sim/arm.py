@@ -11,7 +11,6 @@ HOME_JOINTS = np.array([0, 1, -1, 0.5, 0.5, 0.5, 1]) * np.pi  # [base slide, 6 r
 FT_SENSOR_JOINTS = (11, 10)  # extra joints with a force/torque sensor (besides the tool link)
 log = logging.getLogger(__name__)
 
-JOINT_TOLERANCE = 1e-3  # rad
 IK_TOLERANCE = 0.002  # m
 
 
@@ -89,7 +88,7 @@ class Arm:
             current = np.array([s[0] for s in p.getJointStates(self.body, self.joints)])
             diff = target_joints - current
             diff[-1] = 0
-            if all(np.abs(diff) < JOINT_TOLERANCE):
+            if all(np.abs(diff) < self.params.joint_tolerance):
                 p.stepSimulation()  # give it time to stop
                 return True
             # legacy command: current + 100 * speed * error (for speed 0.01 this is the whole goal at once)
@@ -100,11 +99,12 @@ class Arm:
             p.stepSimulation()
         return False
 
-    def _move_joints_rate_limited(self, target_joints, tol=JOINT_TOLERANCE):
+    def _move_joints_rate_limited(self, target_joints, tol=None):
         """Rate-limited joint move (params.controller == 'pd'): the position command advances towards the goal at
         most v_max * dt per step (URDF velocity limits x params.velocity_scale), starting from the current state, so
         there are no command jumps. Done when the joints are within `tol` and (almost) at rest."""
         p = self.p
+        tol = self.params.joint_tolerance if tol is None else tol
         goal = np.asarray(target_joints, dtype=float).copy()
         goal[-1] = np.pi  # the last wrist joint is kept fixed, as in the legacy controller
         v_max = self.limits['v_max'] * self.params.velocity_scale
