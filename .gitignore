@@ -3,3 +3,6 @@ __pycache__/
 logs/
 visualization.*.png
 data/
+runs/*
+!runs/*/summary.md
+!runs/*/summary.csv
