@@ -33,7 +33,6 @@ class Trainer(object):
         self.double = True
         self.iteration = 0
         self.is_testing = is_testing
-        self.max_dim = self.cfg.max_dim
         self.offset_px = self.cfg.offset_px
         self.push_lengths_px = self.cfg.push_lengths_px
         self.future_reward_discount = self.cfg.gamma
@@ -42,8 +41,11 @@ class Trainer(object):
         self.learned_placement = self.cfg.placement == 'learned'
         in_channels = 4 + (BELIEF_CHANNELS if self.belief == 'spatial' else 0)
         n_len = len(self.cfg.push_lengths)
-        self.model = QNet(in_channels, self.belief, self.cfg.recurrent_hidden, n_len).to(DEVICE)
-        self.model_target = QNet(in_channels, self.belief, self.cfg.recurrent_hidden, n_len).to(DEVICE)
+        if DEVICE.type == 'cuda':
+            torch.backends.cudnn.benchmark = True  # the input size is fixed: let cuDNN pick the fastest kernels
+        self.model = QNet(in_channels, self.belief, self.cfg.recurrent_hidden, n_len, self.learned_placement).to(DEVICE)
+        self.model_target = QNet(in_channels, self.belief, self.cfg.recurrent_hidden, n_len,
+                                 self.learned_placement).to(DEVICE)
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
             self.model_target.load_state_dict(torch.load(snapshot_target or snapshot, map_location=DEVICE))
@@ -66,16 +68,17 @@ class Trainer(object):
 
     # ------------------------------------------------------------------ input / output geometry
     def _pads(self, h, w):
-        top, left = (self.max_dim - h) // 2, (self.max_dim - w) // 2
+        height, width = self.canvas(h, w)
+        top, left = (height - h) // 2, (width - w) // 2
         return top, left
 
     def prepare(self, obs):
-        """Observation dict -> (C,max_dim,max_dim) float tensor, zero padded.
+        """Observation dict -> (C,H,W) float tensor on the network canvas (the map size rounded up to a multiple of 8).
         Channels: RGB, height (/0.4 m) and, for the spatial belief, the 7 belief channels."""
         color, depth = obs['colormap'], obs['depthmap']
         h, w = depth.shape[:2]
         c = 4 + (BELIEF_CHANNELS if self.belief == 'spatial' else 0)
-        x = np.zeros((c, self.max_dim, self.max_dim), np.float32)
+        x = np.zeros((c, *self.canvas(h, w)), np.float32)
         top, left = self._pads(h, w)
         x[:3, top:top + h, left:left + w] = np.asarray(color, np.float32).transpose(2, 0, 1) / 255.0
         x[3, top:top + h, left:left + w] = np.asarray(depth, np.float32) / 0.4
@@ -84,22 +87,31 @@ class Trainer(object):
         return torch.from_numpy(x)
 
     # ------------------------------------------------------------------ recurrent belief inputs
-    def _cells(self):
-        return self.max_dim // 8
+    @staticmethod
+    def canvas(h, w):
+        """Network input size for an h x w map: rounded up to a multiple of 8 (three 2x poolings). The maps of this
+        task (128 x 104) already are, so nothing is padded and no compute is spent on empty borders."""
+        return -(-h // 8) * 8, -(-w // 8) * 8
 
-    def zero_hidden(self):
-        return np.zeros((self.cfg.recurrent_hidden, self._cells(), self._cells()), np.float16)
+    def _cells(self, h, w):
+        """Size of the bottleneck grid (where the recurrent belief lives)."""
+        height, width = self.canvas(h, w)
+        return height // 8, width // 8
+
+    def zero_hidden(self, h, w):
+        return np.zeros((self.cfg.recurrent_hidden, *self._cells(h, w)), np.float16)
 
     def encode_action(self, action, h, w):
         """Last action -> (ACTION_CHANNELS, cells, cells): push 0deg, push 180deg, pick, place (one-hot cells)."""
-        a = np.zeros((ACTION_CHANNELS, self._cells(), self._cells()), np.float32)
+        rows, cols = self._cells(h, w)
+        a = np.zeros((ACTION_CHANNELS, rows, cols), np.float32)
         if action is None:
             return a
         top, left = self._pads(h, w)
         o = self.offset_px
 
         def cell(row, col):
-            return (min((row + o + top) // 8, self._cells() - 1), min((col + o + left) // 8, self._cells() - 1))
+            return (min((row + o + top) // 8, rows - 1), min((col + o + left) // 8, cols - 1))
 
         rot, row, col = action['pix']
         channel = {'push': rot // len(self.cfg.push_lengths), 'grasp': 2, 'place': 3}[action['primitive']]
@@ -178,7 +190,7 @@ class Trainer(object):
             push, pick, place, h_new = net(x, hp, ap, self._held(obs_list))
         h, w = obs_list[0]['depthmap'].shape[:2]
         crop = lambda q: self._crop(q.float(), h, w).cpu().numpy()
-        return QMaps(crop(push), crop(pick), crop(place),
+        return QMaps(crop(push), crop(pick), crop(place) if place is not None else np.zeros_like(crop(pick)),
                      None if h_new is None else h_new.float().cpu().numpy().astype(np.float16))
 
     # ------------------------------------------------------------------ learning
@@ -193,9 +205,10 @@ class Trainer(object):
         top, left = self._pads(h, w)
         o = self.offset_px
         B = len(obs_list)
-        masks = {'push': np.zeros((B, self.cfg.push_actions, self.max_dim, self.max_dim), bool),
-                 'grasp': np.zeros((B, 1, self.max_dim, self.max_dim), bool),
-                 'place': np.zeros((B, 1, self.max_dim, self.max_dim), bool)}
+        canvas = self.canvas(h, w)
+        masks = {'push': np.zeros((B, self.cfg.push_actions, *canvas), bool),
+                 'grasp': np.zeros((B, 1, *canvas), bool),
+                 'place': np.zeros((B, 1, *canvas), bool)}
         for i, obs in enumerate(obs_list):
             window = (slice(top + o, top + h - o), slice(left + o, left + w))
             if obs.get('held_class'):
@@ -236,7 +249,8 @@ class Trainer(object):
             neg = -1e9
 
             def flat(q):
-                pp, pk, pl = (t.float() for t in q[:3])
+                pp, pk = q[0].float(), q[1].float()
+                pl = q[2].float() if q[2] is not None else torch.full_like(pk, neg)
                 return torch.cat([torch.where(push_mask.expand_as(pp), pp, torch.full_like(pp, neg)).flatten(1),
                                   torch.where(pick_mask, pk, torch.full_like(pk, neg)).flatten(1),
                                   torch.where(place_mask, pl, torch.full_like(pl, neg)).flatten(1)], dim=1)

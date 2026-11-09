@@ -1,6 +1,7 @@
 """From the camera image to the maps the policy sees: point cloud -> top-down heightmap / colormap, per-object
 class and id maps, and the free-space map used by the placement heuristic. Pure numpy / OpenCV, no simulator."""
-import cv2
+from functools import lru_cache
+
 import numpy as np
 from scipy import ndimage
 
@@ -9,27 +10,23 @@ from l2r.sim.constants import COLORS, LABELS, OCCLUDED_RGB, TARGET_ORDER, class_
 PAD = 4  # the colormap / heightmap returned to the policy get a 4 px border (rows: both sides, columns: left)
 
 
-def depth_to_points(depth, intrinsics):
-    """HxW metric depth -> HxWx3 points in camera coordinates."""
-    height, width = depth.shape
+@lru_cache(maxsize=8)
+def _pixel_offsets(height, width, cx, cy):
+    """(column - cx, row - cy) of every pixel; depends only on the camera, so it is computed once."""
     px, py = np.meshgrid(np.linspace(0, width - 1, width), np.linspace(0, height - 1, height))
-    px = (px - intrinsics[0, 2]) * (depth / intrinsics[0, 0])
-    py = (py - intrinsics[1, 2]) * (depth / intrinsics[1, 1])
-    return np.float32([px, py, depth]).transpose(1, 2, 0)
+    return px - cx, py - cy
 
 
-def transform_points(points, transform):
-    """Apply a 4x4 rigid transform to HxWx3 points (in place, like the original code) and return them."""
-    homogeneous = np.pad(points.copy(), ((0, 0), (0, 0), (0, 1)), 'constant', constant_values=1)
-    for i in range(3):
-        points[..., i] = np.sum(transform[i, :] * homogeneous, axis=-1)
-    return points
+def depth_to_points(depth, intrinsics):
+    """HxW metric depth -> HxWx3 float32 points in camera coordinates."""
+    dx, dy = _pixel_offsets(*depth.shape, intrinsics[0, 2], intrinsics[1, 2])
+    return np.float32([dx * (depth / intrinsics[0, 0]), dy * (depth / intrinsics[1, 1]), depth]).transpose(1, 2, 0)
 
 
-def camera_to_world(points, position, orientation_matrix):
-    transform = np.eye(4)
-    transform[:3, :] = np.hstack((orientation_matrix, np.float32(position).reshape(3, 1)))
-    return transform_points(points, transform)
+def camera_to_world(points, position, rotation):
+    """HxWx3 camera-frame points -> world frame: rotation (3x3) and position of the camera."""
+    return (points.astype(np.float64) @ np.asarray(rotation, np.float64).T
+            + np.asarray(position, np.float64)).astype(np.float32)
 
 
 def _project(points, values, bounds, pixel_size, inclusive):
@@ -65,64 +62,44 @@ def top_down_maps(points, colors, ws, target_rows):
     return heightmap, colormap
 
 
-def mask_colormap(points, mask_image, ws):
-    """Colour (class colour of one object) visible at the top of every heightmap cell for a per-object mask image."""
-    bounds = ws.bounds
-    points, mask_image, px, py, (height, width) = _project(points, mask_image, bounds, ws.pixel_size, inclusive=False)
-    colormap = np.zeros((height, width, mask_image.shape[-1]), dtype=np.uint8)
-    for c in range(mask_image.shape[-1]):
-        colormap[py, px, c] = mask_image[:, c]
-    return colormap
-
-
-def class_masks(color, segm, object_names):
-    """Recolour the camera image by object class and build one mask image per object.
+def recolor_by_class(color, segm, object_names):
+    """Recolour the camera image by object class (in place): objects in their class colour, everything else white.
 
     Args:
-        color: HxWx3 uint8 image (modified in place). segm: HxW int object uid of every pixel.
-        object_names: {object uid: 'class YcbName'}.
+        color: HxWx3 uint8. segm: HxW int object uid per pixel. object_names: {object uid: 'class YcbName'}.
     Returns:
-        color, masks (NxHxWx3 uint8 class-coloured image per object, None without objects), class labels, colours
-        and object ids of the masks. The label of every pixel is not needed outside, so no label map is built; ids
-        are never rewritten in place.
+        color and `segm` restricted to the objects (uid of the object at every pixel, 0 for background / robot /
+        cabinet). Ids are never rewritten in place, so labels can not collide with ids still to be processed.
     """
-    known = np.isin(segm, list(object_names))
-    color[~known] = 255
-    masks, labels, colors, ids = [], [], [], []
-    for uid in np.unique(segm[known]):
-        name = object_names[uid].split(' ')[0]
-        rgb = class_rgb255(name)
-        region = segm == uid
-        color[region] = rgb
-        image = np.zeros_like(color)
-        image[region] = rgb
-        masks.append(image)
-        labels.append(LABELS[name])
-        colors.append(rgb)
-        ids.append(uid)
-    return color, (np.stack(masks) if masks else None), np.array(labels), np.array(colors), np.array(ids)
+    objects = np.where(np.isin(segm, list(object_names)), segm, 0)
+    color[objects == 0] = 255
+    for uid in np.unique(objects[objects != 0]):
+        color[objects == uid] = class_rgb255(object_names[uid].split(' ')[0])
+    return color, objects
 
 
-def object_maps(points, masks, labels, colors, ids, ws, target_rows):
-    """Per-object maps on the heightmap grid: object id, class label, and which cells belong to objects that
-    already stand inside their own target region."""
+def object_maps(points, objects, object_names, ws, target_rows):
+    """Per-object maps on the heightmap grid, from ONE projection of the object-id image: the id of the highest point
+    of every cell gives the visible objects (no per-object pass over the point cloud).
+
+    Returns the id map, the class-label map, the occupancy of all visible objects and the cells of the objects that
+    already stand inside the target region of their class (their centroid row is inside it).
+    """
     shape = ws.heightmap_shape
-    id_map, class_map = np.zeros(shape, np.float32), np.zeros(shape, np.float32)
-    binary, on_target = np.zeros(shape, np.float32), np.zeros(shape, np.float32)
-    if masks is None:
-        return id_map, class_map, binary, on_target
+    id_map = np.zeros(shape, np.float32)
+    class_map, binary, on_target = np.zeros(shape, np.float32), np.zeros(shape, np.float32), np.zeros(shape, np.float32)
+    _, ids, px, py, _ = _project(points, objects, ws.bounds, ws.pixel_size, inclusive=False)
+    top = np.zeros(shape, np.int64)
+    top[py, px] = ids  # points are sorted by height: the highest point of a cell is written last
     low, high = target_rows[0], target_rows[1]
-    for mask_image, label, rgb, uid in zip(masks, labels, colors, ids):
-        visible = mask_colormap(points, mask_image, ws)
-        cells = (visible[:, :, 0] == rgb[0]) & (visible[:, :, 1] == rgb[1]) & (visible[:, :, 2] == rgb[2])
-        occupancy = cells.astype(np.uint8)
-        moments = cv2.moments(occupancy, binaryImage=True)
-        if moments['m00'] == 0:
-            continue
-        row = int(moments['m01'] / moments['m00'])  # centroid row
-        k = TARGET_ORDER.index([name for name in TARGET_ORDER if LABELS[name] == label][0])  # region of its class
-        id_map[cells], class_map[cells], binary[cells] = uid, label, 1
-        if low[k] <= row <= high[k]:
+    for uid in np.unique(top[top != 0]):
+        cells = top == uid
+        name = object_names[uid].split(' ')[0]
+        rows = np.nonzero(cells)[0]
+        centroid = int(rows.sum() / rows.size)  # centroid row of the visible part
+        k = TARGET_ORDER.index(name)
+        id_map[cells], class_map[cells], binary[cells] = uid, LABELS[name], 1
+        if low[k] <= centroid <= high[k]:
             on_target[cells] = -1
     return id_map, class_map, binary, on_target
 
@@ -170,10 +147,10 @@ def build_observation(render, object_names, ws, target_rows):
     Returns a dict with 'colormap' / 'depthmap' (padded) and 'idmap' / 'classmap' / 'freespace' (not padded).
     """
     color, depth, segm, position, rotation, intrinsics = render
-    color, masks, labels, colors, ids = class_masks(color, segm, object_names)
+    color, objects = recolor_by_class(color, segm, object_names)
     points = camera_to_world(depth_to_points(depth, intrinsics), position, rotation)
     heightmap, colormap = top_down_maps(points, color, ws, target_rows)
-    id_map, class_map, binary, on_target = object_maps(points, masks, labels, colors, ids, ws, target_rows)
+    id_map, class_map, binary, on_target = object_maps(points, objects, object_names, ws, target_rows)
     colormap, heightmap = pad_maps(colormap, heightmap)
     return {'colormap': colormap, 'depthmap': heightmap, 'idmap': id_map, 'classmap': class_map,
             'freespace': free_space_map(binary, on_target)}

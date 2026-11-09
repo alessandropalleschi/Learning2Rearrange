@@ -65,7 +65,7 @@ def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg, ws):
 def attach_initial(trainer, obs):
     """Episode start: empty belief, no previous action."""
     if trainer.belief == 'recurrent':
-        obs['h_prev'] = trainer.zero_hidden()
+        obs['h_prev'] = trainer.zero_hidden(*obs['depthmap'].shape[:2])
         obs['prev_action'] = None
     return obs
 

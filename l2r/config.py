@@ -60,7 +60,6 @@ class Config:
     push_height: float = 0.05       # m above the cabinet floor (paper: 5 cm)
 
     # --- Input representation ---
-    max_dim: int = 160              # padded square size fed to the network
     offset_px: int = 4              # border (px) cropped from the Q-maps
     pixel_size: float = 0.005       # m / px of the heightmap
 

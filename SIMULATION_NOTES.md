@@ -88,3 +88,34 @@ Bugs found while porting (fixed afterwards; `tests/golden/*.json` were re-record
 Removed: the unused `ontargetmap`, the raw `color` / `depth` / `mask` images in the observation, class entries other than
 blue / green / yellow (`DIMENSIONS` held colour tuples for the unused colours), the unused `fixed` object category, and the
 module-level mutable `BOUNDS` / `PIXEL_SIZE` / `PLACE_TARGETS`.
+
+## Architecture and observation processing: review with measurements
+Measured with the real simulator (8 objects) and the network on 4 CPU threads.
+
+**Observation pipeline** (358 ms per observation before, 252 ms now):
+| stage | before | now | note |
+|---|---|---|---|
+| camera render (TinyRenderer, 480x640) | 196 ms | 204 ms | 80% of the time now; `--camera_scale 0.5` renders 2.7x faster (sparser maps, check the occluded fraction in `profile_sim.py`) |
+| class masks | 22 ms | 6 ms | the per-object full-size mask images are gone |
+| point cloud + camera -> world | 35 ms | ~10 ms | pixel offsets cached per camera, one matrix product |
+| per-object maps | 91 ms (grows with the number of objects: each object re-projected the whole point cloud) | ~15 ms | one projection of the object-id image: the id of the highest point of every cell; verified equal to the per-object reference (`tests/reference_vision.py`) on random scenes and on the real scenario |
+| top-down maps, free space, padding | 14 ms | 14 ms | |
+
+Observations that are *not* changed (open): the 8 mm floor threshold, the free-space dilation (rows {-2, 0, +2}, +-4 columns, 5 / 8 px
+borders) and the "misplaced objects block their whole row" rule are inline constants of `vision.py`; the occluded cells are marked by the
+grey value 105 inside the colour channels (an explicit mask channel would be cleaner: ablation); heights are float32 (uint16 millimetres
+would halve the replay buffer: 8000 transitions x 2 maps x 53 KB).
+
+**Network** (8.3 M parameters: encoder 4.8 M, decoder 2.5 M, global context 0.8 M, heads 0.2 M). The cost is in the full-resolution layers, not
+the parameters: per pass 21 ms encoder, 11 ms decoder, 21 ms for the three heads (full-resolution residual blocks).
+| change | forward (batch 1) | train step (batch 1) | forward (batch 8) | train step (batch 8) |
+|---|---|---|---|---|
+| before: 160x160 padded canvas, all heads | 174 ms | 442 ms | 1491 ms | 4198 ms |
+| now: native 128x104 canvas, place head only when placement is learned | 99 ms | 236 ms | 527 ms | 1583 ms |
+
+* The maps (128 x 104) are already multiples of 8, so the network runs on them directly: no padding to 160 x 160 (46% empty compute), the global
+  pooling no longer averages over padding, and the 180 degree flip is exact on a rectangle too.
+* Both push directions go through the encoder in one batched call; `cudnn.benchmark` is on (fixed input size).
+* Open: lighter heads (they cost as much as the encoder; a 1x1 / half-resolution head risks the 5 mm precision of the Q-maps, test it),
+  `channels_last` + bf16, `torch.compile` of `QNet.features` on GPU, an asynchronous actor / learner split (simulation, ~1 s per action,
+  dominates the wall-clock; the learner is idle while the workers act).

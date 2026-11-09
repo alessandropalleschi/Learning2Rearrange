@@ -85,9 +85,12 @@ class ConvGRUCell(nn.Module):
 class QNet(nn.Module):
     nr_rotations = 2  # push left / right (0 and 180 degrees)
 
-    def __init__(self, in_channels=IN_CHANNELS, belief='none', hidden=64, n_push_lengths=1):
+    def __init__(self, in_channels=IN_CHANNELS, belief='none', hidden=64, n_push_lengths=1, learned_placement=True):
+        """learned_placement: build the place head (conditioned on the held class). Without it `forward` returns
+        `None` as place map: the head would cost about as much as the pick head for nothing."""
         super().__init__()
         self.belief, self.hidden, self.n_push_lengths = belief, hidden, n_push_lengths
+        self.learned_placement = learned_placement
         self.stem = nn.Sequential(nn.Conv2d(in_channels, 64, 3, padding=1, bias=False), norm(64), nn.ReLU(inplace=True))
         self.rb1, self.rb2, self.rb3 = ResidualBlock(64, 128), ResidualBlock(128, 256), ResidualBlock(256, 512)
         self.context = GlobalContext(512)
@@ -101,11 +104,11 @@ class QNet(nn.Module):
         # one Q-map per selectable push length; the second direction is the same head on the flipped input
         self.push_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, n_push_lengths, 1))
         self.pick_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
-        # learned placement: Q-map over the free cells, conditioned on the class of the object in the gripper
-        self.place_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
-        self.held_embed = nn.Linear(len(HELD_CLASSES), 512)
-        nn.init.zeros_(self.held_embed.weight)
-        nn.init.zeros_(self.held_embed.bias)
+        if learned_placement:  # Q-map over the free cells, conditioned on the class of the object in the gripper
+            self.place_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
+            self.held_embed = nn.Linear(len(HELD_CLASSES), 512)
+            nn.init.zeros_(self.held_embed.weight)
+            nn.init.zeros_(self.held_embed.bias)
 
     @staticmethod
     def _up(x):
@@ -133,8 +136,9 @@ class QNet(nn.Module):
         """180 degree rotation of the (square, zero-padded) image."""
         return torch.flip(x, dims=(2, 3))
 
-    def initial_hidden(self, batch, size, device=None):
-        return torch.zeros(batch, self.hidden, size // 8, size // 8, device=device)
+    def initial_hidden(self, batch, canvas, device=None):
+        """Empty belief for inputs of size `canvas` = (H, W)."""
+        return torch.zeros(batch, self.hidden, canvas[0] // 8, canvas[1] // 8, device=device)
 
     def update_belief(self, b0, h_prev, a_prev):
         """Latent belief update from the encoded observation (rotation 0) and the encoded last action.
@@ -144,20 +148,21 @@ class QNet(nn.Module):
 
     def _with_held(self, b, held):
         """Add the embedding of the held class (zeros = nothing held) to the bottleneck features."""
-        return b if held is None else b + self.held_embed(held)[:, :, None, None]
+        return b if held is None or not self.learned_placement else b + self.held_embed(held)[:, :, None, None]
 
     def forward(self, x, h_prev=None, a_prev=None, held=None):
         """All Q-maps. x: (B,C,H,W) -> push (B,2L,H,W) [index = direction*L + length], pick (B,1,H,W), place (B,1,H,W) in input
         orientation, and the new hidden state (None unless belief == 'recurrent').
         held: (B,3) one-hot class of the object in the gripper (zeros when nothing is held)."""
-        b0, b1 = self._with_held(self.encode(x), held), self._with_held(self.encode(self.flip(x)), held)
+        both = self.encode(torch.cat([x, self.flip(x)]))  # both push directions in one batched pass
+        b0, b1 = (self._with_held(b, held) for b in both.chunk(2))
         h = None
         if self.belief == 'recurrent':
             h, ctx = self.update_belief(b0, h_prev, a_prev)
             b0, b1 = b0 + ctx, b1 + self.flip(ctx)
         f0, f1 = self.decode(b0), self.decode(b1)
         push = torch.cat([self.push_head(f0), self.flip(self.push_head(f1))], dim=1)
-        return push, self.pick_head(f0), self.place_head(f0), h
+        return push, self.pick_head(f0), self.place_head(f0) if self.learned_placement else None, h
 
     PICK, PUSH, PLACE = 0, 1, 2
 
@@ -176,6 +181,7 @@ class QNet(nn.Module):
         pr = primitive[:, None, None, None]
         push_maps = self.push_head(f)  # (B,L,H,W): pick the channel of the chosen length
         push_out = push_maps.gather(1, (rotation % L)[:, None, None, None].expand(-1, 1, *push_maps.shape[2:]))
-        out = torch.where(pr == self.PUSH, push_out,
-                          torch.where(pr == self.PLACE, self.place_head(f), self.pick_head(f)))
+        other = torch.where(pr == self.PLACE, self.place_head(f), self.pick_head(f)) if self.learned_placement \
+            else self.pick_head(f)
+        out = torch.where(pr == self.PUSH, push_out, other)
         return torch.where(fl, self.flip(out), out)

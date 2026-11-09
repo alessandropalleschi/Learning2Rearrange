@@ -41,7 +41,7 @@ def test_qnet_training_path_matches_inference_path(belief, channels):
     """forward_selected (one pass, used for training) returns the Q-map that forward (all maps) computes."""
     net = QNet(channels, belief, 8)
     x = torch.randn(2, channels, 160, 160)
-    h = net.initial_hidden(2, 160) if belief == 'recurrent' else None
+    h = net.initial_hidden(2, (160, 160)) if belief == 'recurrent' else None
     a = torch.zeros(2, 4, 20, 20) if belief == 'recurrent' else None
     held = torch.tensor([[0., 0., 0.], [0., 1., 0.]])
     push, pick, place, h_new = net(x, h, a, held)
@@ -78,3 +78,13 @@ def test_feasibility_masks_grow_with_push_length():
     assert mask[1].sum() > mask[0].sum() and (mask[0] == mask[2]).all()  # longer push reaches farther
     maps = trainer.preprocessQmaps(np.zeros((4, H - 8, W - 4), np.float32), depth, 'push')
     assert maps.shape == (4, H - 8, W - 4)
+
+
+def test_qnet_without_place_head_skips_it():
+    net = QNet(4, 'none', 8, 1, learned_placement=False)
+    assert not hasattr(net, 'place_head') and not hasattr(net, 'held_embed')
+    x = torch.randn(2, 4, 128, 104)  # the native map size: no padding to a square canvas is needed
+    push, pick, place, _ = net(x)
+    assert place is None and push.shape == (2, 2, 128, 104) and pick.shape == (2, 1, 128, 104)
+    out = net.forward_selected(x, torch.tensor([QNet.PUSH, QNet.PICK]), torch.tensor([1, 0]))
+    assert torch.allclose(out[0], push[0, 1:2], atol=1e-4) and torch.allclose(out[1], pick[1], atol=1e-4)

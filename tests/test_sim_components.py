@@ -5,10 +5,10 @@ from fakes import FakeJoints, ScriptedSensors
 from l2r.config import SimParams
 from l2r.sim.arm import Arm
 from l2r.sim.arm_control import joint_limits, rate_limited_command
-from l2r.sim.constants import LABELS
+from l2r.sim.constants import COLORS, LABELS
 from l2r.sim.force_sensing import ForceMonitor
 from l2r.sim.suction import SuctionCup
-from l2r.sim.vision import class_masks, relabel_colormap
+from l2r.sim.vision import recolor_by_class, relabel_colormap
 from l2r.sim.workspace import Workspace
 
 
@@ -36,18 +36,18 @@ def test_force_monitor_removes_offset_rejects_spikes_and_debounces():
     assert hits[-1] and not hits[0]
 
 
-def test_class_masks_are_robust_against_ids_that_look_like_labels():
+def test_recolouring_is_robust_against_ids_that_look_like_labels():
     # object ids 3 and 5 are also class labels (green = 3, yellow = 5): in-place relabelling could confuse them
     names = {3: 'yellow CrackerBox', 5: 'blue ChipsCan', 9: 'green MustardBottle'}
     segm = np.zeros((6, 8), np.int64)
     segm[0:2, 0:2], segm[2:4, 2:4], segm[4:6, 4:6] = 3, 5, 9
     segm[0:2, 6:8] = 1  # robot / cabinet: not an object
-    color, masks, classes, colors, ids = class_masks(np.zeros((6, 8, 3), np.uint8), segm, names)
-    assert list(ids) == [3, 5, 9]
-    assert list(classes) == [LABELS['yellow'], LABELS['blue'], LABELS['green']]
-    assert (color[0, 6] == 255).all() and (color[0, 0] == colors[0]).all()  # background white, object by class
-    assert masks.shape == (3, 6, 8, 3) and (masks[1][2, 2] == color[2, 2]).all() and (masks[1][0, 0] == 0).all()
-    assert class_masks(np.zeros((2, 2, 3), np.uint8), np.zeros((2, 2), np.int64), names)[1] is None
+    color, objects = recolor_by_class(np.zeros((6, 8, 3), np.uint8), segm, names)
+    assert (color[0, 6] == 255).all() and (objects[0, 6] == 0).all()  # background white, not an object
+    for uid, label in ((3, 'yellow'), (5, 'blue'), (9, 'green')):
+        region = segm == uid
+        assert (objects[region] == uid).all() and (color[region] == color[region][0]).all()
+        assert (color[region][0] == np.multiply(COLORS[label][:3], 255)).all()
 
 
 def test_relabel_colormap_recolours_the_unpadded_window():
@@ -123,3 +123,34 @@ def test_force_monitor_reports_the_filtered_force():
     for _ in range(4):
         monitor.update(500.0)
     assert monitor.last_force == 200.0  # median of the last three samples
+
+
+def _random_scene(seed, rows=70, cols=90, objects=5):
+    """Random point cloud + object ids with the structure of a camera image (blobs of ids, random heights)."""
+    rng = np.random.default_rng(seed)
+    ws = Workspace()
+    b = ws.bounds
+    points = np.stack([rng.uniform(b[0, 0] - 0.02, b[0, 1] + 0.02, (rows, cols)),
+                       rng.uniform(b[1, 0] - 0.02, b[1, 1] + 0.02, (rows, cols)),
+                       rng.uniform(b[2, 0], b[2, 1], (rows, cols))], axis=-1).astype(np.float32)
+    segm = np.zeros((rows, cols), np.int64)
+    for uid in rng.choice([3, 5, 7, 9, 11, 13], objects, replace=False):  # blobs; 1 = robot (not an object)
+        r, c = rng.integers(0, rows - 20), rng.integers(0, cols - 25)
+        segm[r:r + rng.integers(5, 20), c:c + rng.integers(5, 25)] = uid
+    segm[rng.random((rows, cols)) < 0.05] = 1
+    names = {3: 'blue A', 5: 'yellow B', 7: 'green C', 9: 'blue D', 11: 'yellow E', 13: 'green F'}
+    return ws, points, segm, names
+
+
+def test_single_pass_object_maps_equal_the_per_object_reference():
+    import reference_vision as ref
+    from l2r.sim.vision import object_maps, recolor_by_class
+    for seed in range(12):
+        ws, points, segm, names = _random_scene(seed)
+        rows = ([8, 40, 75], [30, 62, 100], None)
+        color_new, objects = recolor_by_class(np.zeros(segm.shape + (3,), np.uint8), segm.copy(), names)
+        color_ref, masks, labels, colors, ids = ref.class_masks(np.zeros(segm.shape + (3,), np.uint8), segm.copy(), names)
+        assert (color_new == color_ref).all()
+        expected = ref.object_maps(points, masks, labels, colors, ids, ws, rows)
+        for got, want in zip(object_maps(points, objects, names, ws, rows), expected):
+            assert np.array_equal(got, want), seed
