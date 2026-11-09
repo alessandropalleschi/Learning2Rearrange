@@ -3,7 +3,7 @@ import numpy as np
 
 from l2r.config import Config
 from l2r.envs.rearrange import check_push
-from l2r.learning.masks import front_grasp_cells, push_path_cells, structured_masks
+from l2r.learning.masks import front_grasp_cells, push_path_cells
 from l2r.learning.trainer import Trainer
 from l2r.sim.workspace import Workspace
 

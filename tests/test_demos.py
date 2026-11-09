@@ -43,7 +43,7 @@ def test_margin_loss_ignores_samples_that_are_not_demonstrations():
     torch.manual_seed(1)
     trainer, s = make_trainer(), state()
     batch = [Transition(s, (0, 14, 12), s, -1.0, 'grasp', True)] * 4
-    plain = trainer.train_step(batch)
+    trainer.train_step(batch)
     trainer2 = make_trainer()
     trainer2.model.load_state_dict(trainer.model.state_dict())
     assert trainer2.train_step(batch, demo=np.zeros(4, bool)) is not None  # no demo flag: the margin term is skipped
@@ -79,7 +79,7 @@ def test_expert_pushes_objects_that_are_one_push_from_their_region_and_checks_th
     from l2r.demos import ScriptedExpert
     scene = SimpleNamespace(regions={'blue': [0.10, 0.25]}, class_name=lambda i: 'blue',
                             poses=lambda: {7: ((0.0, 0.06, 0.4), None), 8: ((0.0, -0.20, 0.4), None), 9: ((0.0, 0.15, 0.4), None)})
-    expert = ScriptedExpert(SimpleNamespace(sim=SimpleNamespace(scene=scene)))
+    expert = ScriptedExpert(SimpleNamespace(sim=SimpleNamespace(scene=scene), cfg=SimpleNamespace(push_lengths=[0.08])))
     assert expert._near_region(7)  # 4 cm from the region: one push
     assert not expert._near_region(8)  # 30 cm away: pick and place
     assert not expert._near_region(9)  # already inside
