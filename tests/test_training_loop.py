@@ -71,9 +71,9 @@ def test_replay():
         buf.push({}, (0, 0, 0), {}, -1.0, 'push', False)
     assert len(buf) == 10
     _, idx, w = buf.sample(4)
-    buf.update(idx, np.array([5.0, 0.0, 1.0, 2.0]))
-    assert buf.priorities[idx[0]] > buf.priorities[idx[1]] or idx[0] == idx[1]
     assert w.max() <= 1.0 + 1e-6
+    buf.update(np.array([0, 1, 2, 3]), np.array([5.0, 0.0, 1.0, 2.0]))  # distinct indices: deterministic
+    assert buf.priorities[0] > buf.priorities[3] > buf.priorities[2] > buf.priorities[1]
 
 
 class FakePhysics:
