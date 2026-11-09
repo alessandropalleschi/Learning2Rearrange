@@ -982,7 +982,7 @@ class Environment:
             height=config_camera["image_size"][0],
             viewMatrix=viewm,
             projectionMatrix=projm,
-            shadow=1,
+            shadow=0,  # the RGB image is recoloured by class afterwards: shadows only cost render time
             flags=p.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX,
             # OpenGL needs a display; the CPU renderer works headless (containers, CI)
             renderer=p.ER_BULLET_HARDWARE_OPENGL if self.gui else p.ER_TINY_RENDERER,
@@ -1031,7 +1031,7 @@ class Environment:
     def move_joints(self, target_joints, speed=0.02, timeout=0.5):
         """Move UR5e to target joint configuration."""
         for _ in range(self.params.move_joints_max_steps):  # simulation steps, not wall-clock
-            current_joints = np.array([p.getJointState(self.ur5e, i)[0] for i in self.ur5e_joints])
+            current_joints = np.array([s[0] for s in p.getJointStates(self.ur5e, self.ur5e_joints)])
             diff_joints = target_joints - current_joints
             diff_joints[-1] = 0
             if all(np.abs(diff_joints) < 1e-3):
@@ -1498,10 +1498,8 @@ class Environment:
         y2 = Y2[i]
         y1 = Y1[i]
         cc = CT[i]
-        for ind in range(y2,y1):
-          for xx in range(width):
-            if np.array_equal(colormap[ind,xx], [255,255,255]):
-              colormap[ind,xx] = cc
+        region = colormap[y2:y1, :width]  # colour the free (white) cells of this class' target region
+        region[np.all(region == 255, axis=-1)] = cc
 
       return heightmap, colormap
 
