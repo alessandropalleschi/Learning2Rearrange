@@ -37,6 +37,12 @@ class Config:
     transformer_dim: int = 192
     transformer_layers: int = 3
 
+    # --- Agent (architecture comparison): 'dense' = pixel Q-maps (default); 'object' = object-centric Q (one token per visible object,
+    #     Q per object-action slot); 'policy_critic' = dense Q critic + a policy heatmap trained on demonstrations that proposes cells ---
+    agent: str = 'dense'
+    object_dim: int = 64
+    object_layers: int = 2
+
     # --- Network architecture (ablation): U-Net skip connections; explicit task-geometry input channels (target-region bands per
     #     class + row / column coordinates) ---
     arch_skips: bool = False
@@ -124,7 +130,7 @@ class Config:
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
                    footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
-                   hierarchy=get('hierarchy', False), arch_skips=get('arch_skips', False),
+                   hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), arch_skips=get('arch_skips', False),
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
                    equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
                    grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
@@ -155,6 +161,9 @@ class Config:
                                  "distance to the target region ('distance'), or sparse + a penalty for actions that move nothing")
         parser.add_argument('--reward_scale', type=float, default=1.0, help='scale of the shaping potential')
         parser.add_argument('--noop_penalty', type=float, default=1.0, help="penalty of 'noop' actions (reward mode 'noop')")
+        parser.add_argument('--agent', choices=['dense', 'object', 'policy_critic'], default='dense',
+                            help="'object': object-centric Q (transformer over visible objects, Q per object-action slot; heuristic "
+                                 "placement); 'policy_critic': dense critic + demonstration-trained policy heatmap proposing cells")
         parser.add_argument('--arch_skips', action='store_true', help='U-Net skip connections from the encoder to the decoder')
         parser.add_argument('--equiv_targets', action='store_true',
                             help='regress the TD target at every cell equivalent to the taken action (the whole front band of the '
