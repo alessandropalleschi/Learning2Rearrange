@@ -49,6 +49,11 @@ class Config:
     jaw_yaws: int = 5  # jaw orientations about the vertical, evenly spread over +-60 degrees: a yaw also turns the approach
     jaw_max_yaw_deg: float = 60.0  # direction, and the arm only reaches into the cabinet within about +-60 degrees
 
+    # --- Demonstrations (DQfD): a large-margin loss keeps the expert action on top, TD keeps the values meaningful ---
+    demo_margin: float = 0.8          # margin l(aE, a) of the expert action over every other feasible action
+    demo_margin_weight: float = 1.0
+    demo_fraction: float = 0.25       # share of each batch drawn from the demonstrations (when loaded)
+
     # --- Placement (ablation): 'heuristic' = hand-written rule inside the pick-and-place action (paper);
     #     'learned' = pick and place are two decisions, the place pixel comes from a third Q-head
     #     (conditioned on the class of the held object, restricted to free cells) ---
@@ -102,7 +107,7 @@ class Config:
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
                    footprint_placement=get('footprint_placement', False), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
-                   hierarchy=get('hierarchy', False), reward_mode=get('reward_mode', defaults.reward_mode),
+                   hierarchy=get('hierarchy', False), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
 
@@ -130,6 +135,7 @@ class Config:
                                  "distance to the target region ('distance'), or sparse + a penalty for actions that move nothing")
         parser.add_argument('--reward_scale', type=float, default=1.0, help='scale of the shaping potential')
         parser.add_argument('--noop_penalty', type=float, default=1.0, help="penalty of 'noop' actions (reward mode 'noop')")
+        parser.add_argument('--demo_fraction', type=float, default=0.25, help='share of each batch from the demonstrations')
         parser.add_argument('--footprint_placement', action='store_true',
                             help="keep placement targets clear of the back wall by the held object's depth")
 

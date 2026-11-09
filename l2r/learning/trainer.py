@@ -261,8 +261,10 @@ class Trainer(object):
             actor_loss = -q_actor[pushed].mean()
         return pred, self.cfg.hier_prim_weight * level1, actor_loss
 
-    def train_step(self, transitions, weights=None):
-        """One double-DQN gradient step on a list of Transition. Gradients flow only through the taken pixel."""
+    def train_step(self, transitions, weights=None, demo=None):
+        """One double-DQN gradient step on a list of Transition. Gradients flow only through the taken pixel.
+
+        demo: optional bool array (one per transition): for these, a large-margin loss (DQfD) keeps the expert's action on top."""
         B = len(transitions)
         states = [t.state for t in transitions]
         nexts = [t.next_state for t in transitions]
@@ -321,6 +323,9 @@ class Trainer(object):
         if weights is not None:  # importance-sampling correction of prioritized replay
             per_sample = per_sample * torch.as_tensor(weights, device=DEVICE)
         loss = per_sample.mean() + extra_loss
+        if demo is not None and np.any(demo):
+            loss = loss + self.cfg.demo_margin_weight * self._margin_loss(x, states, prim, rot, rows, cols, np.asarray(demo),
+                                                                         (hp, ap, held), h, w)
         self.last_td = (pred - label).detach().cpu().numpy()
 
         self.optimizer.zero_grad()
@@ -339,18 +344,59 @@ class Trainer(object):
         self.last_q = float(pred.detach().mean().cpu())
         return float(loss.detach().cpu())
 
+    def _margin_loss(self, x, states, prim, rot, rows, cols, demo, inputs, h, w):
+        """DQfD: max_a [Q(s,a) + l * (a != a_E)] - Q(s, a_E), over the feasible actions, averaged over demonstration samples.
+        Belief 'recurrent' is not supported (its hidden state is not recorded in demonstrations)."""
+        idx = torch.as_tensor(np.flatnonzero(demo), device=DEVICE)
+        hp, ap, held = inputs
+        if hp is not None:
+            raise NotImplementedError("demonstrations with belief='recurrent' are not supported")
+        sub_states = [states[i] for i in idx.tolist()]
+        with torch.autocast(device_type=DEVICE.type, enabled=self.amp):
+            out = self.model(x[idx], None, None, None if held is None else held[idx])
+        push_mask, pick_mask, place_mask = self._masks_padded(sub_states, h, w)
+        neg = -1e9
+        pp, pk = out[0].float(), out[1].float()
+        pl = out[2].float() if out[2] is not None else torch.full_like(pk, neg)
+        n_push, canvas = pp.shape[1], pp.shape[-2:]
+        masks = torch.cat([push_mask.expand_as(pp).flatten(1), pick_mask.flatten(1), place_mask.flatten(1)], dim=1)
+        q = torch.cat([pp.flatten(1), pk.flatten(1), pl.flatten(1)], dim=1)
+        size = canvas[0] * canvas[1]
+        channel = torch.where(prim[idx] == QNet.PUSH, rot[idx],
+                              torch.where(prim[idx] == QNet.PICK, torch.full_like(rot[idx], n_push), torch.full_like(rot[idx], n_push + 1)))
+        expert = channel * size + rows[idx] * canvas[1] + cols[idx]
+        masks = masks.scatter(1, expert[:, None], True)  # the expert's own action is feasible by definition
+        penalty = torch.full_like(q, self.cfg.demo_margin).scatter(1, expert[:, None], 0.0)
+        best = torch.where(masks, q + penalty, torch.full_like(q, neg)).max(1).values
+        return (best - q.gather(1, expert[:, None])[:, 0]).mean()
+
+    def pretrain(self, demos, steps, log=print):
+        """Pre-train on the demonstrations alone (TD + large margin), then synchronise the target network."""
+        self.demos = list(demos)
+        for step in range(steps):
+            batch = [self.demos[i] for i in np.random.randint(len(self.demos), size=self.cfg.batch_size)]
+            loss = self.train_step(batch, demo=np.ones(len(batch), bool))
+            self._soft_update(self.cfg.polyak_beta * 10)
+            if (step + 1) % max(steps // 10, 1) == 0:
+                log('pretrain step %d/%d loss %.4f' % (step + 1, steps, loss))
+        self.model_target.load_state_dict(self.model.state_dict())
+
     def optimize(self):
-        """Sample a batch from the replay buffer, take a gradient step and Polyak-update the target."""
+        """Sample a batch (partly from the demonstrations, if loaded), take a gradient step and Polyak-update the target."""
         if self.is_testing or len(self.buffer) < self.cfg.batch_size:
             return None
+        n_demo = int(round(self.cfg.demo_fraction * self.cfg.batch_size)) if getattr(self, 'demos', None) else 0
+        n_agent = self.cfg.batch_size - n_demo
+        demo_batch = [self.demos[i] for i in np.random.randint(len(self.demos), size=n_demo)] if n_demo else []
+        flags = np.array([True] * n_demo + [False] * n_agent)
         if self.cfg.prioritized:
             beta = min(1.0, self.cfg.per_beta_start +
                        (1.0 - self.cfg.per_beta_start) * self.opt_steps / self.cfg.per_beta_iters)
-            transitions, idx, weights = self.buffer.sample(self.cfg.batch_size, beta)
-            loss = self.train_step(transitions, weights)
-            self.buffer.update(idx, self.last_td)
+            transitions, idx, weights = self.buffer.sample(n_agent, beta)
+            loss = self.train_step(demo_batch + transitions, np.concatenate([np.ones(n_demo), weights]).astype(np.float32), flags)
+            self.buffer.update(idx, self.last_td[n_demo:])
         else:
-            loss = self.train_step(self.buffer.sample(self.cfg.batch_size))
+            loss = self.train_step(demo_batch + self.buffer.sample(n_agent), None, flags)
         self.scheduler.step()
         self.opt_steps += 1
         self._soft_update(self.cfg.polyak_beta)

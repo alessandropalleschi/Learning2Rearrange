@@ -68,6 +68,14 @@ class TrainingLoop:
         self.trainer = Trainer(self.cfg, is_testing=args.is_testing, load_snapshot=args.load_snapshot,
                                snapshot=args.snapshot, snapshot_target=args.snapshot_target)
         self.logger = Logger(self.log_dir)
+        if args.demos:
+            from l2r.demos import load_demos
+            demos, stats = load_demos(args.demos)
+            print('Demonstrations: %d transitions (expert success %.2f over %d episodes)'
+                  % (len(demos), stats['success_rate'], stats['episodes']))
+            self.trainer.demos = demos
+            if args.pretrain_steps:
+                self.trainer.pretrain(demos, args.pretrain_steps)
         self.curriculum = Curriculum(self.cfg, frozen=args.is_testing, validated=bool(args.curriculum_eval))
         self.validations = 0
         self.episode_objects = [self.curriculum.num_obj] * args.num_envs  # objects of each simulator's running episode
@@ -243,6 +251,8 @@ def add_arguments(parser):
                         help='advance the curriculum after a greedy validation on this many fresh random configurations '
                              '(success >= threshold) instead of the epsilon-greedy training window (0 = training window)')
     parser.add_argument('--curriculum_eval_every', type=int, default=25, help='training episodes between validations')
+    parser.add_argument('--demos', default='', help='recorded expert demonstrations (scripts/collect_demos.py; same model flags)')
+    parser.add_argument('--pretrain_steps', type=int, default=0, help='gradient steps on the demonstrations before training (DQfD)')
     parser.add_argument('--max_episodes', type=int, default=0, help='stop after this many finished episodes (0 = no cap)')
     parser.add_argument('--max_iterations', type=int, default=0, help='stop after this many environment steps (0 = run forever)')
     parser.add_argument('--start_method', default='spawn', help='multiprocessing start method of the workers')

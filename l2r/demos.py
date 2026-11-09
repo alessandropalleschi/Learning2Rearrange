@@ -42,13 +42,24 @@ class ScriptedExpert:
                 continue
             rows, cols = np.nonzero(idmap == object_id)
             if rows.size >= 6:  # visible enough to touch
-                front = cols.max()
-                at_front = rows[cols >= front - 1]
-                # aim INSIDE the object: the approach stops on contact, but the suction only engages on a real contact point and
-                # the surface at cup height is often a few mm behind the front-most cell of the top view (tapered bottles)
-                aim = max(front - GRASP_DEPTH_CELLS, int(cols.min()))
-                found.append((pos[0], object_id, int(np.median(at_front)), int(aim)))
+                aim_row, aim_col = self._aim_cell(rows, cols)
+                found.append((pos[0], object_id, aim_row, aim_col))
         return sorted(found, reverse=True)  # largest x first: nothing is in front of it
+
+    @staticmethod
+    def _aim_cell(rows, cols):
+        """A cell that belongs to the object, GRASP_DEPTH_CELLS behind its front-most cell (or the deepest cell there is).
+
+        The approach stops on contact, but the suction only engages on a real contact point and the surface at cup height is often
+        a few mm behind the front-most cell of the top view (tapered bottles). The cell must be one of the object's own cells: the
+        environment ignores a grasp whose pixel is not on an object."""
+        front = cols.max()
+        col = front - GRASP_DEPTH_CELLS
+        while not (cols == col).any() and col > cols.min():
+            col -= 1
+        at_col = rows[cols == col] if (cols == col).any() else rows[cols == cols.min()]
+        row = int(at_col[np.argmin(np.abs(at_col - np.median(at_col)))])  # the object's own cell closest to the middle
+        return row, int(col if (cols == col).any() else cols.min())
 
     def act(self):
         """(primitive, pix) or None if the expert has nothing sensible to do."""
