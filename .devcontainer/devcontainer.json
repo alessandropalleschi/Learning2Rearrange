@@ -1,15 +1,79 @@
 {
   "name": "Learning2Rearrange",
-  "build": { "dockerfile": "Dockerfile", "context": ".." },
-  // Remove "--gpus=all" if the host has no NVIDIA GPU / NVIDIA Container Toolkit.
-  "runArgs": ["--gpus=all", "--shm-size=4g"],
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  // GPU acceleration and shared memory for PyTorch
+  "runArgs": [
+    "--gpus=all",
+    "--shm-size=4g"
+  ],
   "workspaceFolder": "/workspaces/Learning2Rearrange",
-  "remoteEnv": { "PYTHONUNBUFFERED": "1" },
+  "remoteEnv": {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1"
+  },
   "customizations": {
     "vscode": {
-      "extensions": ["ms-python.python", "ms-python.vscode-pylance"],
-      "settings": { "python.defaultInterpreterPath": "/opt/conda/bin/python" }
+      "extensions": [
+        // Python
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "ms-toolsai.jupyter",
+        // Formatting and linting
+        "charliermarsh.ruff",
+        // Type checking
+        "astral-sh.ty",
+        // AI coding assistants
+        "anthropic.claude-code",
+        "openai.chatgpt",
+        // Git
+        "eamodio.gitlens",
+        // Docker
+        "ms-azuretools.vscode-docker",
+        // TOML configuration
+        "tamasfe.even-better-toml",
+        // YAML configuration
+        "redhat.vscode-yaml",
+        // Markdown
+        "yzhang.markdown-all-in-one",
+        // Spell checking
+        "streetsidesoftware.code-spell-checker"
+      ],
+      "settings": {
+        // Python interpreter
+        "python.defaultInterpreterPath": "/opt/conda/bin/python",
+        // Formatting
+        "editor.formatOnSave": true,
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.codeActionsOnSave": {
+            "source.fixAll.ruff": "explicit",
+            "source.organizeImports.ruff": "explicit"
+          }
+        },
+        // Ruff
+        "ruff.enable": true,
+        "ruff.lint.run": "onType",
+        // Type checking
+        "python.analysis.typeCheckingMode": "off",
+        // Testing
+        "python.testing.pytestEnabled": true,
+        "python.testing.unittestEnabled": false,
+        "python.testing.pytestArgs": [
+          "tests"
+        ],
+        // Files
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        // Git
+        "git.autofetch": true,
+        // Terminal
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
     }
   },
-  "postCreateCommand": "python -c \"import torch;print('cuda available:', torch.cuda.is_available())\""
+  "postCreateCommand": "python -c \"import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('GPU available:', torch.cuda.is_available())\""
 }
