@@ -31,6 +31,8 @@ VARIANTS = {
     'skips+region': dict(arch_skips=True, region_channels=True),
     'skips+region+equiv': dict(arch_skips=True, region_channels=True, equiv_targets=True),
     'hybrid': dict(backbone='hybrid'),
+    'policy+skips': dict(agent='policy_critic', arch_skips=True),
+    'object': dict(agent='object', placement='heuristic'),
     'fpn': dict(arch_decoder='fpn'),
     'attn_unet': dict(arch_decoder='attn_unet'),
     'unet_attn4': dict(arch_decoder='unet_attn4'),
@@ -149,6 +151,97 @@ def sensible_action(state, primitive, pix):
     return None
 
 
+class PolicyVariant(DenseVariant):
+    """The dense network with a policy head: the cross-entropy trains the POLICY logits (behaviour cloning), the Q heads are untouched."""
+
+    def __init__(self, name, steps, seed, batch=8, lr=3e-4):
+        from l2r.learning.policy_critic import PolicyCriticTrainer
+        super().__init__(name, steps, seed, batch, lr)
+        self.trainer = PolicyCriticTrainer(self.cfg)
+        self.optimizer = torch.optim.AdamW(self.trainer.model.parameters(), lr=lr, weight_decay=1e-4)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, steps)
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.trainer.amp)
+
+    def _logits(self, states, grad):
+        logits, masks, (n_push, _), canvas, size = self.trainer.policy_logits(states, grad)
+        return logits, masks, n_push, canvas, size
+
+
+class ObjectVariant:
+    """The object-centric Q-function trained with a cross-entropy over its object-action slots on the demonstrations. Placement is the
+    heuristic one in this agent, so the demonstrated placements are neither trained on nor evaluated."""
+
+    skips_place = True
+
+    def __init__(self, name, steps, seed, batch=8, lr=1e-3):
+        from l2r.learning.object_trainer import ObjectTrainer
+        torch.manual_seed(seed)
+        self.cfg = Config(**{**BASE, **VARIANTS[name]})
+        self.trainer = ObjectTrainer(self.cfg)
+        self.reference = Trainer(Config(**BASE, equiv_targets=True))
+        self.optimizer = torch.optim.AdamW(self.trainer.model.parameters(), lr=lr, weight_decay=1e-4)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, steps)
+
+    def train_step(self, transitions):
+        from l2r.learning.object_centric import collate, slot_of
+        t = self.trainer
+        pairs = [(t.info(tr.state), tr) for tr in transitions if tr.primitive_action != 'place']
+        labelled = [(s, slot_of(s, tr.primitive_action, tr.action)) for s, tr in pairs]
+        labelled = [(s, slot) for s, slot in labelled if slot is not None]
+        if not labelled:
+            return 0.0
+        tokens, n_objects, valid = collate([s for s, _ in labelled], DEVICE)
+        q = t.model(tokens, n_objects)
+        index = torch.tensor([slot for _, slot in labelled], device=DEVICE)
+        flat = index[:, 0] * q.shape[2] + index[:, 1]
+        valid = valid.clone()
+        valid[torch.arange(len(labelled), device=DEVICE), index[:, 0], index[:, 1]] = True
+        loss = torch.nn.functional.cross_entropy(q.masked_fill(~valid, -1e9).flatten(1), flat)
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(t.model.parameters(), 5.0)
+        self.optimizer.step()
+        self.scheduler.step()
+        return float(loss.detach())
+
+    @torch.no_grad()
+    def predict(self, state):
+        from l2r.learning.object_centric import collate
+        info = self.trainer.info(state)
+        if len(info['instances']) == 0:
+            return 'grasp', (0, 0, 0)
+        tokens, n_objects, valid = collate([info], DEVICE)
+        q = self.trainer.model(tokens, n_objects).masked_fill(~valid, -1e9)[0]
+        i, slot = divmod(int(q.flatten().argmax()), q.shape[1])
+        rot, row, col = (int(v) for v in info['actions'][i, slot])
+        return ('grasp' if slot == 0 else 'push'), (rot, row, col)
+
+
+def rollout(variant, episodes, num_obj, max_actions=20, base_seed=7000):
+    """Closed-loop evaluation of a trained variant in the simulator (greedy): success rate and actions per episode. This is the real
+    test: it does not care WHICH valid strategy the policy uses (other objects, push or grasp, other order), only whether it sorts."""
+    from types import SimpleNamespace
+
+    from l2r.config import SimParams
+    from l2r.envs.rearrange import RearrangeEnv
+    flags = SimpleNamespace(physics='legacy', randomize=False, step_distance=0.002, move_budget=1000, sim_quality='legacy',
+                            camera_scale=1.0, force_limit=300.0, force_sense_x=None, adaptive_step=True, velocity_scale=1.0,
+                            joint_tolerance=3e-3)
+    cfg = variant.cfg
+    cfg.max_actions = max_actions
+    env = RearrangeEnv(cfg, num_obj=num_obj, params=SimParams.from_args(flags))
+    outcomes = []
+    for episode in range(episodes):
+        obs = env.reset(num_obj=num_obj, seed=base_seed + episode)
+        done, info = False, {'sorted': False, 'actions': 0}
+        while not done:
+            primitive, pix = variant.predict(obs)
+            obs, _, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix})
+            done = terminated or truncated
+        outcomes.append((bool(info['sorted']), info['actions']))
+    return {'rollout success': float(np.mean([o[0] for o in outcomes])), 'rollout actions': float(np.mean([o[1] for o in outcomes]))}
+
+
 def split(demos, fraction=0.2):
     cut = int(len(demos) * (1 - fraction))
     return demos[:cut], demos[cut:]
@@ -157,6 +250,8 @@ def split(demos, fraction=0.2):
 def evaluate(variant, test):
     ref, counts = variant.reference, dict(n=0, primitive=0, exact=0, near=0, inclass=0, pix_n=0, sensible=0, sensible_n=0)
     for tr in test:
+        if getattr(variant, 'skips_place', False) and tr.primitive_action == 'place':
+            continue  # this agent does not decide placements
         primitive, pix = variant.predict(tr.state)
         counts['n'] += 1
         judged = sensible_action(tr.state, primitive, pix) if 'regions' in tr.state else None
@@ -183,7 +278,12 @@ def evaluate(variant, test):
             'exact': counts['exact'] / p, 'sensible': counts['sensible'] / max(counts['sensible_n'], 1)}
 
 
-def run(demos_path, names, seeds, steps, batch, fraction=1.0, log=print):
+def make_variant(name, steps, seed, batch):
+    agent = VARIANTS[name].get('agent', 'dense')
+    return {'object': ObjectVariant, 'policy_critic': PolicyVariant}.get(agent, DenseVariant)(name, steps, seed, batch)
+
+
+def run(demos_path, names, seeds, steps, batch, fraction=1.0, rollouts=0, rollout_objects=3, log=print):
     demos, stats = load_demos(demos_path)
     train, test = split(demos)
     train_eval = train[::4]  # a fixed quarter of the training transitions: accuracy on what the network was trained on
@@ -194,7 +294,7 @@ def run(demos_path, names, seeds, steps, batch, fraction=1.0, log=print):
     for name in names:
         runs = []
         for seed in range(seeds):
-            variant = DenseVariant(name, steps, seed, batch)
+            variant = make_variant(name, steps, seed, batch)
             rng = np.random.default_rng(seed)
             losses = []
             for step in range(steps):
@@ -203,14 +303,19 @@ def run(demos_path, names, seeds, steps, batch, fraction=1.0, log=print):
             metrics['loss'] = float(np.mean(losses[-100:]))
             seen = evaluate(variant, train_eval)
             metrics['train in-class'], metrics['train sensible'] = seen['in-class'], seen['sensible']
+            if rollouts:
+                metrics.update(rollout(variant, rollouts, rollout_objects))
             runs.append(metrics)
             log('  %-22s seed %d: %s' % (name, seed, ' '.join('%s %.3f' % kv for kv in metrics.items())))
             del variant
             torch.cuda.empty_cache()
         results[name] = {k: (float(np.mean([r[k] for r in runs])), float(np.std([r[k] for r in runs]))) for k in runs[0]}
-    log('\n| variant | primitive | in-class | sensible | near (3 cells) | exact | train loss | train in-class | train sensible |\n|---|---|---|---|---|---|---|---|---|')
+    extra = ' rollout success | rollout actions |' if rollouts else ''
+    log('\n| variant | primitive | in-class | sensible | near (3 cells) | exact | train loss | train in-class | train sensible |' + extra +
+        '\n|---|---|---|---|---|---|---|---|---|' + ('---|---|' if rollouts else ''))
     for name, m in results.items():
-        keys = ('primitive', 'in-class', 'sensible', 'near', 'exact', 'loss', 'train in-class', 'train sensible')
+        keys = ('primitive', 'in-class', 'sensible', 'near', 'exact', 'loss', 'train in-class', 'train sensible') + \
+            (('rollout success', 'rollout actions') if rollouts else ())
         log('| %s | %s |' % (name, ' | '.join('%.3f +- %.3f' % m[k] for k in keys)))
     return results
 
@@ -222,10 +327,12 @@ def main(argv=None):
     parser.add_argument('--seeds', type=int, default=3)
     parser.add_argument('--steps', type=int, default=1500)
     parser.add_argument('--batch', type=int, default=8)
+    parser.add_argument('--rollouts', type=int, default=0, help='closed-loop greedy episodes per run in the simulator (0 = skip: slow)')
+    parser.add_argument('--rollout_objects', type=int, default=3)
     parser.add_argument('--fraction', type=float, default=1.0, help='fraction of the training transitions to use (data scaling)')
     parser.add_argument('--out', default='')
     args = parser.parse_args(argv)
-    results = run(args.demos, args.variants, args.seeds, args.steps, args.batch, args.fraction)
+    results = run(args.demos, args.variants, args.seeds, args.steps, args.batch, args.fraction, args.rollouts, args.rollout_objects)
     if args.out:
         json.dump(results, open(args.out, 'w'), indent=1)
 

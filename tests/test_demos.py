@@ -121,3 +121,12 @@ def test_gaussian_equivalence_weights_fade_with_the_distance_from_the_taken_cell
     assert cells[row, col] == 1.0  # full weight at the taken cell
     assert 0 < cells[row, col + 1] < 1 and cells[row, col + 2] < cells[row, col + 1] and cells[row, col + 3] == 0  # fades, then stops at 2 cells
     assert np.isclose(cells[row, col + 1], np.exp(-1 / (2 * 1.5 ** 2)))
+
+
+def test_expert_chooses_the_push_length_that_lands_the_object_closest_to_the_middle_of_its_region():
+    from l2r.demos import ScriptedExpert
+    lengths = (0.04, 0.08, 0.12)
+    assert ScriptedExpert._length_index(-0.10, 0.0, 0.10, 1, lengths) == 2  # far: the longest push lands at 0.02, inside the region
+    assert ScriptedExpert._length_index(0.25, 0.0, 0.10, 0, lengths) == 2  # towards -y: 0.25 - 0.12 = 0.13 is the closest to 0.05
+    assert ScriptedExpert._length_index(0.02, 0.0, 0.10, 1, lengths) == 0  # near: a short push (the long ones overshoot)
+    assert ScriptedExpert._length_index(0.25, 0.0, 0.10, 0, (0.08,)) == 0  # a single length: always index 0 (the paper's 8 cm)

@@ -22,13 +22,14 @@ from l2r.learning.masks import BLADE_HALF_WIDTH_CELLS, GRASP_EDGE_MARGIN, PUSH_O
 from l2r.sim.constants import CLASSES, COLORS
 
 MAX_OBJECTS = 16
-FEATURES = 18
+MAX_GHOSTS = 8  # remembered-but-hidden objects kept as tokens
+FEATURES = 20  # 18 object features + ghost flag + age (see instance_features)
 COLOR_TOLERANCE = 6  # summed absolute RGB difference that still counts as the class colour
 MIN_AREA = 6  # cells (5 mm): smaller pieces are noise
 OCCLUDED_RGB = 105
 GRASP_DEPTH_CELLS = 2  # aim this many cells behind the front-most cell (see demos.GRASP_DEPTH_CELLS)
 PUSH_GAP = 3  # cells between the blade start and the object
-TYPE_INSTANCE, TYPE_REGION, TYPE_GLOBAL = 0, 1, 2
+TYPE_INSTANCE, TYPE_REGION, TYPE_GLOBAL, TYPE_GHOST = 0, 1, 2, 3
 CLASS_RGB = np.array([np.multiply(COLORS[name][:3], 255) for name in CLASSES]).round().astype(int)
 
 
@@ -60,9 +61,33 @@ def extract_instances(obs):
     return found[:MAX_OBJECTS]
 
 
-def instance_features(instances, obs):
-    """(N, FEATURES) float32: class one-hot, position, extent, in-region flag and distance, height, occlusion."""
-    color, depth = crop(obs['colormap']).astype(int), crop(obs['depthmap'])
+def extract_ghosts(obs):
+    """Remembered objects that are NOT visible now, from the spatial belief (`--belief spatial`): connected pieces of one class colour in the
+    remembered colour map whose memory is stale (age > 0), largest first. Returns (ghosts, remembered height map in metres, mean age per
+    ghost in 0..1). Empty without a belief."""
+    if 'belief' not in obs:
+        return [], None, []
+    belief = np.asarray(obs['belief'])
+    color = crop(np.transpose(belief[:3], (1, 2, 0))).astype(int)
+    height, age = crop(belief[3]).astype(np.float32) / 255.0 * 0.4, crop(belief[4]).astype(np.float32) / 255.0
+    stale = (height > 0.008) & (age > 0)
+    found = []
+    for k in range(len(CLASSES)):
+        same = stale & (np.abs(color - CLASS_RGB[k]).sum(-1) <= COLOR_TOLERANCE)
+        labels, count = ndimage.label(same, structure=np.ones((3, 3)))
+        for label in range(1, count + 1):
+            rows, cols = np.nonzero(labels == label)
+            if rows.size >= MIN_AREA:
+                found.append((Instance(k, rows, cols), float(age[rows, cols].mean())))
+    found.sort(key=lambda g: -g[0].rows.size)
+    found = found[:MAX_GHOSTS]
+    return [g[0] for g in found], height, [g[1] for g in found]
+
+
+def instance_features(instances, obs, height_map=None, ages=None):
+    """(N, FEATURES) float32: class one-hot, position, extent, in-region flag and distance, height, occlusion; for ghosts (height_map and
+    ages given) the remembered heights, the ghost flag and the age of the memory."""
+    color, depth = crop(obs['colormap']).astype(int), (crop(obs['depthmap']) if height_map is None else height_map)
     h, w = depth.shape
     regions = np.asarray(obs['regions'], np.float32)  # (3, 2) rows, un-padded = cropped coordinates
     grey = np.abs(color - OCCLUDED_RGB).sum(-1) <= 6
@@ -86,6 +111,8 @@ def instance_features(instances, obs):
         out[i, 15] = back.mean() if back.size else 0.0
         out[i, 16] = ahead.mean() if ahead.size else 0.0
         out[i, 17] = 1.0  # a real token (padding rows are all zero)
+        if ages is not None:
+            out[i, 18], out[i, 19] = 1.0, ages[i]  # a ghost: remembered, not visible now
     return out
 
 
@@ -100,10 +127,11 @@ def region_features(obs):
     return out
 
 
-def global_features(instances, obs):
+def global_features(instances, obs, ghosts=()):
     out = np.zeros(FEATURES, np.float32)
     features = instance_features(instances, obs) if instances else np.zeros((0, FEATURES), np.float32)
     out[0] = len(instances) / 8.0
+    out[2] = len(ghosts) / 8.0
     out[1] = float((features[:, 12] == 0).mean()) if len(features) else 0.0  # fraction still misplaced
     out[17] = 1.0
     return out
@@ -150,8 +178,10 @@ def build_state(obs, push_lengths_px):
     """Everything the network and the action mapping need for one observation."""
     instances = extract_instances(obs)
     actions, valid = candidate_actions(instances, obs, push_lengths_px)
-    return {'instances': instances, 'actions': actions, 'valid': valid,
-            'tokens': np.concatenate([global_features(instances, obs)[None], region_features(obs),
+    ghosts, remembered, ages = extract_ghosts(obs)
+    ghost_tokens = instance_features(ghosts, obs, remembered, ages) if ghosts else np.zeros((0, FEATURES), np.float32)
+    return {'instances': instances, 'actions': actions, 'valid': valid, 'ghosts': ghosts, 'ghost_tokens': ghost_tokens,
+            'tokens': np.concatenate([global_features(instances, obs, ghosts)[None], region_features(obs),
                                       instance_features(instances, obs)], axis=0)}
 
 
@@ -180,35 +210,44 @@ class ObjectQNet(nn.Module):
         super().__init__()
         self.n_slots = n_slots
         self.embed = nn.Linear(FEATURES, dim)
-        self.type_embed = nn.Embedding(3, dim)
+        self.type_embed = nn.Embedding(4, dim)
         layer = nn.TransformerEncoderLayer(dim, heads, 2 * dim, dropout=0.0, activation='gelu', batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, n_slots))
 
-    def forward(self, tokens, n_objects):
-        """tokens (B, 4 + Nmax, FEATURES) float, n_objects (B,) long -> Q (B, Nmax, n_slots)."""
+    def embed_tokens(self, tokens, counts):
+        """tokens (B, 4 + Nmax + MAX_GHOSTS, FEATURES), counts (B, 2) long (instances, ghosts) -> contextualised tokens of the
+        instances (B, Nmax, dim): global + 3 region + Nmax instance + MAX_GHOSTS ghost tokens through the transformer."""
         batch, length, _ = tokens.shape
+        n_max = length - 4 - MAX_GHOSTS
+        position = torch.arange(length, device=tokens.device)
         types = torch.full((length,), TYPE_INSTANCE, dtype=torch.long, device=tokens.device)
-        types[0], types[1:4] = TYPE_GLOBAL, TYPE_REGION
-        pad = torch.arange(length, device=tokens.device)[None] >= (4 + n_objects)[:, None]
+        types[0], types[1:4], types[4 + n_max:] = TYPE_GLOBAL, TYPE_REGION, TYPE_GHOST
+        pad = torch.where(position[None] < 4, torch.zeros_like(position[None], dtype=torch.bool),
+                          torch.where(position[None] < 4 + n_max, (position[None] - 4) >= counts[:, :1],
+                                      (position[None] - 4 - n_max) >= counts[:, 1:2]))
         x = self.embed(tokens) + self.type_embed(types)[None]
-        x = self.norm(self.encoder(x, src_key_padding_mask=pad))
-        return self.head(x[:, 4:])
+        return self.norm(self.encoder(x, src_key_padding_mask=pad))[:, 4:4 + n_max]
+
+    def forward(self, tokens, counts):
+        """-> Q (B, Nmax, n_slots) for every instance and slot."""
+        return self.head(self.embed_tokens(tokens, counts))
 
 
 def collate(states, device):
-    """List of `build_state` results -> (tokens (B, 4 + Nmax, F), n_objects (B,), valid (B, Nmax, S)) tensors."""
+    """List of `build_state` results -> (tokens (B, 4 + Nmax + MAX_GHOSTS, F), counts (B, 2) = (instances, ghosts), valid (B, Nmax, S))."""
     n_max = max(max(len(s['instances']) for s in states), 1)
     n_slots = states[0]['valid'].shape[1] if len(states[0]['valid']) else 1
-    tokens = np.zeros((len(states), 4 + n_max, FEATURES), np.float32)
+    tokens = np.zeros((len(states), 4 + n_max + MAX_GHOSTS, FEATURES), np.float32)
     valid = np.zeros((len(states), n_max, n_slots), bool)
     for b, s in enumerate(states):
-        n = len(s['instances'])
+        n, g = len(s['instances']), len(s['ghost_tokens'])
         tokens[b, :4 + n] = s['tokens']
+        tokens[b, 4 + n_max:4 + n_max + g] = s['ghost_tokens']
         valid[b, :n] = s['valid']
-    n_objects = torch.tensor([len(s['instances']) for s in states], device=device)
-    return torch.from_numpy(tokens).to(device), n_objects, torch.from_numpy(valid).to(device)
+    counts = torch.tensor([[len(s['instances']), len(s['ghost_tokens'])] for s in states], device=device)
+    return torch.from_numpy(tokens).to(device), counts, torch.from_numpy(valid).to(device)
 
 
 def rasterize(state, q, shape, n_push, fill=-1000.0):
@@ -224,3 +263,40 @@ def rasterize(state, q, shape, n_push, fill=-1000.0):
             target = pick[0] if slot == 0 else push[int(rot)]
             target[row, col] = max(target[row, col], q[i, slot])
     return push, pick
+
+
+class ObjectQNetContinuous(ObjectQNet):
+    """Object-level agent with a CONTINUOUS push length (hierarchical: the manager's values rank object-skills, the worker's parameter is
+    the length). Per instance token: a pick value, an actor that proposes a push length per direction (0..1 of the length range), and a
+    push critic Q(token, direction, length). Slots: 0 pick, 1 / 2 push in direction 0 / 1."""
+
+    def __init__(self, dim=64, layers=2, heads=4):
+        super().__init__(n_slots=3, dim=dim, layers=layers, heads=heads)
+        del self.head
+        self.pick_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
+        self.actor = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 2))
+        self.push_critic = nn.Sequential(nn.Linear(dim + 9, dim), nn.GELU(), nn.Linear(dim, 1))
+
+    def _push_values(self, emb, lengths):
+        """emb (B,N,dim), lengths (B,N,2) -> (B,N,2) push values for the two directions at those lengths."""
+        outs = []
+        for direction in range(2):
+            onehot = torch.zeros(*emb.shape[:2], 2, device=emb.device)
+            onehot[..., direction] = 1.0
+            length = lengths[..., direction:direction + 1]
+            freq = torch.arange(1, 4, device=emb.device) * 3.14159265  # Fourier features: a peaked value over the length is hard for a plain MLP
+            feats = torch.cat([length, torch.sin(length * freq), torch.cos(length * freq)], dim=-1)
+            outs.append(self.push_critic(torch.cat([emb, feats, onehot], dim=-1))[..., 0])
+        return torch.stack(outs, dim=-1)
+
+    def forward_full(self, tokens, counts, lengths=None):
+        """-> (Q (B,N,3), actor lengths (B,N,2), push values at the actor's lengths computed from DETACHED features (B,N,2)).
+        `lengths` (B,N,2) overrides the lengths the critic is evaluated at (training: the executed ones)."""
+        emb = self.embed_tokens(tokens, counts)
+        actor = torch.sigmoid(self.actor(emb.detach()))
+        used = actor.detach() if lengths is None else lengths
+        q = torch.cat([self.pick_head(emb), self._push_values(emb, used)], dim=-1)
+        return q, actor, self._push_values(emb.detach(), actor)
+
+    def forward(self, tokens, counts):
+        return self.forward_full(tokens, counts)[0]

@@ -26,7 +26,7 @@ def test_instances_features_and_candidates_come_from_the_observation_only():
     state = build_state(observation(), [16])
     assert [(i.cls, i.rows.size) for i in state['instances']] == [(0, 220), (1, 220)]
     tokens = state['tokens']
-    assert tokens.shape == (1 + 3 + 2, 18)
+    assert tokens.shape == (1 + 3 + 2, 20)
     assert tokens[4, 12] == 0 and tokens[5, 12] == 1  # blue: misplaced, green: inside its region
     assert tokens[4, 15] > 0.5 and tokens[5, 15] == 0  # the blue object has grey (hidden) cells behind it
     pick = state['actions'][0, 0]
@@ -70,3 +70,65 @@ def test_trainer_learns_which_object_to_grasp_and_acts_on_it():
     assert pick[good[1], good[2]] > pick[bad[1], bad[2]] + 2  # about 0 against about -5
     assert np.unravel_index(np.argmax(pick), pick.shape) == (good[1], good[2])
     assert trainer.last_td.shape == (8,)
+
+
+def belief_for(obs, ghost_rows=(60, 70), ghost_cols=(30, 40), age=0.5):
+    """The 7-channel compact belief of the observation (rgb, height, age, ...) plus a remembered BLUE object that is hidden now."""
+    belief = np.zeros((7, H, W), np.uint8)
+    belief[:3] = np.transpose(obs['colormap'], (2, 0, 1))
+    belief[3] = np.clip(obs['depthmap'] / 0.4, 0, 1) * 255
+    belief[4] = 0  # everything visible now: age 0
+    r0, r1 = (4 + ghost_rows[0], 4 + ghost_rows[1])
+    c0, c1 = (4 + ghost_cols[0], 4 + ghost_cols[1])
+    belief[:3, r0:r1, c0:c1] = CLASS_RGB[0][:, None, None]  # remembered blue ...
+    belief[3, r0:r1, c0:c1] = 50  # ... with a height
+    belief[4, r0:r1, c0:c1] = int(age * 255)  # ... last seen a while ago
+    return belief
+
+
+def test_ghost_tokens_are_remembered_stale_objects_only_and_have_no_actions():
+    obs = observation()
+    plain = build_state(obs, [16])
+    assert plain['ghosts'] == [] and plain['ghost_tokens'].shape == (0, 20)  # no belief: no ghosts
+    obs['belief'] = belief_for(obs)
+    state = build_state(obs, [16])
+    assert len(state['ghosts']) == 1 and state['ghosts'][0].cls == 0  # the remembered blue object; visible objects (age 0) are not ghosts
+    token = state['ghost_tokens'][0]
+    assert token[18] == 1.0 and abs(token[19] - 0.5) < 0.01 and token[0] == 1.0 and token[12] == 0.0  # flag, age, class, outside its region
+    assert state['tokens'][0, 2] > 0  # the global token knows there is a hidden object
+    assert state['valid'].shape == (2, 3)  # actions only for the 2 visible instances
+
+
+def test_the_network_attends_to_ghosts_but_only_outputs_instance_values():
+    torch.manual_seed(0)
+    obs = observation()
+    plain = build_state(obs, [16])
+    obs2 = dict(obs, belief=belief_for(obs))
+    ghosty = build_state(obs2, [16])
+    net = ObjectQNet(n_slots=3)
+    for p in net.parameters():
+        p.requires_grad_(True)
+    tokens, counts, _ = collate([plain, ghosty], 'cpu')
+    assert tokens.shape[1] == 4 + 2 + 8 and counts.tolist() == [[2, 0], [2, 1]]
+    q = net(tokens, counts)
+    assert q.shape == (2, 2, 3)  # instance values only
+    assert not torch.allclose(q[0], q[1], atol=1e-5)  # the ghost changes what the instances are worth
+    zero_age = dict(obs, belief=belief_for(obs, age=0.0))
+    assert build_state(zero_age, [16])['ghosts'] == []  # age 0 means seen now
+
+
+def test_continuous_trainer_learns_the_best_push_length_per_object():
+    torch.manual_seed(0)
+    np.random.seed(0)
+    cfg = Config(placement='heuristic', batch_size=64, learning_rate=3e-3, prioritized=False, reward_mode="sparse", hierarchy=True)
+    trainer = ObjectTrainer(cfg)
+    obs = observation()
+    state = trainer.info(obs)
+    row, col = state['actions'][0, 1][1:]
+    lengths = np.random.RandomState(0).uniform(0, 1, 64)
+    batch = [Transition(obs, (0, row, col, float(x)), obs, -5.0 * abs(float(x) - 0.8), 'push', True) for x in lengths]
+    for _ in range(400):
+        trainer.train_step(batch)
+    q = trainer.forward_batch([obs])
+    assert q.lengths is not None and q.prim.shape == (1, 3)
+    assert abs(q.lengths[0, 0, row, col] - 0.8) < 0.15  # the actor climbs the critic to the best length

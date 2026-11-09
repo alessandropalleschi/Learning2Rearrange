@@ -22,7 +22,7 @@ class ScriptedExpert:
     """Chooses (primitive, pix) for a `RearrangeEnv` from its full observation and the simulator state."""
 
     MAX_FAILURES = 2  # grasp attempts on one object that did not hold before the expert tries something else
-    NEAR_REGION = 0.06  # m: a misplaced object this close to its region is pushed into it (a push moves ~8 cm)
+    NEAR_MARGIN = 0.02  # m: a misplaced object closer to its region than the longest push minus this is pushed into it
     MAX_EXPOSE_PUSHES = 2  # pushes of one object to uncover hidden ones
 
     def __init__(self, env):
@@ -96,7 +96,8 @@ class ScriptedExpert:
         low, high = scene.regions[scene.class_name(object_id)]
         y = scene.poses()[object_id][0][1]
         distance = max(low - y, y - high, 0.0)
-        return 0.0 < distance <= self.NEAR_REGION and self.pushes.get(object_id, 0) < 1
+        reach = max(self.env.cfg.push_lengths) - self.NEAR_MARGIN  # 0.06 m for the single 8 cm push of the paper
+        return 0.0 < distance <= reach and self.pushes.get(object_id, 0) < 1
 
     def _expose_hidden(self, cfg):
         """Push the front-most visible object (at most MAX_EXPOSE_PUSHES times each) towards the middle of its target region."""
@@ -121,7 +122,7 @@ class ScriptedExpert:
         low, high = scene.regions[scene.class_name(object_id)]
         y = scene.poses()[object_id][0][1]
         direction = 1 if (low + high) / 2 > y else 0  # 1: towards +y, 0: towards -y
-        index = direction * len(cfg.push_lengths) + len(cfg.push_lengths) // 2
+        index = direction * len(cfg.push_lengths) + self._length_index(y, low, high, direction, cfg.push_lengths)
         angle, length = decode_push(index, cfg.push_lengths)
         height = obs['classmap'].shape[0]
         for gap in (3, 4, 2, 5):
@@ -130,6 +131,14 @@ class ScriptedExpert:
             if check_push(env.ws, obs['depthmap'], col, row, angle, length) and self._blade_touches(obs, row, col, direction, length):
                 return 'push', (index, row, col)
         return None
+
+    @staticmethod
+    def _length_index(y, low, high, direction, lengths):
+        """Index of the push length that moves an object at `y` closest to the middle of its region [low, high] (a push moves it by
+        about its length). With a single length that is index 0 (the paper's 8 cm)."""
+        sign = 1.0 if direction == 1 else -1.0
+        landing = [abs((y + sign * length) - (low + high) / 2) for length in lengths]
+        return int(np.argmin(landing))
 
     @staticmethod
     def _blade_touches(obs, row, col, direction, length):
