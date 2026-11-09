@@ -1,7 +1,11 @@
 """The three motion primitives: push with the blade, pick with the suction cup, place the held object."""
+import logging
+
 import numpy as np
 
 from l2r.sim.arm import HOME_JOINTS
+
+log = logging.getLogger(__name__)
 
 FRONT_MARGIN = 0.1  # m in front of the cabinet where every primitive starts / ends (place: 0.15)
 PUSH_HEIGHT = 0.05  # m above the cabinet floor: low, to avoid toppling objects (paper: 5 cm)
@@ -49,7 +53,7 @@ class Manipulator:
         if success:
             success = arm.move_straight(start, end, quat, 0.1 * speed, detect_force=True)  # the push itself
         else:
-            print('Error, Going back home')
+            log.debug('push: approach stopped, going back home')
             pos = np.asarray(arm.tool_pose()[0])
             self._retreat_from(pos, self._front(pos[1], pos[2]), quat, speed)
             return success
@@ -105,28 +109,16 @@ class Manipulator:
         quat = PLACE_QUATERNION
         front = self._front(position[1], position[2], margin=0.15)
 
-        success = arm.move_to_pose((front, quat), speed)
-        if not success:
-            success = arm.move_to_pose((front, quat), speed)  # retry once
-            success = success or not self.params.strict_place  # legacy: carry on even if the retry failed
-        if success:
-            success = arm.move_straight(front, position, quat, speed, detect_force=True)
-        else:
-            suction.release()
-            pos = np.asarray(arm.tool_pose()[0])
-            success = arm.move_straight(pos, front, quat, speed)
-            arm.go_home()
-        suction.release()
-        if success:
-            pos = np.asarray(arm.tool_pose()[0])
-            success = arm.move_straight(pos, front, quat, speed)
-            arm.go_home()
-        else:
-            success = False
-            pos = np.asarray(arm.tool_pose()[0])
-            success = arm.move_straight(pos, front, quat, speed)
-            arm.go_home()
+        reached = arm.move_to_pose((front, quat), speed)
+        if not reached:
+            reached = arm.move_to_pose((front, quat), speed)  # retry once
+            reached = reached or not self.params.strict_place  # legacy: carry on even if the retry failed
+        placed = reached and arm.move_straight(front, position, quat, speed, detect_force=True)
+        suction.release()  # drop the object where the tool is (also after a failed approach)
+        pos = np.asarray(arm.tool_pose()[0])
+        retreated = arm.move_straight(pos, front, quat, speed)
         arm.go_home()
-        success &= self.scene.is_valid()
+        arm.go_home()
+        valid = self.scene.is_valid()
         suction.release()
-        return success
+        return bool(placed and retreated and valid)

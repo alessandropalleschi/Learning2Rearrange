@@ -83,9 +83,11 @@ def main(argv=None):
     parser.add_argument('--randomize', action='store_true', default=False, help='domain randomisation')
     parser.add_argument('--push_lengths', type=float, nargs='+', default=[0.08])
     parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic')
+    parser.add_argument('--footprint_placement', action='store_true', help='clear placement targets of the back wall')
     args = parser.parse_args(argv)
 
-    cfg = Config(placement=args.placement, max_actions=10 ** 6, push_lengths=tuple(args.push_lengths))
+    cfg = Config(placement=args.placement, max_actions=10 ** 6, push_lengths=tuple(args.push_lengths),
+                 footprint_placement=args.footprint_placement)
     params = SimParams.from_args(args)
     ws = Workspace.from_params(params)
     np.random.seed(args.seed)

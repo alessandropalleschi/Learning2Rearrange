@@ -91,9 +91,7 @@ class Scene:
     # ------------------------------------------------------------------ construction
     def randomize_regions(self):
         """Assign the three target intervals to the classes in a random order."""
-        choices = [target_region_choices(self.ws.bounds)]
-        candidates = choices[np.random.randint(0, len(choices))]  # one set of choices: the draw keeps the RNG stream
-        shuffled = random.sample(candidates, 3)
+        shuffled = random.sample(target_region_choices(self.ws.bounds), 3)
         self.regions = {key: [shuffled[k][0], shuffled[k][1]] for k, key in enumerate(TARGET_ORDER)}
 
     def build_cabinet(self):

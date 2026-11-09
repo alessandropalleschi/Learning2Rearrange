@@ -68,3 +68,23 @@ Open (design limits, not bugs):
   and the network learns a low value for it.
 * `classmap` (exact object pixels) is used by the environment to validate a grasp while the policy mask uses `height > 8 mm`.
 * Weight decay is also applied to normalisation parameters and biases.
+
+## Rebuild of the simulator (package `l2r.sim`)
+`env.py` (one 1400-line class with module-level globals) was replaced by cohesive components: `Workspace`, `Scene`, `Camera`,
+`vision`, `Arm`, `SuctionCup`, `Manipulator`, wired by `Environment` (the PyBullet client is injected, so every component is
+testable with a fake backend). The port was verified against a **deterministic scripted scenario on the real simulator**
+(`tests/sim_scenario.py`): the rebuilt code reproduced the recorded results of the old code in both the legacy and the modern mode
+before any behaviour was changed.
+
+Bugs found while porting (fixed afterwards; `tests/golden/*.json` were re-recorded as the new baseline):
+| bug | fix |
+|---|---|
+| `ForceMonitor` sampled every reading twice (`update()` then `force()`), halving the median window | `update()` computes the force once and exposes `last_force` |
+| `place()` returned the success of the *retreat*, so a place aborted by the force limit still counted as executed | success = reached and placed and retreated and valid |
+| a dead `np.random.randint(0, 1)` draw (one candidate set) | removed |
+| the target of the heuristic placement ignores the object's extent: it is placed up to 8 columns (4 cm) from the back wall while the object body reaches past the tool **[measured]**: the force limit stops the approach at the back wall | open: erode the free-space map by the object's half-depth |
+| per-event `print`s from the simulator | `logging` (`DEBUG` for force stops, `WARNING` for a failed reset) |
+
+Removed: the unused `ontargetmap`, the raw `color` / `depth` / `mask` images in the observation, class entries other than
+blue / green / yellow (`DIMENSIONS` held colour tuples for the unused colours), the unused `fixed` object category, and the
+module-level mutable `BOUNDS` / `PIXEL_SIZE` / `PLACE_TARGETS`.

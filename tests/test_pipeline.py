@@ -2,6 +2,7 @@
 import argparse
 from functools import partial
 
+import numpy as np
 import pytest
 
 import l2r.envs.rearrange as rearrange
@@ -66,3 +67,16 @@ def test_train_then_evaluate(fake_simulator, tmp_path, monkeypatch, belief, plac
     finally:
         venv.close()
     assert result['episodes'] == 5
+
+
+def test_footprint_placement_keeps_the_object_clear_of_the_back_wall(fake_simulator):
+    from l2r.envs.rearrange import clear_of_back_wall, object_depth_px
+    idmap = np.zeros((20, 30), np.float32)
+    idmap[5:9, 10:18] = 7  # an object 8 columns deep
+    assert object_depth_px({'idmap': idmap}, 7) == 8 and object_depth_px({'idmap': idmap}, 3) == 0
+    free = clear_of_back_wall(np.ones((20, 30), np.float32), 8, margin=4)
+    assert (free[:, :12] == 0).all() and (free[:, 12:] == 1).all()
+    env = rearrange.RearrangeEnv(Config(placement='learned', footprint_placement=True))
+    env.reset()
+    mid = env.step({'primitive': 'grasp', 'pix': (0, 50, 60)})[0]  # the fake object is 20 columns deep
+    assert (mid['freespace'][:, :24] == 0).all() and mid['freespace'][:, 24:].any()

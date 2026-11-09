@@ -1,5 +1,7 @@
 """The UR5e arm: loading, joint-space motion, inverse kinematics, straight Cartesian moves and contact detection
 from the joint force/torque sensors."""
+import logging
+
 import numpy as np
 
 from l2r.sim.arm_control import joint_limits, rate_limited_command
@@ -7,6 +9,8 @@ from l2r.sim.force_sensing import ForceMonitor
 
 HOME_JOINTS = np.array([0, 1, -1, 0.5, 0.5, 0.5, 1]) * np.pi  # [base slide, 6 revolute joints]
 FT_SENSOR_JOINTS = (11, 10)  # extra joints with a force/torque sensor (besides the tool link)
+log = logging.getLogger(__name__)
+
 JOINT_TOLERANCE = 1e-3  # rad
 IK_TOLERANCE = 0.002  # m
 
@@ -174,7 +178,7 @@ class Arm:
             if detect_force and target[0] < self._force_check_limit_x() and self._force_exceeded(max_force):
                 self.force_events.append((float(target[0]), float(self._last_force)))
                 self.move_to_pose((waypoints[max(n - 1, 0)], rot), speed)  # back off one waypoint
-                print(f'Force is {self._last_force:.0f} N at x={target[0]:.3f}, exceeds the limit {max_force}')
+                log.debug('force %.0f N at x=%.3f exceeds the limit %s', self._last_force, target[0], max_force)
                 self.force_stops += 1
                 return False
             if detect_contact and self.in_contact():
@@ -192,7 +196,7 @@ class Arm:
     def _force_exceeded(self, max_force):
         if self.params.filtered_force:
             exceeded = self.force_monitor.update(max_force)
-            self._last_force = float(np.max(self.force_monitor.force()))
+            self._last_force = self.force_monitor.last_force
         else:  # legacy: raw sum of |Fx|+|Fy|+|Fz| of the three monitored joints against the limit
             forces = [np.sum(np.abs(np.array(self.p.getJointState(self.body, j)[2][:3])))
                       for j in self.force_monitor.joints]

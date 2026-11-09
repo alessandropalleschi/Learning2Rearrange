@@ -1,5 +1,7 @@
 """PyBullet simulation of the confined-space rearrangement task: UR5e + pushing blade / suction cup, a cabinet,
 YCB objects and an RGB-D camera. Components live in the sibling modules; this class wires them to one client."""
+import logging
+
 import pybullet
 import pybullet_data
 from pybullet_utils import bullet_client
@@ -12,6 +14,8 @@ from l2r.sim.scene import Scene
 from l2r.sim.suction import SuctionCup
 from l2r.sim.vision import build_observation, relabel_colormap
 from l2r.sim.workspace import Workspace
+
+log = logging.getLogger(__name__)
 
 TIME_STEP = 1 / 480  # s; resetSimulation restores PyBullet's default of 1/240, so it is set on every reset
 WAIT_STATIC_MAX_STEPS = 480  # simulation-step budget of wait_static (1 s of simulated time)
@@ -66,7 +70,7 @@ class Environment:
         p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)  # faster scene loading
         self.arm.load()
         if not self.arm.go_home():
-            print('Simulation is wrong!')
+            log.warning('the arm did not reach its home configuration after the reset')
         p.loadURDF('plane.urdf', basePosition=(0, 0, 0), useFixedBase=True)
         self.scene.build_cabinet()
         self.scene.spawn_objects(self.num_obj)

@@ -25,6 +25,7 @@ class Config:
     #     'learned' = pick and place are two decisions, the place pixel comes from a third Q-head
     #     (conditioned on the class of the held object, restricted to free cells) ---
     placement: str = 'heuristic'
+    footprint_placement: bool = False  # keep the placement target clear of the back wall by the object's depth
     place_heuristic_mix: float = 0.5   # when exploring a placement: share of heuristic proposals (rest: uniform)
 
     # --- Belief state (ablation): 'none' | 'spatial' | 'recurrent' ---

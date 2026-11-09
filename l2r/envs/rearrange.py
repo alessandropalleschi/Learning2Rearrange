@@ -52,6 +52,20 @@ def select_placement(y_up, y_down, freespace, no_obj=False):
     return ind[1][k], ind[0][k]
 
 
+def object_depth_px(obs, object_id):
+    """Extent (pixels along x, the cabinet depth) of an object in the id map; 0 if it is not visible."""
+    cols = np.nonzero(obs['idmap'] == object_id)[1]
+    return int(cols.max() - cols.min() + 1) if cols.size else 0
+
+
+def clear_of_back_wall(freespace, depth_px, margin=4):
+    """Free-space map without the cells closer to the back wall than the object is deep (+ a margin): an object
+    placed there would hit the wall, because the tool holds it at its front face."""
+    out = freespace.copy()
+    out[:, :depth_px + margin] = 0
+    return out
+
+
 def get_place_pose(sim, obj_class, freespace):
     """Heuristic placement pixel (col, row) for an object of class label `obj_class`."""
     y_down, y_up, _ = sim.target_pixels()  # in TARGET_ORDER
@@ -121,10 +135,13 @@ class RearrangeEnv:
         elif prim == 'grasp' and obs['classmap'][px_y, px_x] != 0:
             attempted = True
             held_class, held_id = obs['classmap'][px_y, px_x], obs['idmap'][px_y, px_x]
+            held_depth = object_depth_px(obs, held_id) if cfg.footprint_placement else 0
             executed = sim.pick(position)
             if executed and learned and sim.is_valid():  # hold the object, ask for the placement
                 self.holding = True
                 mid = self._full_obs(action)
+                if cfg.footprint_placement:
+                    mid['freespace'] = clear_of_back_wall(mid['freespace'], held_depth)
                 mid['held_class'], mid['held_id'] = int(held_class), float(held_id)
                 mid['heuristic_place'] = get_place_pose(sim, held_class, mid['freespace'])
                 self.obs = mid
@@ -133,6 +150,8 @@ class RearrangeEnv:
                 return self.compact(mid), 0.0, False, False, info
             if executed and not learned:
                 freespace = sim.observe()['freespace']
+                if cfg.footprint_placement:
+                    freespace = clear_of_back_wall(freespace, held_depth)
                 place_pix = get_place_pose(sim, held_class, freespace)
                 executed = sim.place(self.ws.px_to_xy(*place_pix))
 

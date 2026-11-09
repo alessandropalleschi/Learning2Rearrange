@@ -113,3 +113,13 @@ def test_suction_hold_verification():
     assert cup.holds()
     backend.object_position = (0.5, 0.0, -0.1)  # the object sagged: grasp lost
     assert not cup.holds()
+
+
+def test_force_monitor_reports_the_filtered_force():
+    monitor = ForceMonitor(ScriptedSensors([[0, 0, 0, 0, 0, 0]] * 5 + [[0, 0, 200, 0, 0, 0]] * 6), 0, [0], window=3, debounce=2)
+    monitor.tare(samples=3)
+    monitor.update(500.0)
+    assert monitor.last_force == 0.0
+    for _ in range(4):
+        monitor.update(500.0)
+    assert monitor.last_force == 200.0  # median of the last three samples

@@ -22,6 +22,7 @@ class ForceMonitor:
         self.bias = np.zeros((len(self.joints), 6))
         self._history = deque(maxlen=window)
         self._over = 0
+        self.last_force = 0.0  # largest filtered force (N) of the last update
 
     def read(self):
         """Raw reaction wrenches of all monitored joints, shape (n_joints, 6)."""
@@ -47,6 +48,9 @@ class ForceMonitor:
         return np.median(np.array(self._history), axis=0)
 
     def update(self, limit):
-        """Feed one new sample; True once the filtered force of any joint exceeded `limit` (N) `debounce` times."""
-        self._over = self._over + 1 if np.any(self.force() > limit) else 0
+        """Feed one new sample; True once the filtered force of any joint exceeded `limit` (N) `debounce` times in
+        a row. The filtered force of this sample is left in `last_force`."""
+        force = self.force()
+        self.last_force = float(np.max(force))
+        self._over = self._over + 1 if np.any(force > limit) else 0
         return self._over >= self.debounce
