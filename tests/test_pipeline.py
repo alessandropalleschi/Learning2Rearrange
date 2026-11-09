@@ -127,3 +127,17 @@ def test_relabelling_still_triggers_with_shaped_rewards_and_the_value_range_foll
     assert Config(reward_mode='sparse').q_range == pytest.approx((-100.0, 0.0))
     assert Config(reward_mode='progress', reward_shaping_scale=2.0).q_range == pytest.approx((-100.0, 2.0))
     assert Config(reward_mode='noop', noop_penalty=1.0).q_range[0] == pytest.approx(-110.0)
+
+
+def test_curriculum_advances_after_a_greedy_validation(fake_simulator, tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    parser = argparse.ArgumentParser()
+    add_arguments(parser)
+    args = parser.parse_args(['--num_envs', '2', '--max_obj', '3', '--max_actions', '5', '--max_iterations', '60',
+                              '--start_method', 'fork', '--batch_size', '4', '--logging_directory', 'v',
+                              '--curriculum_eval', '3', '--curriculum_eval_every', '4'])
+    run(args)
+    out = capsys.readouterr().out
+    assert 'Validation 1 (1 objects, 3 greedy episodes): success 1.00' in out and 'Curriculum: now using 2 objects' in out
+    rows = (tmp_path / 'logs/v/validation.csv').read_text().strip().splitlines()
+    assert rows[0].split(',')[2:] == ['1', '1.000']

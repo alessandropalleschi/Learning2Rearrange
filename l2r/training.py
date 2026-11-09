@@ -20,9 +20,10 @@ from l2r.utils import seed_everything
 class Curriculum:
     """Number of objects per episode: start small, add one when the recent success rate is high (paper, IV-D)."""
 
-    def __init__(self, cfg, frozen=False):
-        """frozen: never advance (testing)."""
-        self.cfg, self.frozen = cfg, frozen
+    def __init__(self, cfg, frozen=False, validated=False):
+        """frozen: never advance (testing). validated: do not advance on the training window; the training loop calls
+        `advance` after a greedy validation instead."""
+        self.cfg, self.frozen, self.validated = cfg, frozen, validated
         self.num_obj = cfg.start_objects
         self.successes = deque(maxlen=cfg.success_window)
         self.returns = deque(maxlen=cfg.success_window)
@@ -35,13 +36,18 @@ class Curriculum:
         self.success_rate = sum(self.successes) / len(self.successes)
         self.mean_return = sum(self.returns) / len(self.returns)
         full = len(self.successes) == self.successes.maxlen
-        if (not self.frozen and full and self.success_rate > self.cfg.success_threshold
-                and self.num_obj < self.cfg.max_objects):
-            self.num_obj += 1
-            self.successes.clear()
-            self.returns.clear()
-            return True
+        if (not self.frozen and not self.validated and full and self.success_rate > self.cfg.success_threshold):
+            return self.advance()
         return False
+
+    def advance(self):
+        """One more object (up to the maximum); returns True if the number changed."""
+        if self.frozen or self.num_obj >= self.cfg.max_objects:
+            return False
+        self.num_obj += 1
+        self.successes.clear()
+        self.returns.clear()
+        return True
 
 
 class TrainingLoop:
@@ -61,7 +67,8 @@ class TrainingLoop:
         self.trainer = Trainer(self.cfg, is_testing=args.is_testing, load_snapshot=args.load_snapshot,
                                snapshot=args.snapshot, snapshot_target=args.snapshot_target)
         self.logger = Logger(self.log_dir)
-        self.curriculum = Curriculum(self.cfg, frozen=args.is_testing)
+        self.curriculum = Curriculum(self.cfg, frozen=args.is_testing, validated=bool(args.curriculum_eval))
+        self.validations = 0
         self.stage_iteration = 0  # steps since the last curriculum change (epsilon is annealed per stage)
         self.episode = 0
 
@@ -96,7 +103,9 @@ class TrainingLoop:
                 for i in finished:
                     self._finish_episode(infos[i], eps)
                 obs = list(next_obs)
-                if finished:
+                if self._validation_due(finished):
+                    obs = self._validate_and_reset(n)
+                elif finished:
                     for i, o in zip(finished, self.venv.reset(self.curriculum.num_obj, indices=finished)):
                         obs[i] = attach_initial(self.trainer, o)
                 if args.max_iterations and self.trainer.iteration >= args.max_iterations:
@@ -153,6 +162,33 @@ class TrainingLoop:
             self.logger.scalar('curriculum/num_obj', c.num_obj, self.trainer.iteration)
             print('Curriculum: now using %d objects' % c.num_obj)
 
+    def _validation_due(self, finished):
+        a = self.args
+        return bool(a.curriculum_eval and not a.is_testing and finished and self.episode % a.curriculum_eval_every < len(finished)
+                    and self.episode >= a.curriculum_eval_every)
+
+    def _validate_and_reset(self, n):
+        """Greedy (epsilon = 0) validation on fresh random configurations at the current object count; advance the
+        curriculum if the success rate reaches the threshold. All simulators are reset afterwards."""
+        from l2r.evaluation import evaluate
+        c, a = self.curriculum, self.args
+        seed = 10 ** 6 + self.validations * 1000
+        result = evaluate(self.trainer, self.venv, self.cfg, self.ws, c.num_obj, a.curriculum_eval, seed)
+        self.validations += 1
+        rate = result['success_rate']
+        passed = rate >= self.cfg.success_threshold
+        print('Validation %d (%d objects, %d greedy episodes): success %.2f, mean actions %s -> %s'
+              % (self.validations, c.num_obj, result['episodes'], rate, result['mean_actions_success'],
+                 'advance' if passed else 'stay'))
+        self.logger.scalar('curriculum/val_success', rate, self.trainer.iteration)
+        with open(os.path.join(self.log_dir, 'validation.csv'), 'a') as f:
+            f.write('%d,%d,%d,%.3f\n' % (self.validations, self.trainer.iteration, c.num_obj, rate))
+        if passed and c.advance():
+            self.stage_iteration = 0
+            self.logger.scalar('curriculum/num_obj', c.num_obj, self.trainer.iteration)
+            print('Curriculum: now using %d objects' % c.num_obj)
+        return [attach_initial(self.trainer, o) for o in self.venv.reset(c.num_obj)]
+
     def _save_visualization(self, q, obs, choice, info):
         primitive, pix, _ = choice
         maps = {'push': q.push, 'grasp': q.pick, 'place': q.place}[primitive][0]
@@ -184,6 +220,10 @@ def add_arguments(parser):
     Config.add_arguments(parser)
     SimParams.add_arguments(parser)
     parser.add_argument('--randomize', action='store_true', default=False, help='domain randomisation')
+    parser.add_argument('--curriculum_eval', type=int, default=0,
+                        help='advance the curriculum after a greedy validation on this many fresh random configurations '
+                             '(success >= threshold) instead of the epsilon-greedy training window (0 = training window)')
+    parser.add_argument('--curriculum_eval_every', type=int, default=25, help='training episodes between validations')
     parser.add_argument('--max_episodes', type=int, default=0, help='stop after this many finished episodes (0 = no cap)')
     parser.add_argument('--max_iterations', type=int, default=0, help='stop after this many environment steps (0 = run forever)')
     parser.add_argument('--start_method', default='spawn', help='multiprocessing start method of the workers')
