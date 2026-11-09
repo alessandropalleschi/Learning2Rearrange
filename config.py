@@ -21,6 +21,12 @@ class Config:
     lr_decay: float = 1.0           # exponential LR decay per optimisation step (1.0 = fixed LR as in the paper)
     amp: bool = True                # mixed precision (only used on CUDA)
 
+    # --- Placement (ablation): 'heuristic' = hand-written rule inside the pick-and-place action (paper);
+    #     'learned' = pick and place are two decisions, the place pixel comes from a third Q-head
+    #     (conditioned on the class of the held object, restricted to free cells) ---
+    placement: str = 'heuristic'
+    place_heuristic_mix: float = 0.5   # when exploring a placement: share of heuristic proposals (rest: uniform)
+
     # --- Belief state (ablation): 'none' | 'spatial' | 'recurrent' ---
     # spatial:   persistent per-episode memory map (last seen colour/height/id, age, last action) as extra input channels
     # recurrent: ConvGRU latent state at the network bottleneck, updated from the encoded observation and last action

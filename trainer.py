@@ -1,4 +1,6 @@
 """Trainer: batched double-DQN on the shared Q-network (see models.py)."""
+from collections import namedtuple
+
 import numpy as np
 import cv2
 import torch
@@ -8,7 +10,9 @@ from scipy import ndimage
 from config import Config
 from memory import ReplayMemory, PrioritizedReplay
 from belief import BELIEF_CHANNELS
-from models import QNet, DEVICE, ACTION_CHANNELS
+from models import QNet, DEVICE, ACTION_CHANNELS, HELD_CLASSES
+
+QMaps = namedtuple('QMaps', ['push', 'pick', 'place', 'hidden'])
 
 
 class Trainer(object):
@@ -35,6 +39,7 @@ class Trainer(object):
         self.future_reward_discount = self.cfg.gamma
 
         self.belief = self.cfg.belief
+        self.learned_placement = self.cfg.placement == 'learned'
         in_channels = 4 + (BELIEF_CHANNELS if self.belief == 'spatial' else 0)
         self.model = QNet(in_channels, self.belief, self.cfg.recurrent_hidden).to(DEVICE)
         self.model_target = QNet(in_channels, self.belief, self.cfg.recurrent_hidden).to(DEVICE)
@@ -96,7 +101,8 @@ class Trainer(object):
             return (min((row + o + top) // 8, self._cells() - 1), min((col + o + left) // 8, self._cells() - 1))
 
         rot, row, col = action['pix']
-        a[rot if action['primitive'] == 'push' else 2][cell(row, col)] = 1.0
+        channel = {'push': rot, 'grasp': 2, 'place': 3}[action['primitive']]
+        a[channel][cell(row, col)] = 1.0
         if action.get('place_pix') is not None:
             a[3][cell(action['place_pix'][1], action['place_pix'][0])] = 1.0
         return a
@@ -128,6 +134,21 @@ class Trainer(object):
         contactable[np.nonzero(object_pixels)] = 0
         return contactable.astype(bool)
 
+    def _held(self, obs_list):
+        """(B,3) one-hot class of the held object (learned placement only; zeros when nothing is held)."""
+        if not self.learned_placement:
+            return None
+        held = np.zeros((len(obs_list), len(HELD_CLASSES)), np.float32)
+        for i, o in enumerate(obs_list):
+            if o.get('held_class'):
+                held[i, HELD_CLASSES[int(o['held_class'])]] = 1.0
+        return torch.from_numpy(held).to(DEVICE)
+
+    @staticmethod
+    def place_valid(obs):
+        """Free cells (cropped coordinates) where the held object may be placed."""
+        return np.asarray(obs['freespace']) > 0
+
     def preprocessQmaps(self, map, depth, primitve):
         """Set infeasible pixels to -1000 (numpy Q-maps in cropped coordinates)."""
         mask = self.valid_mask(depth, primitve)
@@ -136,22 +157,23 @@ class Trainer(object):
     # ------------------------------------------------------------------ acting
     def forward(self, color_input, depth_input, is_volatile=True, specific_rotation=-1, network='policy'):
         """Q-maps of one memoryless observation: push (2,h,w), pick (1,h,w) as numpy (belief 'none' only)."""
-        push, pick, _ = self.forward_batch([{'colormap': color_input, 'depthmap': depth_input}], network)
-        return push[0], pick[0]
+        q = self.forward_batch([{'colormap': color_input, 'depthmap': depth_input}], network)
+        return q.push[0], q.pick[0]
 
     def forward_batch(self, obs_list, network='policy'):
         """Q-maps of several observations at once: push (B,2,h,w), pick (B,1,h,w) as numpy, cropped to the action
-        coordinates, and (recurrent belief) the new hidden states (B,hid,cells,cells) float16, else None.
+        coordinates, the place Q-map (B,1,h,w) (used while an object is held) and (recurrent belief) the new
+        hidden states (B,hid,cells,cells) float16, else None -- returned as QMaps(push, pick, place, hidden).
         With the recurrent belief every observation must carry 'h_prev' and 'prev_action'."""
         net = self.model if network == 'policy' else self.model_target
         x = torch.stack([self.prepare(o) for o in obs_list]).to(DEVICE)
         hp, ap = self._recurrent_inputs(obs_list)
         with torch.no_grad(), torch.autocast(device_type=DEVICE.type, enabled=self.amp):
-            push, pick, h_new = net(x, hp, ap)
+            push, pick, place, h_new = net(x, hp, ap, self._held(obs_list))
         h, w = obs_list[0]['depthmap'].shape[:2]
-        push = self._crop(push.float(), h, w).cpu().numpy()
-        pick = self._crop(pick.float(), h, w).cpu().numpy()
-        return push, pick, (None if h_new is None else h_new.float().cpu().numpy().astype(np.float16))
+        crop = lambda q: self._crop(q.float(), h, w).cpu().numpy()
+        return QMaps(crop(push), crop(pick), crop(place),
+                     None if h_new is None else h_new.float().cpu().numpy().astype(np.float16))
 
     # ------------------------------------------------------------------ learning
     def _soft_update(self, alpha):
@@ -165,18 +187,23 @@ class Trainer(object):
         for p1, p2 in zip(q_network_1.parameters(), q_network_2.parameters()):
             p1.data.copy_(alpha * p2.data + (1 - alpha) * p1.data)
 
-    def _masks_padded(self, depths, h, w):
-        """Feasibility masks of a batch of depth maps in padded coordinates: (B,1,P,P) push, pick."""
+    def _masks_padded(self, obs_list, h, w):
+        """Feasible-action masks of a batch of observations in padded coordinates, each (B,1,P,P) bool:
+        push, pick and place (place only while an object is held, push/pick only otherwise)."""
         top, left = self._pads(h, w)
         o = self.offset_px
-        B = len(depths)
-        out = {}
-        for prim in ('push', 'grasp'):
-            m = np.zeros((B, 1, self.max_dim, self.max_dim), bool)
-            for i, d in enumerate(depths):
-                m[i, 0, top + o:top + h - o, left + o:left + w] = self.valid_mask(d, prim)
-            out[prim] = torch.from_numpy(m).to(DEVICE)
-        return out['push'], out['grasp']
+        B = len(obs_list)
+        masks = {k: np.zeros((B, 1, self.max_dim, self.max_dim), bool) for k in ('push', 'grasp', 'place')}
+        for i, obs in enumerate(obs_list):
+            region = (i, 0, slice(top + o, top + h - o), slice(left + o, left + w))
+            if obs.get('held_class'):
+                masks['place'][region] = self.place_valid(obs)
+            else:
+                masks['push'][region] = self.valid_mask(obs['depthmap'], 'push')
+                masks['grasp'][region] = self.valid_mask(obs['depthmap'], 'grasp')
+        return [torch.from_numpy(masks[k]).to(DEVICE) for k in ('push', 'grasp', 'place')]
+
+    PRIMITIVES = {'grasp': QNet.PICK, 'push': QNet.PUSH, 'place': QNet.PLACE}
 
     def train_step(self, transitions, weights=None):
         """One double-DQN gradient step on a list of Transition. Gradients flow only through the taken pixel."""
@@ -190,38 +217,43 @@ class Trainer(object):
         xn = torch.stack([self.prepare(s) for s in nexts]).to(DEVICE)
         hp, ap = self._recurrent_inputs(states)
         hpn, apn = self._recurrent_inputs(nexts)
+        held, held_n = self._held(states), self._held(nexts)
         reward = torch.tensor([float(t.reward) for t in transitions], device=DEVICE)
         done = torch.tensor([float(t.done) for t in transitions], device=DEVICE)
-        is_push = torch.tensor([t.primitive_action == 'push' for t in transitions], device=DEVICE)
+        prim = torch.tensor([self.PRIMITIVES[t.primitive_action] for t in transitions], device=DEVICE)
         rot = torch.tensor([int(t.action[0]) for t in transitions], device=DEVICE)
         rows = torch.tensor([int(t.action[1]) + self.offset_px + top for t in transitions], device=DEVICE)
         cols = torch.tensor([int(t.action[2]) + self.offset_px + left for t in transitions], device=DEVICE)
+        # pick -> place is one pick-and-place action: no discount between its two decisions
+        gamma = torch.tensor([1.0 if (n.get('held_class') and not s.get('held_class')) else self.future_reward_discount
+                              for s, n in zip(states, nexts)], device=DEVICE)
 
-        # ---- TD target (double DQN: policy net selects, target net evaluates, over both primitives)
+        # ---- TD target (double DQN: policy net selects, target net evaluates, over all feasible actions)
         with torch.no_grad(), torch.autocast(device_type=DEVICE.type, enabled=self.amp):
-            push_mask, pick_mask = self._masks_padded([s['depthmap'] for s in nexts], h, w)
+            push_mask, pick_mask, place_mask = self._masks_padded(nexts, h, w)
             neg = -1e9
-            pp, pk, _ = self.model(xn, hpn, apn)
-            pp, pk = pp.float(), pk.float()
-            pol = torch.cat([torch.where(push_mask.expand_as(pp), pp, torch.full_like(pp, neg)).flatten(1),
-                             torch.where(pick_mask, pk, torch.full_like(pk, neg)).flatten(1)], dim=1)
+
+            def flat(q):
+                pp, pk, pl = (t.float() for t in q[:3])
+                return torch.cat([torch.where(push_mask.expand_as(pp), pp, torch.full_like(pp, neg)).flatten(1),
+                                  torch.where(pick_mask, pk, torch.full_like(pk, neg)).flatten(1),
+                                  torch.where(place_mask, pl, torch.full_like(pl, neg)).flatten(1)], dim=1)
+
+            pol = flat(self.model(xn, hpn, apn, held_n))
             if self.double:
-                tp, tk, _ = self.model_target(xn, hpn, apn)
-                tp, tk = tp.float(), tk.float()
-                tgt = torch.cat([torch.where(push_mask.expand_as(tp), tp, torch.full_like(tp, neg)).flatten(1),
-                                 torch.where(pick_mask, tk, torch.full_like(tk, neg)).flatten(1)], dim=1)
+                tgt = flat(self.model_target(xn, hpn, apn, held_n))
                 future = tgt.gather(1, pol.argmax(1, keepdim=True)).squeeze(1)
             else:
                 future = pol.max(1).values
             # no valid action at all (e.g. empty scene): no bootstrap
             future = torch.where(future < neg / 2, torch.zeros_like(future), future)
-            label = reward + self.future_reward_discount * future * (1.0 - done)
+            label = reward + gamma * future * (1.0 - done)
             if self.cfg.clip_q:
                 label = label.clamp(self.q_min, self.q_max)
 
         # ---- prediction at the taken pixel only
         with torch.autocast(device_type=DEVICE.type, enabled=self.amp):
-            out = self.model.forward_selected(x, is_push, rot, hp, ap)
+            out = self.model.forward_selected(x, prim, rot, hp, ap, held)
         pred = out.float()[torch.arange(B, device=DEVICE), 0, rows, cols]
         per_sample = F.smooth_l1_loss(pred, label, reduction='none')  # Huber loss (paper Eq. 3)
         if weights is not None:  # importance-sampling correction of prioritized replay

@@ -48,7 +48,7 @@ class FakeSim:
         color = np.random.randint(0, 254, (H, W, 3), dtype=np.uint8)
         color[:, :30] = 105  # occluded (grey) cells
         return {'colormap': color, 'depthmap': d, 'classmap': cls,
-                'idmap': cls.astype(np.float32), 'freespace': np.ones((H, W), np.float32)}
+                'idmap': cls.astype(np.float32), 'freespace': np.ones((H - 8, W - 4), np.float32)}
 
     add_target_pixels = staticmethod(lambda: ([10, 50, 90], [30, 70, 110], None))
     px_to_xy = staticmethod(lambda x, y: [x * 0.005, y * 0.005])
@@ -100,15 +100,46 @@ def test_models():
         x_ = torch.randn(2, ch, 160, 160)
         h = net.initial_hidden(2, 160) if belief == 'recurrent' else None
         a = torch.zeros(2, 4, 20, 20) if belief == 'recurrent' else None
-        push, pick, h_new = net(x_, h, a)
-        assert push.shape == (2, 2, 160, 160) and pick.shape == (2, 1, 160, 160)
-        out = net.forward_selected(x_, torch.tensor([True, False]), torch.tensor([1, 0]), h, a)
-        assert torch.allclose(out[0], push[0, 1:2], atol=1e-4) and torch.allclose(out[1], pick[1], atol=1e-4)
+        held = torch.tensor([[0., 0., 0.], [0., 1., 0.]])
+        push, pick, place, h_new = net(x_, h, a, held)
+        assert push.shape == (2, 2, 160, 160) and pick.shape == place.shape == (2, 1, 160, 160)
+        prim = torch.tensor([QNet.PUSH, QNet.PLACE])
+        out = net.forward_selected(x_, prim, torch.tensor([1, 0]), h, a, held)
+        assert torch.allclose(out[0], push[0, 1:2], atol=1e-4) and torch.allclose(out[1], place[1], atol=1e-4)
+        out = net.forward_selected(x_, torch.tensor([QNet.PICK, QNet.PICK]), torch.tensor([0, 0]), h, a, held)
+        assert torch.allclose(out, pick, atol=1e-4)
         if belief == 'recurrent':
             assert h_new.shape == h.shape
 
 
-def test_train_and_evaluate(belief='none'):
+def test_learned_placement_env():
+    rearrange_env.Environment = FakeSim
+    cfg = Config(placement='learned', max_actions=5)
+    env = rearrange_env.RearrangeEnv(cfg)
+    obs = env.reset()
+    assert 'held_class' not in obs
+    mid, r, term, trunc, info = env.step({'primitive': 'grasp', 'pix': (0, 50, 60)})
+    assert r == 0.0 and not term and info['phase'] == 'place' and env.actions == 0
+    assert mid['held_class'] == 1 and mid['freespace'].shape == (H - 8, W - 4) and len(mid['heuristic_place']) == 2
+    try:
+        env.step({'primitive': 'push', 'pix': (0, 50, 60)})
+        raise AssertionError('push while holding must fail')
+    except ValueError:
+        pass
+    nxt, r, term, trunc, info = env.step({'primitive': 'place', 'pix': (0, 30, 40)})
+    assert r == cfg.reward_step and not env.holding and env.actions == 1 and 'held_class' not in nxt
+    # the policy: only free cells, held object -> place
+    import policy
+    trainer = Trainer(cfg)
+    q = trainer.forward_batch([mid])
+    prim, pix, _ = policy.select_action(trainer, mid, q.push[0], q.pick[0], q.place[0], 0.0, cfg)
+    assert prim == 'place' and trainer.place_valid(mid)[pix[1], pix[2]]
+    prim, pix, _ = policy.select_action(trainer, mid, q.push[0], q.pick[0], q.place[0], 1.0, cfg)
+    assert prim == 'place' and trainer.place_valid(mid)[pix[1], pix[2]]
+    print('ok: learned placement environment')
+
+
+def test_train_and_evaluate(belief='none', placement='heuristic'):
     rearrange_env.Environment = FakeSim  # forked workers inherit the patch
     out = tempfile.mkdtemp()
     os.chdir(out)
@@ -116,7 +147,7 @@ def test_train_and_evaluate(belief='none'):
         num_obj=1, max_obj=3, max_actions=5, random_seed=0, logging_directory='t', num_envs=2, gui=False,
         is_testing=False, load_snapshot=False, snapshot=None, snapshot_target=None, save_every=8,
         save_visualizations=False, updates_per_step=1, physics='legacy', randomize=False, max_iterations=24,
-        start_method='fork', belief=belief)
+        start_method='fork', belief=belief, placement=placement)
     import config
     orig = config.Config
     # tiny batch so the buffer is large enough to optimise within a few steps
@@ -127,7 +158,7 @@ def test_train_and_evaluate(belief='none'):
     models = os.listdir('logs/t/models')
     assert any(m.startswith('snapshot') for m in models), models
 
-    cfg = Config(max_actions=5, belief=belief)
+    cfg = Config(max_actions=5, belief=belief, placement=placement)
     trainer = Trainer(cfg, is_testing=True)
     venv = VecEnv([partial(rearrange_env.make_env, cfg, False, 1, None, r) for r in range(2)], start_method='fork')
     try:
@@ -135,7 +166,7 @@ def test_train_and_evaluate(belief='none'):
     finally:
         venv.close()
     assert res['episodes'] == 5, res
-    print('ok (belief=%s):' % belief, res)
+    print('ok (belief=%s, placement=%s):' % (belief, placement), res)
 
 
 if __name__ == '__main__':
@@ -144,3 +175,6 @@ if __name__ == '__main__':
     test_models()
     for mode in ('none', 'spatial', 'recurrent'):
         test_train_and_evaluate(mode)
+    test_learned_placement_env()
+    for mode in ('none', 'spatial', 'recurrent'):
+        test_train_and_evaluate(mode, 'learned')

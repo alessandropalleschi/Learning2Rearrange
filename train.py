@@ -22,7 +22,7 @@ from vec_env import VecEnv
 
 def main(args):
     cfg = Config(start_objects=args.num_obj, max_objects=args.max_obj, max_actions=args.max_actions,
-                 belief=args.belief)
+                 belief=args.belief, placement=args.placement)
     params = SimParams.preset(args.physics, randomize=args.randomize)
     sim_module.configure_cabinet(params)  # the main process needs the same workspace bounds as the workers
     seed_everything(args.random_seed)
@@ -44,8 +44,9 @@ def main(args):
         while True:
             # epsilon-greedy: 0.8 annealed to 0.01 for each curriculum stage (paper)
             eps = 0.0 if args.is_testing else max(cfg.eps_start * cfg.eps_decay ** stage_iteration, cfg.eps_end)
-            push_q, pick_q, h_new = trainer.forward_batch(obs)
-            choices = [select_action(trainer, obs[i], push_q[i], pick_q[i], eps, cfg) for i in range(n)]
+            q = trainer.forward_batch(obs)
+            h_new = q.hidden
+            choices = [select_action(trainer, obs[i], q.push[i], q.pick[i], q.place[i], eps, cfg) for i in range(n)]
             next_obs, rewards, terminated, truncated, infos = venv.step(
                 [{'primitive': c[0], 'pix': c[1]} for c in choices])
 
@@ -55,7 +56,8 @@ def main(args):
                 carry(trainer, next_obs[i], None if h_new is None else h_new[i], primitive, pix, infos[i]['place_pix'])
                 if args.save_visualizations and i == 0:
                     place = infos[i]['place_pix']
-                    vis = trainer.get_prediction_vis((push_q if primitive == 'push' else pick_q)[i], obs[i]['colormap'],
+                    vis = trainer.get_prediction_vis({'push': q.push, 'grasp': q.pick, 'place': q.place}[primitive][i],
+                                                     obs[i]['colormap'],
                                                      pix, pix if place is None else [place[1], place[0]])
                     cv2.imwrite(os.path.join(log_dir, 'visualization.%s.png' % primitive), vis)
                 if args.is_testing:
@@ -136,6 +138,8 @@ if __name__ == '__main__':
     parser.add_argument('--updates_per_step', type=int, default=1, help='gradient steps per environment step')
     parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy',
                         help="'paper': 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated)")
+    parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic',
+                        help="'learned': a Q-head chooses where to place the held object (default: rule from the paper)")
     parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
                         help='belief state ablation: memoryless / spatial memory map / ConvGRU latent')
     parser.add_argument('--randomize', action='store_true', default=False, help='domain randomisation')

@@ -63,6 +63,7 @@ class GlobalContext(nn.Module):
         return x + self.mlp(g)[:, :, None, None]
 
 
+HELD_CLASSES = {1: 0, 3: 1, 5: 2}  # class label (blue, green, yellow) -> one-hot index of the held object
 ACTION_CHANNELS = 4  # last action encoding at bottleneck resolution: push 0deg, push 180deg, pick, place
 
 
@@ -99,6 +100,11 @@ class QNet(nn.Module):
         self.rb4, self.rb5, self.rb6 = ResidualBlock(512, 256), ResidualBlock(256, 128), ResidualBlock(128, 64)
         self.push_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
         self.pick_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
+        # learned placement: Q-map over the free cells, conditioned on the class of the object in the gripper
+        self.place_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
+        self.held_embed = nn.Linear(len(HELD_CLASSES), 512)
+        nn.init.zeros_(self.held_embed.weight)
+        nn.init.zeros_(self.held_embed.bias)
 
     @staticmethod
     def _up(x):
@@ -135,28 +141,37 @@ class QNet(nn.Module):
         h = self.gru(self.rec_in(torch.cat([b0, a_prev], 1)), h_prev)
         return h, self.rec_out(h)
 
-    def forward(self, x, h_prev=None, a_prev=None):
-        """All Q-maps. x: (B,C,H,W) -> push (B,2,H,W) [0deg,180deg], pick (B,1,H,W) in input orientation,
-        and the new hidden state (None unless belief == 'recurrent')."""
-        b0, b1 = self.encode(x), self.encode(self.flip(x))
+    def _with_held(self, b, held):
+        """Add the embedding of the held class (zeros = nothing held) to the bottleneck features."""
+        return b if held is None else b + self.held_embed(held)[:, :, None, None]
+
+    def forward(self, x, h_prev=None, a_prev=None, held=None):
+        """All Q-maps. x: (B,C,H,W) -> push (B,2,H,W) [0deg,180deg], pick (B,1,H,W), place (B,1,H,W) in input
+        orientation, and the new hidden state (None unless belief == 'recurrent').
+        held: (B,3) one-hot class of the object in the gripper (zeros when nothing is held)."""
+        b0, b1 = self._with_held(self.encode(x), held), self._with_held(self.encode(self.flip(x)), held)
         h = None
         if self.belief == 'recurrent':
             h, ctx = self.update_belief(b0, h_prev, a_prev)
             b0, b1 = b0 + ctx, b1 + self.flip(ctx)
         f0, f1 = self.decode(b0), self.decode(b1)
         push = torch.cat([self.push_head(f0), self.flip(self.push_head(f1))], dim=1)
-        return push, self.pick_head(f0), h
+        return push, self.pick_head(f0), self.place_head(f0), h
 
-    def forward_selected(self, x, is_push, rotation, h_prev=None, a_prev=None):
+    PICK, PUSH, PLACE = 0, 1, 2
+
+    def forward_selected(self, x, primitive, rotation, h_prev=None, a_prev=None, held=None):
         """Training path: the Q-map of the taken primitive only, in input orientation: (B,1,H,W).
-        is_push (B,) bool, rotation (B,) long in {0,1} (only used where is_push)."""
-        flip = is_push & (rotation == 1)
-        fl = flip[:, None, None, None]
-        b = self.encode(torch.where(fl, self.flip(x), x))
+        primitive (B,) long in {PICK, PUSH, PLACE}, rotation (B,) long in {0,1} (only used for pushes)."""
+        is_push = primitive == self.PUSH
+        fl = (is_push & (rotation == 1))[:, None, None, None]
+        b = self._with_held(self.encode(torch.where(fl, self.flip(x), x)), held)
         if self.belief == 'recurrent':
-            b0 = self.encode(x)  # belief is always computed in the un-rotated frame
+            b0 = self._with_held(self.encode(x), held)  # belief is always computed in the un-rotated frame
             _, ctx = self.update_belief(b0, h_prev, a_prev)
             b = b + torch.where(fl, self.flip(ctx), ctx)
         f = self.decode(b)
-        out = torch.where(is_push[:, None, None, None], self.push_head(f), self.pick_head(f))
+        pr = primitive[:, None, None, None]
+        out = torch.where(pr == self.PUSH, self.push_head(f),
+                          torch.where(pr == self.PLACE, self.place_head(f), self.pick_head(f)))
         return torch.where(fl, self.flip(out), out)

@@ -69,6 +69,7 @@ class RearrangeEnv:
         self.tracker = BeliefTracker(self.cfg.belief_age_horizon)
         self.actions = 0
         self.episode_return = 0.0
+        self.holding = False
 
     # ------------------------------------------------------------------ gym API
     def reset(self, num_obj=None, seed=None):
@@ -83,28 +84,51 @@ class RearrangeEnv:
                 break
         self.actions = 0
         self.episode_return = 0.0
+        self.holding = False
         self.tracker.reset()
         self.obs = self._full_obs(None)
         self._relabel_state = self._relabel_status()
         return self.compact(self.obs)
 
     def step(self, action):
-        """action: {'primitive': 'push'|'grasp', 'pix': (rotation_index, row, col)} in Q-map coordinates."""
+        """action: {'primitive': 'push'|'grasp'|'place', 'pix': (rotation_index, row, col)} in Q-map coordinates.
+
+        placement='heuristic': 'grasp' picks and places in one action (placement by rule).
+        placement='learned':   'grasp' only picks. While the object is held, the observation (taken after the
+                               pick, with the held class and the free cells) is returned with reward 0 and the
+                               next action must be 'place'; the reward is given for the complete pick-and-place.
+        """
         obs, sim, cfg = self.obs, self.sim, self.cfg
         prim, pix = action['primitive'], action['pix']
         px_x, px_y = pix[2], pix[1]
         rotation = np.deg2rad(pix[0] * (360.0 / 2) - 90)  # two push directions: -90 / +90 degrees
         position = sim.px_to_xy(px_x, px_y)
         executed, place_pix = False, None
+        learned = cfg.placement == 'learned'
+        if self.holding and prim != 'place':
+            raise ValueError("an object is held: the next action must be 'place'")
 
         if prim == 'push' and check_push(obs['depthmap'], px_x, px_y, rotation, cfg.push_length):
             executed = sim.push(position, rotation)
+        elif prim == 'place':
+            place_pix = (px_x, px_y)  # (col, row) of the free cell
+            executed = sim.place(position)
+            self.holding = False
         elif prim == 'grasp' and obs['classmap'][px_y, px_x] != 0:
+            held_class, held_id = obs['classmap'][px_y, px_x], obs['idmap'][px_y, px_x]
             executed = sim.pick(position)
-            if executed:
-                obj_class = obs['classmap'][px_y, px_x]
+            if executed and learned and sim.check_sim():  # hold the object, ask for the placement
+                self.holding = True
+                mid = self._full_obs(action)
+                mid['held_class'], mid['held_id'] = int(held_class), float(held_id)
+                mid['heuristic_place'] = get_place_pose(sim, held_class, mid['freespace'])
+                self.obs = mid
+                info = {'executed': True, 'sorted': False, 'invalid': False, 'place_pix': None, 'relabel': False,
+                        'episode_return': self.episode_return, 'actions': self.actions, 'phase': 'place'}
+                return self.compact(mid), 0.0, False, False, info
+            if executed and not learned:
                 freespace = sim.get_observation()['freespace']
-                place_pix = get_place_pose(sim, obj_class, freespace)
+                place_pix = get_place_pose(sim, held_class, freespace)
                 executed = sim.place(sim.px_to_xy(*place_pix))
 
         sim.wait_static()
@@ -131,7 +155,7 @@ class RearrangeEnv:
                    and (not prev_relabel[0] or prev_relabel[1] != self._relabel_state[1]))
         info = {'executed': bool(executed), 'sorted': bool(sorted_ and valid), 'invalid': not valid,
                 'place_pix': place_pix, 'relabel': bool(relabel), 'episode_return': self.episode_return,
-                'actions': self.actions}
+                'actions': self.actions, 'phase': 'act'}
         self.obs = next_obs
         return self.compact(next_obs), reward, terminated, truncated, info
 
@@ -149,6 +173,10 @@ class RearrangeEnv:
         """What leaves the environment and is stored in the replay buffer (a few 100 KB instead of ~4 MB:
         the raw camera images and the auxiliary maps are dropped)."""
         out = {'colormap': obs['colormap'], 'depthmap': obs['depthmap']}
+        if obs.get('held_class'):  # object in the gripper (learned placement): what the place head needs
+            out['held_class'] = obs['held_class']
+            out['freespace'] = (obs['freespace'] > 0).astype(np.uint8)
+            out['heuristic_place'] = obs['heuristic_place']
         if 'belief_full' in obs:
             out['belief'] = compact_belief(obs['belief_full'], self.cfg.belief_age_horizon)
         return out
@@ -165,6 +193,8 @@ class RearrangeEnv:
         pair = []
         for o in (obs, next_obs):
             new = self.compact(o)
+            if o.get('held_class') and o.get('held_id') in list(sim.id_list):
+                new['held_class'] = int(sim.new_class[list(sim.id_list).index(o['held_id'])])
             new['colormap'] = sim.relabel_image([o['colormap']], [o['idmap']], sim.id_list, sim.new_class)[0]
             if 'belief_full' in o:
                 b = dict(o['belief_full'])

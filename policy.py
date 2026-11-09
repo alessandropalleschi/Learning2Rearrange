@@ -4,12 +4,34 @@ import numpy as np
 from rearrange_env import check_push
 
 
-def select_action(trainer, obs, push_q, pick_q, explore_prob, cfg):
-    """Epsilon-greedy over the two primitives.
+def select_placement(trainer, obs, place_q, explore_prob, cfg):
+    """Placement decision while an object is held (learned placement): Q-map restricted to the free cells.
+    Exploration proposes the heuristic placement with probability cfg.place_heuristic_mix, else a random free cell."""
+    valid = trainer.place_valid(obs)
+    q = np.where(valid, place_q[0], -1000.0)
+    pix = None
+    if explore_prob > 0 and np.random.uniform() < explore_prob and valid.any():
+        col, row = obs.get('heuristic_place', (-1, -1))
+        if np.random.uniform() < cfg.place_heuristic_mix and 0 <= row < valid.shape[0] and 0 <= col < valid.shape[1] \
+                and valid[row, col]:
+            pix = (0, int(row), int(col))
+        else:
+            r, c = np.unravel_index(np.random.choice(np.flatnonzero(valid.ravel())), valid.shape)
+            pix = (0, int(r), int(c))
+    if pix is None:
+        r, c = np.unravel_index(np.argmax(q), q.shape)
+        pix = (0, int(r), int(c))
+    return 'place', pix, float(q[pix[1], pix[2]])
 
-    push_q (2,h,w) and pick_q (1,h,w) are the raw Q-maps of the network for `obs`.
+
+def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg):
+    """Epsilon-greedy over the primitives (push / pick; place while an object is held).
+
+    push_q (2,h,w), pick_q (1,h,w) and place_q (1,h,w) are the raw Q-maps of the network for `obs`.
     Returns (primitive, (rotation, row, col), predicted_value). explore_prob=0 gives the greedy policy.
     """
+    if obs.get('held_class'):
+        return select_placement(trainer, obs, place_q, explore_prob, cfg)
     push_q = trainer.preprocessQmaps(push_q, obs['depthmap'], 'push')
     pick_q = trainer.preprocessQmaps(pick_q, obs['depthmap'], 'grasp')
     primitive = 'push' if np.max(push_q) > np.max(pick_q) else 'grasp'

@@ -32,10 +32,11 @@ def evaluate(trainer, venv, cfg, num_obj, episodes, base_seed):
         obs[i] = reset(i)
     while any(a is not None for a in active):
         idx = [i for i in range(n) if active[i] is not None]
-        push_q, pick_q, h_new = trainer.forward_batch([obs[i] for i in idx])
+        q = trainer.forward_batch([obs[i] for i in idx])
+        h_new = q.hidden
         actions = [None] * n
         for k, i in enumerate(idx):
-            p, pix, _ = select_action(trainer, obs[i], push_q[k], pick_q[k], 0.0, cfg)
+            p, pix, _ = select_action(trainer, obs[i], q.push[k], q.pick[k], q.place[k], 0.0, cfg)
             actions[i] = {'primitive': p, 'pix': pix}
         # inactive envs get a dummy action; their result is ignored
         for i in range(n):
@@ -60,7 +61,7 @@ def evaluate(trainer, venv, cfg, num_obj, episodes, base_seed):
 
 
 def main(args):
-    cfg = Config(max_actions=args.max_actions, belief=args.belief)
+    cfg = Config(max_actions=args.max_actions, belief=args.belief, placement=args.placement)
     params = SimParams.preset(args.physics)
     sim_module.configure_cabinet(params)
     seed_everything(args.seed)
@@ -87,6 +88,8 @@ if __name__ == '__main__':
     parser.add_argument('--episodes', type=int, default=20, help='episodes per object count')
     parser.add_argument('--num_envs', type=int, default=1)
     parser.add_argument('--max_actions', type=int, default=40)
+    parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic',
+                        help='must match the snapshot')
     parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
                         help='must match the belief the snapshot was trained with')
     parser.add_argument('--physics', choices=['legacy', 'paper'], default='legacy')

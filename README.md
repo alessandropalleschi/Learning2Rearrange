@@ -23,9 +23,19 @@ Useful flags:
 | `--num_obj` / `--max_obj` | curriculum start / end (paper: 1 -> 8 objects) |
 | `--max_actions` | actions per episode |
 | `--physics paper` | 40x60x27 cm cabinet, weaker suction, lighter objects (unvalidated; default `legacy`) |
+| `--placement heuristic\|learned` | where the held object is placed: rule from the paper, or a learned place head (see below) |
 | `--belief none\|spatial\|recurrent` | belief-state ablation (see below); `evaluate.py` needs the same value |
 | `--randomize` | domain randomisation: object friction/mass, camera pose, sensor noise |
 | `--gui` | PyBullet GUI for the first simulator |
+
+### Placement ablation
+* `heuristic` - pick-and-place is one action; the place pixel is chosen by a hand-written rule (paper).
+* `learned` - pick and place are two decisions. After a successful pick the environment returns the observation with the
+  object lifted (`held_class`, free cells, the heuristic proposal) and reward 0; the policy then selects the place pixel
+  with a third Q-head conditioned on the held class and restricted to free cells. The reward (-1 / 0 / -10) is given after the
+  place, the pick is bootstrapped from the best place Q-value without discount. While exploring, the placement is the
+  heuristic one with probability `place_heuristic_mix` (0.5), otherwise a random free cell. A failed pick ends the action
+  with the usual step penalty. Hindsight relabelling also recolours the held class.
 
 ### Belief-state ablation
 * `none` - memoryless policy on the current observation (the paper).

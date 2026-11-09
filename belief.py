@@ -43,7 +43,10 @@ class BeliefTracker:
         push = np.zeros((h, w), np.float32)
         pick = np.zeros((h, w), np.float32)
         if last_action is not None:
-            self._mark(push if last_action['primitive'] == 'push' else pick, last_action['pix'], 1.0)
+            if last_action['primitive'] == 'place':
+                self._mark(pick, last_action['pix'], 0.5)
+            else:
+                self._mark(push if last_action['primitive'] == 'push' else pick, last_action['pix'], 1.0)
             if last_action.get('place_pix') is not None:
                 px, py = last_action['place_pix']  # (col, row) in action coordinates
                 self._mark(pick, (0, py, px), 0.5)
