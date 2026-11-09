@@ -43,6 +43,8 @@ def test_learned_placement_is_a_two_step_action(fake_simulator):
 
 @pytest.mark.parametrize('belief,placement,push_lengths,extra', [
     ('none', 'heuristic', (0.08,), ['--hierarchy']),
+    ('none', 'heuristic', (0.08,), ['--end_effector', 'gripper', '--jaw_yaws', '3']),
+    ('none', 'learned', (0.08,), ['--end_effector', 'gripper', '--jaw_yaws', '3', '--hierarchy']),
     ('none', 'heuristic', (0.08,), ['--backbone', 'hybrid']),
     ('none', 'heuristic', (0.08,), []),
     ('none', 'heuristic', (0.04, 0.08, 0.12), []),

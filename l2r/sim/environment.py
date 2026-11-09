@@ -10,6 +10,7 @@ from pybullet_utils import bullet_client
 from l2r.config import SimParams
 from l2r.perception import make_perception
 from l2r.sim.arm import Arm
+from l2r.sim.gripper import ParallelJawGripper
 from l2r.sim.camera import Camera
 from l2r.sim.primitives import Manipulator
 from l2r.sim.scene import Scene
@@ -51,10 +52,11 @@ class Environment:
         self.scene = Scene(self.p, self.params, self.ws)
         self.camera = Camera(self.p, self.params, self.ws, gui)
         self.arm = Arm(self.p, self.params, self.ws, time_step)
-        self.suction = SuctionCup(self.p, self.params, self.arm, self.scene)
-        self.arm.holding = lambda: self.suction.activated
-        self.arm.in_contact = self.suction.in_contact
-        self.manipulator = Manipulator(self.arm, self.suction, self.scene, self.ws, self.params)
+        tool_class = ParallelJawGripper if self.params.end_effector == 'gripper' else SuctionCup
+        self.suction = self.tool = tool_class(self.p, self.params, self.arm, self.scene)  # `suction`: the tool, whichever it is
+        self.arm.holding = lambda: self.tool.activated
+        self.arm.in_contact = self.tool.in_contact
+        self.manipulator = Manipulator(self.arm, self.tool, self.scene, self.ws, self.params)
 
     # ------------------------------------------------------------------ episode
     def reset(self):
@@ -73,12 +75,12 @@ class Environment:
         p.setGravity(0, 0, -9.81)
         p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)  # faster scene loading
         self.arm.load()
+        self.tool.attach()  # (the jaws are built around the loaded arm)
         if not self.arm.go_home():
             log.warning('the arm did not reach its home configuration after the reset')
         p.loadURDF('plane.urdf', basePosition=(0, 0, 0), useFixedBase=True)
         self.scene.build_cabinet()
         self.scene.spawn_objects(self.num_obj)
-        self.suction.reset()
         self.wait_static()
         p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
         return self.scene.is_valid()
@@ -113,7 +115,9 @@ class Environment:
         return obs
 
     def is_valid(self):
-        return self.scene.is_valid()
+        """Task validity; an object held between the jaws is not checked (it may hang tilted until it is released)."""
+        held = self.tool.held if getattr(self.tool, 'is_gripper', False) and self.tool.activated else None
+        return self.scene.is_valid(ignore=() if held is None else (held,))
 
     def fraction_sorted(self):
         return self.scene.fraction_sorted()
@@ -136,8 +140,9 @@ class Environment:
     def push(self, xy, angle=0.0, push_length=0.08, speed=0.01):
         return self.manipulator.push(xy, angle, speed, push_length)
 
-    def pick(self, xy, speed=0.01):
-        return self.manipulator.pick(xy, speed)
+    def pick(self, xy, speed=0.01, yaw=0.0):
+        """Pick at `xy`; `yaw` (rad) rotates the parallel jaws about the vertical (ignored by the suction cup)."""
+        return self.manipulator.pick(xy, speed, yaw)
 
     def place(self, xy, speed=0.01):
         return self.manipulator.place(xy, speed)

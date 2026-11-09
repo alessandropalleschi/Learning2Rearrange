@@ -13,6 +13,15 @@ class SuctionCup:
         self.p, self.params, self.arm, self.scene = p, params, arm, scene
         self.reset()
 
+    def attach(self):
+        """Interface of the tools: build whatever the tool needs after the arm was loaded (nothing for the cup)."""
+        self.reset()
+
+    def place_offsets(self, orientation):
+        """(offset_x, offset_y) of the grasped object relative to the tool (see `_place_offsets`); the orientation of the
+        tool does not change between the grasp and the place for the cup."""
+        return self.offset_x, self.offset_y
+
     def reset(self):
         self.activated = False
         self.constraint = None
@@ -69,6 +78,14 @@ class SuctionCup:
             self._attach_to_closest()
 
     # ------------------------------------------------------------------ internals
+    def _place_offsets(self, object_id):
+        """Where the grasped object sits relative to the tool, in the world frame: (object x - tool x, tool y - object y).
+        `Manipulator.place` moves the tool to (x - offset_x, y + offset_y) to put the object at (x, y). (They used to be
+        components of the object pose in the *tool* frame, whose x axis points down: the depth offset was the vertical one.)"""
+        tool_pos, _ = self.arm.tool_frame()
+        object_pos, _ = self.p.getBasePositionAndOrientation(object_id)
+        return object_pos[0] - tool_pos[0], tool_pos[1] - object_pos[1]
+
     def _object_in_tool_frame(self, object_id):
         """Pose of an object in the tool frame: (position, orientation)."""
         tool_pos, tool_orn = self.arm.tool_frame()
@@ -96,7 +113,6 @@ class SuctionCup:
         offset = contact_pos[0] - tool_pos[0] if tool_pos[0] > contact_pos[0] else 0  # object-side contact
         anchor = (obj_to_tool[0][0] + offset, obj_to_tool[0][1], obj_to_tool[0][2])
         self._create_constraint(object_id, link, anchor, obj_to_tool)
-        self.offset_y, self.offset_x = obj_to_tool[0][1], -anchor[0]
 
     def _attach_to_closest(self):
         """No contact point: constraint to the closest object that is within CLOSE_DISTANCE, laterally on the cup axis
@@ -118,7 +134,6 @@ class SuctionCup:
         object_id, link = best[-1][2], best[-1][4]
         obj_to_tool = self._object_in_tool_frame(object_id)
         self._create_constraint(object_id, link, obj_to_tool[0], obj_to_tool)
-        self.offset_x, self.offset_y = -obj_to_tool[0][0], obj_to_tool[0][1]
 
     def _create_constraint(self, object_id, link, anchor, obj_to_tool):
         self.constraint = self.p.createConstraint(
@@ -129,4 +144,5 @@ class SuctionCup:
                                 maxForce=self.params.suction_max_force)
         self.activated = True
         self.grip_body = object_id
+        self.offset_x, self.offset_y = self._place_offsets(object_id)
         self.grip_distance = float(np.linalg.norm(np.asarray(obj_to_tool[0])))

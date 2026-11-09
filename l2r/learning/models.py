@@ -131,10 +131,12 @@ class QNet(nn.Module):
     nr_rotations = 2  # push left / right (0 and 180 degrees)
 
     def __init__(self, in_channels=IN_CHANNELS, belief='none', hidden=64, n_push_lengths=1, learned_placement=True,
-                 backbone='conv', transformer_dim=192, transformer_layers=3, hierarchical=False):
+                 backbone='conv', transformer_dim=192, transformer_layers=3, hierarchical=False, n_pick=1):
         """learned_placement: build the place head (conditioned on the held class). Without it `forward` returns
-        `None` as place map: the head would cost about as much as the pick head for nothing."""
+        `None` as place map: the head would cost about as much as the pick head for nothing.
+        n_pick: pick Q-map channels (parallel-jaw gripper: one per jaw yaw; suction cup: 1)."""
         super().__init__()
+        self.n_pick = n_pick
         self.belief, self.hidden, self.n_push_lengths = belief, hidden, n_push_lengths
         self.learned_placement, self.backbone, self.hierarchical = learned_placement, backbone, hierarchical
         self.stem = nn.Sequential(nn.Conv2d(in_channels, 64, 3, padding=1, bias=False), norm(64), nn.ReLU(inplace=True))
@@ -158,7 +160,7 @@ class QNet(nn.Module):
             self.prim_head = nn.Sequential(nn.Linear(128, 64), nn.ReLU(inplace=True), nn.Linear(64, 3))
         else:
             self.push_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, n_push_lengths, 1))
-        self.pick_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
+        self.pick_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, n_pick, 1))
         if learned_placement:  # Q-map over the free cells, conditioned on the class of the object in the gripper
             self.place_head = nn.Sequential(ResidualBlock(64, 64), nn.Conv2d(64, 1, 1))
             self.held_embed = nn.Linear(len(HELD_CLASSES), 512)
@@ -220,7 +222,7 @@ class QNet(nn.Module):
         return torch.cat([f.mean(dim=(2, 3)), f.amax(dim=(2, 3))], dim=1)
 
     def forward_ext(self, x, h_prev=None, a_prev=None, held=None):
-        """All outputs. x: (B,C,H,W) -> `Outputs`: push (B,2L,H,W) [index = direction*L + length], pick (B,1,H,W), place
+        """All outputs. x: (B,C,H,W) -> `Outputs`: push (B,2L,H,W) [index = direction*L + length], pick (B,n_pick,H,W), place
         (B,1,H,W or None) in input orientation, the new hidden state (None unless belief == 'recurrent') and, for the
         hierarchical network, the push length proposed by the actor (B,2,H,W; 0..1 of the length range) and the value of
         every primitive (B,3: push, pick, place); push then is the critic evaluated at the proposed length.
@@ -262,7 +264,7 @@ class QNet(nn.Module):
 
     def forward_selected(self, x, primitive, rotation, h_prev=None, a_prev=None, held=None):
         """Training path: the Q-map of the taken primitive only, in input orientation: (B,1,H,W).
-        primitive (B,) long in {PICK, PUSH, PLACE}; rotation (B,) long = push index direction*L + length (pushes only)."""
+        primitive (B,) long in {PICK, PUSH, PLACE}; rotation (B,) long = push index direction*L + length (pushes), jaw yaw index (gripper picks)."""
         is_push = primitive == self.PUSH
         L = self.n_push_lengths
         fl = (is_push & (rotation // L == 1))[:, None, None, None]
@@ -275,7 +277,9 @@ class QNet(nn.Module):
         pr = primitive[:, None, None, None]
         push_maps = self.push_head(f)  # (B,L,H,W): pick the channel of the chosen length
         push_out = push_maps.gather(1, (rotation % L)[:, None, None, None].expand(-1, 1, *push_maps.shape[2:]))
-        other = torch.where(pr == self.PLACE, self.place_head(f), self.pick_head(f)) if self.learned_placement \
-            else self.pick_head(f)
+        pick_maps = self.pick_head(f)  # (B,n_pick,H,W): for the gripper the channel is the jaw yaw (the 'rotation' of a pick)
+        pick_out = pick_maps.gather(1, (rotation * (primitive == self.PICK)).clamp(max=self.n_pick - 1)[:, None, None, None]
+                                    .expand(-1, 1, *pick_maps.shape[2:]))
+        other = torch.where(pr == self.PLACE, self.place_head(f), pick_out) if self.learned_placement else pick_out
         out = torch.where(pr == self.PUSH, push_out, other)
         return torch.where(fl, self.flip(out), out)

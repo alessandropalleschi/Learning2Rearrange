@@ -57,11 +57,14 @@ class Scene:
         return low, high, colors
 
     # ------------------------------------------------------------------ task state
-    def is_valid(self):
-        """False if an object fell off the cabinet floor or toppled over (the invalid state of the paper)."""
+    def is_valid(self, ignore=()):
+        """False if an object fell off the cabinet floor or toppled over (the invalid state of the paper). `ignore`: object
+        ids left out of the check (an object held in the air by a gripper may hang tilted; it is checked once released)."""
         for _ in range(5):
             self.p.stepSimulation()
-        poses = self.poses()
+        poses = {k: v for k, v in self.poses().items() if k not in ignore}
+        if not poses:
+            return True
         z = np.array([pos[2] for pos, _ in poses.values()])
         roll = [abs(self.p.getEulerFromQuaternion(q)[0]) for _, q in poses.values()]
         pitch = [abs(self.p.getEulerFromQuaternion(q)[1]) for _, q in poses.values()]

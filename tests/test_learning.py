@@ -106,3 +106,13 @@ def test_hybrid_backbone_starts_as_the_conv_network_and_is_consistent():
     assert torch.allclose(out[0], push[0, 1:2], atol=1e-4) and torch.allclose(out[1], pick[1], atol=1e-4)
     (push.mean() + pick.mean()).backward()
     assert net.context.encoder.layers[0].self_attn.in_proj_weight.grad is not None  # gradients reach the attention
+
+
+def test_pick_head_has_one_channel_per_jaw_yaw_and_trains_the_taken_channel():
+    net = QNet(4, 'none', 8, 1, False, n_pick=3)
+    x = torch.randn(2, 4, 32, 32)
+    assert net(x)[1].shape == (2, 3, 32, 32)
+    prim = torch.tensor([QNet.PICK, QNet.PICK])
+    out = [net.forward_selected(x, prim, torch.tensor([r, 0])) for r in (0, 2)]
+    full = net(x)[1]
+    assert torch.allclose(out[0][0, 0], full[0, 0], atol=1e-5) and torch.allclose(out[1][0, 0], full[0, 2], atol=1e-5)

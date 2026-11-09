@@ -1,4 +1,5 @@
-"""The three motion primitives: push with the blade, pick with the suction cup, place the held object."""
+"""The three motion primitives: push with the blade, pick with the end effector (suction cup or parallel jaws), place the
+held object."""
 import logging
 
 import numpy as np
@@ -10,6 +11,7 @@ log = logging.getLogger(__name__)
 FRONT_MARGIN = 0.1  # m in front of the cabinet where every primitive starts / ends (place: 0.15)
 PUSH_HEIGHT = 0.05  # m above the cabinet floor: low, to avoid toppling objects (paper: 5 cm)
 PICK_HEIGHT = 0.04
+GRASP_HEIGHT = PICK_HEIGHT  # jaw centre above bounds[2][0] (the cabinet floor): pads at mid-height of the objects
 PUSH_QUATERNION = (np.sqrt(0.5), 0, -np.sqrt(0.5), 0)  # blade pointing into the cabinet
 PLACE_QUATERNION = (0.7088025212287903, 0.0003121407644357532, -0.7054068446159363, 0.0003104391216766089)
 WALL_MARGIN = 0.008  # m: a push stops this far from the side walls
@@ -18,8 +20,9 @@ WALL_MARGIN = 0.008  # m: a push stops this far from the side walls
 class Manipulator:
     """Push / pick / place built from the arm's Cartesian moves and the suction cup."""
 
-    def __init__(self, arm, suction, scene, workspace, params):
-        self.arm, self.suction, self.scene, self.ws, self.params = arm, suction, scene, workspace, params
+    def __init__(self, arm, tool, scene, workspace, params):
+        """tool: the end effector, a `SuctionCup` or a `ParallelJawGripper`."""
+        self.arm, self.suction, self.scene, self.ws, self.params = arm, tool, scene, workspace, params
 
     # ------------------------------------------------------------------ helpers
     def _front(self, y, z, margin=FRONT_MARGIN):
@@ -64,7 +67,14 @@ class Manipulator:
         return success & self.scene.is_valid()
 
     # ------------------------------------------------------------------ pick
-    def pick(self, xy, speed=0.01):
+    def pick(self, xy, speed=0.01, yaw=0.0):
+        """Pick the object at `xy` with the end effector: `_pick_with_cup`, or with the jaws (rotated by `yaw` about the
+        vertical) `_pick_with_jaws`."""
+        if getattr(self.suction, 'is_gripper', False):
+            return self._pick_with_jaws(xy, speed, yaw)
+        return self._pick_with_cup(xy, speed)
+
+    def _pick_with_cup(self, xy, speed=0.01):
         """Touch the object at `xy` from the front with the cup, switch the vacuum on and lift it out of the
         cabinet. True if an object is held (and, with params.suction_verify, still held after the lift)."""
         arm, suction, b = self.arm, self.suction, self.ws.bounds
@@ -101,12 +111,37 @@ class Manipulator:
         arm.go_home()
         return success & self.scene.is_valid()
 
+    def _pick_with_jaws(self, xy, speed=0.01, yaw=0.0):
+        """Approach from the front with open jaws rotated by `yaw` about the vertical (fingertips at `xy`, low above the
+        floor), close, pull the object out of the cabinet. True if an object is held after the lift (and still between the
+        pads with params.suction_verify)."""
+        arm, gripper, b = self.arm, self.suction, self.ws.bounds
+        arm.move_joints(HOME_JOINTS)
+        pos, home_quat = arm.tool_pose()
+        quat = self.arm.p.multiplyTransforms([0, 0, 0], self.arm.p.getQuaternionFromEuler([0, 0, yaw]), [0, 0, 0], home_quat)[1]
+        height = b[2][0] + GRASP_HEIGHT
+        front = self._front(xy[1], height)
+        target = (xy[0] + gripper.grip_depth, xy[1], height)  # tool origin: the middle of the pads goes to the object centre
+        success = arm.move_to_pose((front, quat), speed)
+        if success:
+            success = arm.move_straight(front, target, quat, 0.5 * speed, detect_force=True)
+        grasped = bool(success) and gripper.close()
+        pos = np.asarray(arm.tool_pose()[0])
+        arm.move_straight(pos, self._front(pos[1], pos[2], margin=FRONT_MARGIN + 0.2), quat, speed)
+        arm.go_home()
+        if grasped and self.params.suction_verify and not gripper.holds():
+            gripper.release()
+            grasped = False
+        arm.go_home()
+        return grasped & self.scene.is_valid(ignore=(gripper.held,) if grasped else ())
+
     # ------------------------------------------------------------------ place
     def place(self, xy, speed=0.01):
         """Carry the held object to `xy` (the cup position that puts the object there), release and retreat."""
         arm, suction, b = self.arm, self.suction, self.ws.bounds
-        position = np.array([xy[0] - suction.offset_x, xy[1] + suction.offset_y, b[2][0] + PUSH_HEIGHT])
         quat = PLACE_QUATERNION
+        offset_x, offset_y = suction.place_offsets(quat)
+        position = np.array([xy[0] - offset_x, xy[1] + offset_y, b[2][0] + PUSH_HEIGHT])
         front = self._front(position[1], position[2], margin=0.15)
 
         reached = arm.move_to_pose((front, quat), speed)

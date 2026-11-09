@@ -74,3 +74,24 @@ If sequence models are to be tried, the order I would take: (1) a scripted exper
 the others) and behaviour cloning with the existing dense network, as a demonstration baseline and as pre-training for Q-learning; (2) only if long-horizon
 coupling remains the bottleneck, a chunk predictor over *primitives* (K = 3-4) trained on the expert data, executed with replanning after every action and
 used as an auxiliary prediction task for the Q-network.
+
+## Parallel-jaw gripper (`--end_effector gripper`)
+
+A programmatic wide-stroke gripper (`l2r/sim/gripper.py`: palm + two prismatic pads, 20 cm opening, 80 N per finger) replaces the
+suction cup. Same interface towards the primitives; the grasp is held by **friction only** (no weld constraint).
+
+* **Action space.** Objects stand on the cabinet floor, so the grasp is a horizontal pinch approached from the front. The pick
+  Q-map gets one channel per jaw yaw (`--jaw_yaws`, default 5, evenly over +-60 degrees): the pick action is `(yaw index, row, col)`,
+  as a push is `(direction*length, row, col)`. A yaw also turns the approach direction and the UR5e reaches into the cabinet only
+  within about +-60 degrees, and the jaws are symmetric under 180 degrees, so this range covers both ways of aligning with an
+  object's axes (the oracle uses the better of the two).
+* **Geometry facts measured on the scene.** Objects are up to ~17 cm across, so an 8.5 cm (Robotiq-sized) opening cannot grasp
+  most of them (0/12 with it); the pads are centred on the object centre (not the fingertips) and at mid-height (pads on the rim
+  of a can tip it); the jaws are 23 cm wide, so grasps with |y| > ~17 cm hit the side walls and fail.
+* **Contact modelling.** PyBullet combines the coefficients of the two bodies multiplicatively: without torsional friction on the
+  object the pinch is a pivot and the held can swings about the pad axis; the held object gets `spinningFriction` while grasped. A
+  grasped object may hang tilted until placed, so `is_valid` skips it while it is held (it is checked after release).
+* **Oracle result** (true centre, jaw yaw aligned with the object, front-most object with |y| < 17 cm, 12 scenes): 12/12 hold the
+  object through the lift. This is an upper bound for the learned policy, not its performance.
+* **Placement** uses `place_offsets(orientation)` from the held object's pose in the tool frame, as for the cup.
+* Run: `python train.py --end_effector gripper --jaw_yaws 5` (combines with `--hierarchy`, `--backbone hybrid`, `--placement learned`).

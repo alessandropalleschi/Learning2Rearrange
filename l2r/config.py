@@ -1,6 +1,8 @@
 """Central configuration: every tunable of the paper's method in one place."""
 from dataclasses import dataclass
 
+import numpy as np
+
 
 @dataclass
 class Config:
@@ -41,6 +43,11 @@ class Config:
     push_length_range: tuple = (0.03, 0.15)  # m, continuous push length
     hier_prim_weight: float = 0.5            # weight of the level-1 (primitive value) loss
     hier_length_noise: float = 0.15          # exploration noise on the normalised length at epsilon = eps_start
+
+    # --- End effector: 'suction' (the cup) or 'gripper' (parallel jaws: the pick Q-map gets one channel per jaw yaw) ---
+    end_effector: str = 'suction'
+    jaw_yaws: int = 5  # jaw orientations about the vertical, evenly spread over +-60 degrees: a yaw also turns the approach
+    jaw_max_yaw_deg: float = 60.0  # direction, and the arm only reaches into the cabinet within about +-60 degrees
 
     # --- Placement (ablation): 'heuristic' = hand-written rule inside the pick-and-place action (paper);
     #     'learned' = pick and place are two decisions, the place pixel comes from a third Q-head
@@ -94,6 +101,7 @@ class Config:
                    placement=get('placement', 'heuristic'), eps_decay=get('eps_decay', defaults.eps_decay),
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
                    footprint_placement=get('footprint_placement', False), backbone=get('backbone', 'conv'),
+                   end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
                    hierarchy=get('hierarchy', False), reward_mode=get('reward_mode', 'sparse'),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
@@ -110,6 +118,8 @@ class Config:
                             help='belief state ablation: memoryless / spatial memory map / ConvGRU latent')
         parser.add_argument('--backbone', choices=['conv', 'hybrid'], default='conv',
                             help="'hybrid': transformer encoder on the 1/8-resolution bottleneck of the conv network")
+        parser.add_argument('--jaw_yaws', type=int, default=5,
+                            help='jaw orientations of the gripper over +-60 degrees (--end_effector gripper)')
         parser.add_argument('--hierarchy', action='store_true',
                             help='hierarchical agent: a primitive-value head selects the primitive, then a continuous push '
                                  'length (actor-critic) and the pixel are chosen')
@@ -122,6 +132,17 @@ class Config:
         parser.add_argument('--noop_penalty', type=float, default=1.0, help="penalty of 'noop' actions (reward mode 'noop')")
         parser.add_argument('--footprint_placement', action='store_true',
                             help="keep placement targets clear of the back wall by the held object's depth")
+
+    def jaw_angle(self, index):
+        """Yaw (rad) of the jaws for a pick action index (evenly spread over +-jaw_max_yaw_deg)."""
+        if self.jaw_yaws == 1:
+            return 0.0
+        return float(np.deg2rad(-self.jaw_max_yaw_deg + 2 * self.jaw_max_yaw_deg * index / (self.jaw_yaws - 1)))
+
+    @property
+    def pick_channels(self):
+        """Pick Q-map channels: one per jaw yaw for the gripper, one for the suction cup."""
+        return self.jaw_yaws if self.end_effector == 'gripper' else 1
 
     @property
     def q_range(self):
@@ -189,6 +210,9 @@ class SimParams:
     perception: str = 'gt'                  # 'gt' = PyBullet ground truth, 'network' = trained segmentation network
     perception_weights: str = 'assets/perception/segnet.pth'
 
+    # end effector: the suction cup (default) or a parallel-jaw gripper (`--end_effector gripper`)
+    end_effector: str = 'suction'
+
     # domain randomisation (applied at every reset)
     randomize: bool = False
     friction_range: tuple = (0.3, 0.8)      # lateral friction of the objects
@@ -225,6 +249,7 @@ class SimParams:
             params.force_sense_x = 0.27  # do not check forces while the tool is still outside the cabinet
         params.velocity_scale = getattr(args, 'velocity_scale', 1.0)
         params.perception = getattr(args, 'perception', 'gt')
+        params.end_effector = getattr(args, 'end_effector', 'suction')
         params.perception_weights = getattr(args, 'perception_weights', params.perception_weights)
         return params
 
@@ -241,6 +266,8 @@ class SimParams:
         parser.add_argument('--perception', choices=['gt', 'network'], default='gt',
                             help="object masks: PyBullet ground truth, or a trained segmentation network (train_perception.py)")
         parser.add_argument('--perception_weights', default='assets/perception/segnet.pth', help='weights of the network')
+        parser.add_argument('--end_effector', choices=['suction', 'gripper'], default='suction',
+                            help='suction cup, or a parallel-jaw gripper (the pick Q-map gets one channel per jaw yaw, --jaw_yaws)')
         parser.add_argument('--velocity_scale', type=float, default=1.0,
                             help="'modern' controller: fraction of the URDF joint velocity limits")
         parser.add_argument('--force_limit', type=float, default=300.0,

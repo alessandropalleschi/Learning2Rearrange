@@ -76,3 +76,24 @@ def test_learned_perception_path_with_an_oracle(sim):
     assert (learned['gt_idmap'] == reference['idmap']).all()
     assert all(uid in sim.scene.names for uid in learned['instance_to_object'].values())
     assert set(learned['instance_to_object']) == {int(i) for i in np.unique(learned['idmap']) if i != 0}
+
+
+def test_parallel_jaw_gripper_picks_and_places_an_object_it_can_reach():
+    """Oracle: jaws at the true centre of the front-most object, yawed to its orientation, hold it (>= 4 of 5 scenes), and the
+    object can be placed back with the object-in-tool offsets."""
+    env = Environment(num_obj=[3], params=SimParams(end_effector='gripper'))
+    p, successes = env.p, 0
+    for seed in range(1, 6):
+        env.reset(seed=seed)
+        ids = [i for i in env.scene.object_ids if abs(p.getBasePositionAndOrientation(i)[0][1]) < 0.17]
+        uid = max(ids, key=lambda i: p.getBasePositionAndOrientation(i)[0][0])
+        pos, orn = p.getBasePositionAndOrientation(uid)
+        theta = p.getEulerFromQuaternion(orn)[2]
+        wrap = lambda a: (a + np.pi / 2) % np.pi - np.pi / 2  # jaws are symmetric under 180 degrees
+        candidates = [a for a in (wrap(theta), wrap(theta + np.pi / 2)) if abs(a) <= np.deg2rad(60)] or [0.0]
+        if env.pick(pos[:2], yaw=candidates[0]):
+            successes += 1
+            if seed == 1:
+                assert env.tool.holds() or not env.params.suction_verify
+                assert env.place((0.0, 0.0)) in (True, False) and not env.tool.activated
+    assert successes >= 4

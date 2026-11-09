@@ -144,7 +144,7 @@ class RearrangeEnv:
             held_class, held_id = obs['classmap'][px_y, px_x], obs['idmap'][px_y, px_x]
             held_depth = object_depth_px(obs, held_id) if cfg.footprint_placement else 0
             held_object = obs.get('instance_to_object', {}).get(int(held_id), held_id)  # ground-truth id (relabelling)
-            executed = sim.pick(position)
+            executed = sim.pick(position, yaw=cfg.jaw_angle(pix[0]) if cfg.end_effector == 'gripper' else 0.0)
             if executed and learned and sim.is_valid():  # hold the object, ask for the placement
                 self.holding = True
                 mid = self._full_obs(action)

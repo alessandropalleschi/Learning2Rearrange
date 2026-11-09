@@ -43,7 +43,7 @@ class Trainer(object):
         if DEVICE.type == 'cuda':
             torch.backends.cudnn.benchmark = True  # the input size is fixed: let cuDNN pick the fastest kernels
         net_args = (in_channels, self.belief, self.cfg.recurrent_hidden, n_len, self.learned_placement, self.cfg.backbone,
-                    self.cfg.transformer_dim, self.cfg.transformer_layers, self.cfg.hierarchy)
+                    self.cfg.transformer_dim, self.cfg.transformer_layers, self.cfg.hierarchy, self.cfg.pick_channels)
         self.model, self.model_target = QNet(*net_args).to(DEVICE), QNet(*net_args).to(DEVICE)
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
@@ -209,7 +209,7 @@ class Trainer(object):
         B = len(obs_list)
         canvas = self.canvas(h, w)
         masks = {'push': np.zeros((B, self.cfg.push_actions, *canvas), bool),
-                 'grasp': np.zeros((B, 1, *canvas), bool),
+                 'grasp': np.zeros((B, self.cfg.pick_channels, *canvas), bool),
                  'place': np.zeros((B, 1, *canvas), bool)}
         for i, obs in enumerate(obs_list):
             window = (slice(top + o, top + h - o), slice(left + o, left + w))
@@ -217,7 +217,7 @@ class Trainer(object):
                 masks['place'][(i, 0) + window] = self.place_valid(obs)
             else:
                 masks['push'][(i, slice(None)) + window] = self.valid_mask(obs['depthmap'], 'push')
-                masks['grasp'][(i, 0) + window] = self.valid_mask(obs['depthmap'], 'grasp')
+                masks['grasp'][(i, slice(None)) + window] = self.valid_mask(obs['depthmap'], 'grasp')
         return [torch.from_numpy(masks[k]).to(DEVICE) for k in ('push', 'grasp', 'place')]
 
     PRIMITIVES = {'grasp': QNet.PICK, 'push': QNet.PUSH, 'place': QNet.PLACE}
@@ -234,10 +234,12 @@ class Trainer(object):
         length = torch.tensor([float(t.action[3]) if t.primitive_action == 'push' else 0.0 for t in transitions],
                               device=DEVICE)
         out = self.model.forward_train(x, length, hp, ap, held)
-        push_map = out['push_exec'].gather(1, rot[:, None, None, None].expand(-1, 1, *out['pick'].shape[2:]))[:, 0]
-        place_map = out['place'][:, 0] if out['place'] is not None else out['pick'][:, 0]
+        push_map = out['push_exec'].gather(1, (rot * (prim == QNet.PUSH))[:, None, None, None].expand(-1, 1, *out['pick'].shape[2:]))[:, 0]
+        pick_rot = (rot * (prim == QNet.PICK)).clamp(max=out['pick'].shape[1] - 1)
+        pick_map = out['pick'].gather(1, pick_rot[:, None, None, None].expand(-1, 1, *out['pick'].shape[2:]))[:, 0]
+        place_map = out['place'][:, 0] if out['place'] is not None else pick_map
         taken = torch.where((prim == QNet.PUSH)[:, None, None], push_map,
-                            torch.where((prim == QNet.PLACE)[:, None, None], place_map, out['pick'][:, 0]))
+                            torch.where((prim == QNet.PLACE)[:, None, None], place_map, pick_map))
         pred = taken.float()[arange, rows, cols]
 
         neg = -1e9
@@ -255,7 +257,7 @@ class Trainer(object):
         actor_loss = None
         pushed = prim == QNet.PUSH
         if pushed.any():
-            q_actor = out['push_actor'].float()[arange, rot, rows, cols]
+            q_actor = out['push_actor'].float()[arange, rot * pushed, rows, cols]
             actor_loss = -q_actor[pushed].mean()
         return pred, self.cfg.hier_prim_weight * level1, actor_loss
 

@@ -154,3 +154,12 @@ def test_single_pass_object_maps_equal_the_per_object_reference():
         expected = ref.object_maps(points, masks, labels, colors, ids, ws, rows)
         for got, want in zip(object_maps(points, objects, names, ws, rows)[:4], expected):
             assert np.array_equal(got, want), seed
+
+
+def test_suction_place_offsets_are_world_frame_depth_and_lateral_offsets():
+    """Regression: the depth offset used to be the object's offset along the tool's x axis, which points down."""
+    backend = FakeJoints()
+    arm = make_arm(backend=backend)
+    cup = SuctionCup(backend, SimParams(), arm, scene=None)
+    backend.object_position = (0.45, -0.12, 0.40)  # tool frame at (0.5, 0.0, 0.05): object 5 cm behind, 12 cm to the side
+    assert np.allclose(cup._place_offsets(7), (0.45 - 0.5, 0.0 - (-0.12)))
