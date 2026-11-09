@@ -11,6 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
+    git-lfs \
     openssh-client \
     ca-certificates \
     xvfb \
@@ -19,6 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libegl1 \
     libglu1-mesa \
     && rm -rf /var/lib/apt/lists/*
+
+# Git LFS (model checkpoints *.pth are stored with it)
+RUN git lfs install --system
 
 # Set working directory
 WORKDIR /workspaces/Learning2Rearrange

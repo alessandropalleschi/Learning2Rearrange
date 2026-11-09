@@ -43,6 +43,9 @@ python evaluate.py --snapshot logs/train/models/snapshot-0010000.pth --objects 3
 xvfb-run -a python train.py --gui             # PyBullet GUI inside the container (virtual display)
 ```
 
+Model checkpoints (`*.pth`, e.g. the perception networks in `assets/perception/`) are stored with **Git LFS**: run `git lfs install && git lfs pull`
+after cloning (the dev container has it installed).
+
 Without a container: `pip install torch` (CUDA build for a GPU) and `pip install -r requirements.txt`.
 Logs go to `logs/<logging_directory>/` (`episodes.csv`, `validation.csv`, TensorBoard in `tb/`, snapshots in `models/`).
 
