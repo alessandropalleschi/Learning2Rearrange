@@ -58,12 +58,55 @@ def object_depth_px(obs, object_id):
     return int(cols.max() - cols.min() + 1) if cols.size else 0
 
 
+def object_extent_px(obs, object_id):
+    """(depth, width) in cells of an object in the top view: its extent along x (cabinet depth) and along y (width)."""
+    rows, cols = np.nonzero(obs['idmap'] == object_id)
+    if cols.size == 0:
+        return 0, 0
+    return int(cols.max() - cols.min() + 1), int(rows.max() - rows.min() + 1)
+
+
+def fit_footprint(freespace, depth_px, width_px, margin_cols=4, margin_rows=2):
+    """Cells where the whole footprint of the held object fits into free space.
+
+    The placement cell is where the cup holds the object's front face, centred on its width: the footprint covers `depth_px`
+    (+ margin) cells behind the cell and `width_px` (+ margin) rows around it. Outside the map counts as occupied, which also keeps
+    the object off the back and side walls. If nothing fits the plain free-space map is returned (the object may still fit,
+    for example by being pushed against others)."""
+    import cv2
+    columns, rows = depth_px + margin_cols, width_px + 2 * margin_rows
+    kernel = np.ones((rows, columns), np.uint8)
+    fit = cv2.erode((freespace > 0).astype(np.uint8), kernel, anchor=(columns - 1, rows // 2),
+                    borderType=cv2.BORDER_CONSTANT, borderValue=0)
+    return fit.astype(freespace.dtype) if fit.any() else freespace
+
+
 def clear_of_back_wall(freespace, depth_px, margin=4):
     """Free-space map without the cells closer to the back wall than the object is deep (+ a margin): an object
     placed there would hit the wall, because the tool holds it at its front face."""
     out = freespace.copy()
     out[:, :depth_px + margin] = 0
     return out
+
+
+def placement_space(sim, obj_class, freespace, extent):
+    """Free-space map offered to the placement for a held object of class label `obj_class` and top-view extent (depth, width).
+
+    Only cells inside the object's own target region are offered whenever there are any (an object put elsewhere can not be
+    sorted, and the placement heuristic trades row distance against depth, so it would otherwise pick cells outside the region).
+    Preferably only cells where the whole footprint fits (`fit_footprint`), but only if that leaves cells inside that
+    region: otherwise the nearest valid cell lies in another region, the object is put there, picked up again and the
+    episode ping-pongs (measured: expert success fell from 87% to 33% at 4 objects). Then it falls back to keeping only the
+    back wall clear (`clear_of_back_wall`)."""
+    low, high, _ = sim.target_pixels()
+    k = [LABELS[name] for name in TARGET_ORDER].index(int(obj_class))
+    fitted = fit_footprint(freespace, *extent)
+    candidate = fitted if (fitted is not freespace and fitted[low[k]:high[k]].any()) else clear_of_back_wall(freespace, extent[0])
+    if not candidate[low[k]:high[k]].any():
+        return candidate
+    in_region = np.zeros_like(candidate)
+    in_region[low[k]:high[k]] = candidate[low[k]:high[k]]  # the heuristic trades row distance against depth: do not let it leave the region
+    return in_region
 
 
 def get_place_pose(sim, obj_class, freespace):
@@ -142,14 +185,14 @@ class RearrangeEnv:
         elif prim == 'grasp' and obs['classmap'][px_y, px_x] != 0:
             attempted = True
             held_class, held_id = obs['classmap'][px_y, px_x], obs['idmap'][px_y, px_x]
-            held_depth = object_depth_px(obs, held_id) if cfg.footprint_placement else 0
+            held_extent = object_extent_px(obs, held_id) if cfg.footprint_placement else (0, 0)
             held_object = obs.get('instance_to_object', {}).get(int(held_id), held_id)  # ground-truth id (relabelling)
             executed = sim.pick(position, yaw=cfg.jaw_angle(pix[0]) if cfg.end_effector == 'gripper' else 0.0)
             if executed and learned and sim.is_valid():  # hold the object, ask for the placement
                 self.holding = True
                 mid = self._full_obs(action)
                 if cfg.footprint_placement:
-                    mid['freespace'] = clear_of_back_wall(mid['freespace'], held_depth)
+                    mid['freespace'] = self._placement_space(held_class, mid['freespace'], held_extent)
                 mid['held_class'], mid['held_id'] = int(held_class), float(held_object)
                 mid['heuristic_place'] = get_place_pose(sim, held_class, mid['freespace'])
                 self.obs = mid
@@ -159,7 +202,7 @@ class RearrangeEnv:
             if executed and not learned:
                 freespace = sim.observe()['freespace']
                 if cfg.footprint_placement:
-                    freespace = clear_of_back_wall(freespace, held_depth)
+                    freespace = self._placement_space(held_class, freespace, held_extent)
                 place_pix = get_place_pose(sim, held_class, freespace)
                 executed = sim.place(self.ws.px_to_xy(*place_pix))
 
@@ -193,6 +236,11 @@ class RearrangeEnv:
                 'shaping': shaping}
         self.obs = next_obs
         return self.compact(next_obs), reward, terminated, truncated, info
+
+    def _placement_space(self, held_class, freespace, extent):
+        if self.cfg.placement_space == 'region':
+            return placement_space(self.sim, held_class, freespace, extent)
+        return clear_of_back_wall(freespace, extent[0])
 
     # ------------------------------------------------------------------ reward variants
     def _potential(self):

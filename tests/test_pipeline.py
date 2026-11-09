@@ -73,17 +73,33 @@ def test_train_then_evaluate(fake_simulator, tmp_path, monkeypatch, belief, plac
     assert result['episodes'] == 5
 
 
-def test_footprint_placement_keeps_the_object_clear_of_the_back_wall(fake_simulator):
-    from l2r.envs.rearrange import clear_of_back_wall, object_depth_px
+def test_footprint_placement_fits_the_whole_object_into_free_space():
+    from l2r.envs.rearrange import fit_footprint, object_extent_px
     idmap = np.zeros((20, 30), np.float32)
-    idmap[5:9, 10:18] = 7  # an object 8 columns deep
-    assert object_depth_px({'idmap': idmap}, 7) == 8 and object_depth_px({'idmap': idmap}, 3) == 0
-    free = clear_of_back_wall(np.ones((20, 30), np.float32), 8, margin=4)
-    assert (free[:, :12] == 0).all() and (free[:, 12:] == 1).all()
-    env = rearrange.RearrangeEnv(Config(placement='learned', footprint_placement=True))
-    env.reset()
-    mid = env.step({'primitive': 'grasp', 'pix': (0, 50, 60)})[0]  # the fake object is 20 columns deep
-    assert (mid['freespace'][:, :24] == 0).all() and mid['freespace'][:, 24:].any()
+    idmap[5:13, 10:18] = 7  # 8 cells deep (x), 8 cells wide (y)
+    assert object_extent_px({'idmap': idmap}, 7) == (8, 8) and object_extent_px({'idmap': idmap}, 3) == (0, 0)
+    free = np.ones((40, 60), np.uint8)
+    free[18:22, 30:40] = 0  # an obstacle
+    fit = fit_footprint(free, depth_px=10, width_px=8)
+    rows, cols = np.nonzero(fit)
+    assert rows.min() >= 6 and cols.min() >= 13  # walls: half the width + margin from the sides, depth + margin from the back
+    for r, c in zip(rows, cols):  # the whole footprint of every offered cell is free
+        assert (free[r - 6:r + 6, c - 13:c + 1] > 0).all()
+    assert fit[20, 35] == 0 and fit[20, 45] == 0 and fit[20, 55] == 1  # not on / behind-onto the obstacle, free behind it
+    assert (fit_footprint(np.zeros((10, 10), np.uint8), 4, 4) == 0).all()  # nothing fits: the plain map comes back
+
+
+def test_footprint_placement_is_applied_to_the_held_object(fake_simulator):
+    for space in ('depth', 'region'):
+        env = rearrange.RearrangeEnv(Config(placement='learned', footprint_placement=True, placement_space=space))
+        env.reset()
+        free = env.step({'primitive': 'grasp', 'pix': (0, 50, 60)})[0]['freespace']  # the fake object is 20 x 20 cells
+        assert free[:, :23].sum() == 0 and free.any()  # both keep the back wall clear
+        if space == 'depth':
+            assert free[:10].any() and free[-10:].any()  # the original rule does not look at the side margins
+        else:
+            assert free[:10].sum() == 0 and free[30:].sum() == 0  # only the object's own target region (rows 10..30)
+
 
 
 def run_fake_episode(**cfg_kwargs):
@@ -170,3 +186,29 @@ def test_environment_and_fake_follow_the_simulator_boundary():
     for cls in (Environment, FakeSim):
         missing = [n for n in methods if not hasattr(cls, n)]
         assert not missing, (cls.__name__, missing)
+
+
+def test_placement_space_falls_back_when_the_footprint_does_not_fit_in_the_target_region(fake_simulator):
+    from l2r.envs.rearrange import placement_space
+    sim = FakeSim()  # target rows of class label 1 (blue): 10..30
+    free = np.zeros((120, 100), np.uint8)
+    free[12:28, 30:90] = 1  # the region has room for a 2 x 2 footprint ...
+    free[60:110, 30:90] = 1  # ... and so does the space outside it
+    fits = placement_space(sim, 1, free, (4, 4))
+    assert fits[10:30].any()  # the footprint fits in the region: the eroded map is used
+    tight = np.zeros((120, 100), np.uint8)
+    tight[11:14, 30:90] = 1  # a crowded region: too tight for a 20-cell wide object ...
+    tight[60:110, 30:90] = 1  # ... but plenty of room elsewhere
+    out = placement_space(sim, 1, tight, (10, 20))
+    assert out[10:30].any()  # fell back: the target region still offers cells (back-wall rule only)
+    assert out[:, :14].sum() == 0  # and the back wall is still kept clear
+
+
+def test_placement_space_offers_only_cells_inside_the_target_region(fake_simulator):
+    from l2r.envs.rearrange import placement_space
+    free = np.ones((120, 100), np.uint8)
+    out = placement_space(FakeSim(), 1, free, (4, 4))  # class 1: rows 10..30
+    assert out[10:30].any() and out[:10].sum() == 0 and out[30:].sum() == 0
+    none = np.zeros((120, 100), np.uint8)
+    none[60:110, 30:90] = 1  # no free cell in the region at all: everything else is offered (nothing else to do)
+    assert placement_space(FakeSim(), 1, none, (4, 4))[60:].any()

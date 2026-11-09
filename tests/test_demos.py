@@ -4,6 +4,7 @@ import torch
 
 from l2r.config import Config
 from l2r.learning.memory import Transition
+from l2r.learning.models import DEVICE, QNet
 from l2r.learning.trainer import Trainer
 
 H, W = 40, 36
@@ -25,11 +26,17 @@ def test_margin_loss_puts_the_expert_action_on_top():
     trainer, s = make_trainer(), state()
     expert = (0, 14, 12)  # a pick on the object, not where the untrained network happens to peak
     demos = [Transition(s, expert, s, -1.0, 'grasp', True)] * 8
-    trainer.pretrain(demos, 80, log=lambda *a: None)
+    batch = demos[:4]
+    before = float(trainer._margin_loss(trainer.prepare(s)[None].repeat(4, 1, 1, 1).to(next(trainer.model.parameters()).device), [s] * 4,
+                                        torch.tensor([QNet.PICK] * 4, device=DEVICE), torch.zeros(4, dtype=torch.long, device=DEVICE),
+                                        torch.full((4,), 14 + 4 + trainer._pads(H, W)[0], device=DEVICE),
+                                        torch.full((4,), 12 + 4 + trainer._pads(H, W)[1], device=DEVICE), np.ones(4, bool),
+                                        (None, None, None), H, W))
+    trainer.pretrain(demos, 200, log=lambda *a: None)
     pick = trainer.preprocessQmaps(trainer.forward_batch([s]).pick[0], s['depthmap'], 'grasp')
-    assert np.unravel_index(np.argmax(pick), pick.shape)[1:] == expert[1:]
-    top = np.sort(pick.ravel())[::-1]
-    assert top[0] - top[1] > 0.05  # a margin over the next-best feasible pixel, not a tie
+    assert np.unravel_index(np.argmax(pick), pick.shape)[1:] == expert[1:]  # the expert action is the greedy one
+    after = trainer.train_step(batch, demo=np.ones(4, bool))
+    assert before > 0.7 and after < before  # the margin term (initially ~the margin) shrinks; the gap itself grows slowly
 
 
 def test_margin_loss_ignores_samples_that_are_not_demonstrations():

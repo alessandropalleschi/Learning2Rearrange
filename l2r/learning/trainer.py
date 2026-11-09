@@ -139,6 +139,10 @@ class Trainer(object):
         (2L,h,w) for 'push' (index = direction*L + length; a longer push can start farther from an object)."""
         o = self.offset_px
         crop = depth[o:depth.shape[0] - o, o:depth.shape[1]]
+        if self.cfg.mask_level == 'structured':
+            from l2r.learning.masks import structured_masks
+            grasp, push = structured_masks(crop, self.push_lengths_px)
+            return grasp if primitive == 'grasp' else push
         object_pixels = (crop > 0.008).astype(np.uint8)
         if primitive == 'grasp':
             return object_pixels.astype(bool)
