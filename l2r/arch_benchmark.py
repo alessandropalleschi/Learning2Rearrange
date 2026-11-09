@@ -31,6 +31,16 @@ VARIANTS = {
     'skips+region': dict(arch_skips=True, region_channels=True),
     'skips+region+equiv': dict(arch_skips=True, region_channels=True, equiv_targets=True),
     'hybrid': dict(backbone='hybrid'),
+    'fpn': dict(arch_decoder='fpn'),
+    'attn_unet': dict(arch_decoder='attn_unet'),
+    'unet_attn4': dict(arch_decoder='unet_attn4'),
+    'unet+hybrid': dict(arch_skips=True, backbone='hybrid'),
+    'unet+ppm': dict(arch_skips=True, backbone='ppm'),
+    'fpn+hybrid': dict(arch_decoder='fpn', backbone='hybrid'),
+    'hrnet': dict(arch_decoder='hrnet'),
+    'unet+convnext': dict(arch_skips=True, arch_encoder='convnext'),
+    'unet+r18_imagenet': dict(arch_skips=True, arch_encoder='resnet18_imagenet'),
+    'unet+r18_scratch': dict(arch_skips=True, arch_encoder='resnet18_scratch'),
     'skips+region+hybrid': dict(arch_skips=True, region_channels=True, backbone='hybrid'),
 }
 
@@ -46,6 +56,7 @@ class DenseVariant:
         self.optimizer = torch.optim.AdamW(self.trainer.model.parameters(), lr=lr, weight_decay=1e-4)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, steps)
         self.batch = batch
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.trainer.amp)  # fp16 autocast needs loss scaling (it diverged without)
 
     # ------------------------------------------------------------------ layout of the flat action space
     def _flat_index(self, t, prim, rot, rows, cols, canvas, n_push):
@@ -93,9 +104,11 @@ class DenseVariant:
         log_p = torch.log_softmax(logits.masked_fill(~masks, -1e9), dim=1)
         loss = -(target * log_p).sum(1).mean()
         self.optimizer.zero_grad()
-        loss.backward()
+        self.scaler.scale(loss).backward()
+        self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.trainer.model.parameters(), 5.0)
-        self.optimizer.step()
+        self.scaler.step(self.optimizer)  # skips the step if the gradients overflowed
+        self.scaler.update()
         self.scheduler.step()
         return float(loss.detach())
 

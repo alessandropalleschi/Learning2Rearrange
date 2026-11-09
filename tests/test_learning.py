@@ -152,3 +152,60 @@ def test_geometry_channels_mark_the_regions_and_the_coordinates():
         raise AssertionError('missing regions must fail loudly')
     except KeyError:
         pass
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize('decoder,backbone', [('plain', 'ppm'), ('fpn', 'conv'), ('attn_unet', 'conv'), ('unet_attn4', 'conv'),
+                                              ('fpn', 'hybrid'), ('attn_unet', 'ppm')])
+def test_decoder_variants_are_consistent_and_trainable(decoder, backbone):
+    torch.manual_seed(0)
+    net = QNet(4, 'none', 8, 1, False, backbone=backbone, transformer_dim=32, transformer_layers=1, decoder=decoder)
+    for p in net.context.parameters():  # zero-initialised residual outputs (pyramid pooling / transformer): make them active
+        if p.dim() > 1 and p.abs().sum() == 0:
+            torch.nn.init.normal_(p, std=0.05)
+    x = torch.randn(2, 4, 128, 104)
+    push, pick, _, _ = net(x)
+    assert push.shape == (2, 2, 128, 104) and pick.shape == (2, 1, 128, 104)
+    out = net.forward_selected(x, torch.tensor([QNet.PUSH, QNet.PICK]), torch.tensor([1, 0]))
+    assert torch.allclose(out[0], push[0, 1:2], atol=1e-4) and torch.allclose(out[1], pick[1], atol=1e-4)
+    (push.mean() + pick.mean()).backward()
+    names = {'fpn': 'lateral', 'attn_unet': 'gates', 'unet_attn4': 'attn4'}
+    if decoder in names:
+        assert any(p.grad is not None and p.grad.abs().sum() > 0 for n, p in net.named_parameters() if n.startswith(names[decoder]))
+    assert net.skips == (decoder != 'plain')
+
+
+def test_hrnet_keeps_a_full_resolution_branch_and_convnext_encoder_is_consistent():
+    torch.manual_seed(0)
+    x = torch.randn(2, 4, 128, 104)
+    for kwargs in (dict(decoder='hrnet'), dict(decoder='unet', encoder='convnext')):
+        net = QNet(4, 'none', 8, 1, False, **kwargs)
+        push, pick, _, _ = net(x)
+        out = net.forward_selected(x, torch.tensor([QNet.PUSH, QNet.PICK]), torch.tensor([1, 0]))
+        assert push.shape == (2, 2, 128, 104)
+        assert torch.allclose(out[0], push[0, 1:2], atol=1e-4) and torch.allclose(out[1], pick[1], atol=1e-4)
+        (push.mean() + pick.mean()).backward()
+        assert all(p.grad is not None for p in net.parameters() if p.requires_grad), kwargs
+    hr = QNet(4, 'none', 8, 1, False, decoder='hrnet')
+    branches = hr.trunk(x)
+    assert [tuple(b.shape[-2:]) for b in branches] == [(128, 104), (64, 52), (32, 26), (16, 13)]  # the full-resolution branch survives
+
+
+def test_resnet18_encoder_adapts_inputs_freezes_batch_norm_and_is_consistent():
+    torch.manual_seed(0)
+    net = QNet(9, 'none', 8, 1, False, decoder='unet', encoder='resnet18_scratch')  # 9 input channels: RGB, height, 5 more
+    net.train()
+    assert all(not m.training for m in net.trunk.modules() if isinstance(m, torch.nn.BatchNorm2d))  # frozen statistics
+    x = torch.randn(2, 9, 128, 104)
+    push, pick, _, _ = net(x)
+    out = net.forward_selected(x, torch.tensor([QNet.PUSH, QNet.PICK]), torch.tensor([1, 0]))
+    assert push.shape == (2, 2, 128, 104) and torch.allclose(out[0], push[0, 1:2], atol=1e-4)
+    first = net.trunk.pre[0].weight
+    assert first.shape == (64, 9, 7, 7) and torch.allclose(first[:, 5], first[:, 3])  # extra channels start identical (mean RGB filter)
+    try:
+        QNet(4, 'none', 8, 1, False, decoder='plain', encoder='resnet18_scratch')
+        raise AssertionError('needs a U-Net style decoder')
+    except AssertionError as error:
+        assert 'U-Net' in str(error)

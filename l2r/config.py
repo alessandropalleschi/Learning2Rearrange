@@ -48,6 +48,8 @@ class Config:
     # --- Network architecture (ablation): U-Net skip connections; explicit task-geometry input channels (target-region bands per
     #     class + row / column coordinates) ---
     arch_skips: bool = False
+    arch_encoder: str = 'resnet'  # 'resnet' | 'convnext' (blocks of the encoder stages)
+    arch_decoder: str = 'plain'  # 'plain' | 'unet' | 'fpn' | 'attn_unet' | 'unet_attn4'  (arch_skips is the same as 'unet')
     equiv_sigma: float = 0.0  # 0: equivalent cells all weigh 1 (hard); s > 0: weight exp(-d^2 / 2 s^2) by distance (cells) to the taken cell
     equiv_targets: bool = False  # TD target applied to all cells equivalent to the taken one (an object's front band, a 5x5 neighbourhood)
     region_channels: bool = False
@@ -132,7 +134,7 @@ class Config:
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
                    footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
-                   hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), policy_topk=get('policy_topk', 10), arch_skips=get('arch_skips', False),
+                   hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), arch_decoder=get('arch_decoder', 'plain'), arch_encoder=get('arch_encoder', 'resnet'), policy_topk=get('policy_topk', 10), arch_skips=get('arch_skips', False),
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
                    equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
                    grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
@@ -149,7 +151,7 @@ class Config:
                             help="'learned': a Q-head chooses where to place the held object (default: rule from the paper)")
         parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
                             help='belief state ablation: memoryless / spatial memory map / ConvGRU latent')
-        parser.add_argument('--backbone', choices=['conv', 'hybrid'], default='conv',
+        parser.add_argument('--backbone', choices=['conv', 'hybrid', 'ppm'], default='conv',
                             help="'hybrid': transformer encoder on the 1/8-resolution bottleneck of the conv network")
         parser.add_argument('--jaw_yaws', type=int, default=5,
                             help='jaw orientations of the gripper over +-60 degrees (--end_effector gripper)')
@@ -167,6 +169,12 @@ class Config:
                             help="'object': object-centric Q (transformer over visible objects, Q per object-action slot; heuristic "
                                  "placement); 'policy_critic': dense critic + demonstration-trained policy heatmap proposing cells")
         parser.add_argument('--policy_topk', type=int, default=10, help='policy_critic: cells the policy proposes per primitive')
+        parser.add_argument('--arch_encoder', choices=['resnet', 'convnext', 'resnet18_imagenet', 'resnet18_scratch'], default='resnet',
+                            help='encoder: residual 3x3 blocks, ConvNeXt 7x7 blocks, or torchvision ResNet-18 stages (ImageNet-pretrained, '
+                                 'or the same structure from scratch); the ResNet-18 encoders need a U-Net style decoder')
+        parser.add_argument('--arch_decoder', choices=['plain', 'unet', 'fpn', 'attn_unet', 'unet_attn4', 'hrnet'], default='plain',
+                            help='decoder: plain (original), unet skips, fpn pyramid, attn_unet (attention-gated skips), unet_attn4 '
+                                 '(plus global attention at 1/4 resolution)')
         parser.add_argument('--arch_skips', action='store_true', help='U-Net skip connections from the encoder to the decoder')
         parser.add_argument('--equiv_targets', action='store_true',
                             help='regress the TD target at every cell equivalent to the taken action (the whole front band of the '
@@ -207,6 +215,11 @@ class Config:
         shaped = self.reward_mode in ('progress', 'distance')
         low = (self.reward_invalid - (self.noop_penalty if self.reward_mode == 'noop' else 0.0)) / (1.0 - self.gamma)
         return low, self.reward_goal + (self.reward_shaping_scale if shaped else 0.0)
+
+    @property
+    def decoder(self):
+        """The decoder kind: arch_decoder, or 'unet' if only arch_skips is set."""
+        return 'unet' if (self.arch_skips and self.arch_decoder == 'plain') else self.arch_decoder
 
     def __post_init__(self):
         if self.hierarchy:  # the length is continuous: the feasibility mask uses the longest push

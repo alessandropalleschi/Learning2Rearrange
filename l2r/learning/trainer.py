@@ -47,7 +47,7 @@ class Trainer(object):
             torch.backends.cudnn.benchmark = True  # the input size is fixed: let cuDNN pick the fastest kernels
         net_args = (in_channels, self.belief, self.cfg.recurrent_hidden, n_len, self.learned_placement, self.cfg.backbone,
                     self.cfg.transformer_dim, self.cfg.transformer_layers, self.cfg.hierarchy, self.cfg.pick_channels,
-                    self.cfg.arch_skips, self.cfg.agent == 'policy_critic')
+                    self.cfg.arch_skips, self.cfg.agent == 'policy_critic', self.cfg.decoder, self.cfg.arch_encoder)
         self.model, self.model_target = QNet(*net_args).to(DEVICE), QNet(*net_args).to(DEVICE)
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
