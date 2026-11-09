@@ -20,7 +20,7 @@ class Trainer(object):
         self.model_push_target = PushFCN()        
         self.model_pick = PickFCN()
         self.model_pick_target = PickFCN()  
-        self.push_length_px = 8
+        self.push_length_px = 16  # 8 cm push length / 0.005 m pixel size
         self.future_reward_discount = 0.9
         self.max_dim = 160
         self.offset_px = 4

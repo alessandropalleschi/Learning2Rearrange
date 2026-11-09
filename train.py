@@ -47,7 +47,7 @@ def check_push(env, depth, pix_x, pix_y, angle):
     #     feas = False
     # else:
     #     feas = True
-    push_length = 0.04
+    push_length = 0.08  # same length as env.push (paper: 8 cm)
     primitive_position_f = env.px_to_xy(pix_x,pix_y)
     primitive_position_f[1] = primitive_position_f[1]+push_length*np.sin(angle)
     depth_new = depth.copy()
@@ -122,9 +122,11 @@ def optimize_model(trainer, is_testing=False):
                 else:
                     with torch.no_grad():
                         push_new_sample, place_new_sample = trainer.forward(color_next_state,depth_next_state,is_volatile=True,network='policy')
+                        push_new_sample = trainer.preprocessQmaps(push_new_sample, depth_next_state, 'push')
                     if trainer.double:
                         with torch.no_grad():
                            push_pred_target, place_pred_target = trainer.forward(color_next_state,depth_next_state,is_volatile=True,network='target')
+                           push_pred_target = trainer.preprocessQmaps(push_pred_target, depth_next_state, 'push')
 
                         greedy_action = 'grasp' if np.max(place_new_sample) > np.max(push_new_sample) else 'push'
                         if greedy_action=='grasp':
@@ -183,9 +185,11 @@ def train_short_memory(obs,next_obs,reward, action_sample, primitive_action_samp
     else:
         with torch.no_grad():
             push_new_sample, place_new_sample = trainer.forward(color_next_state,depth_next_state,is_volatile=True,network='policy')
+            push_new_sample = trainer.preprocessQmaps(push_new_sample, depth_next_state, 'push')
         if trainer.double:
             with torch.no_grad():
                 push_pred_target, place_pred_target = trainer.forward(color_next_state,depth_next_state,is_volatile=True,network='target')
+                push_pred_target = trainer.preprocessQmaps(push_pred_target, depth_next_state, 'push')
 
             greedy_action = 'grasp' if np.max(place_new_sample) > np.max(push_new_sample) else 'push'
             if greedy_action=='grasp':
@@ -388,11 +392,15 @@ def main(args):
     np.random.seed(random_seed)
     
     # Initialize pick-and-place system (camera and robot)
-    env = Environment(gui=args.gui, num_obj=[args.num_obj])
+    # Curriculum (paper, Sec. IV-D): start with 1 object, add one when the success rate over the
+    # last 50 episodes exceeds 90%, up to a maximum of 8 objects.
+    num_obj = args.num_obj
+    env = Environment(gui=args.gui, num_obj=[num_obj])
+    stage_iteration = 0
+    actions_in_episode = 0
     while True:
         if(env.reset()):
             if(env.check_sorted()<1):
-                no_change_count = 0
                 relable = True
 
                 break
@@ -404,11 +412,9 @@ def main(args):
     trainer = Trainer(is_testing=is_testing, load_snapshot=load_snapshot, snapshot_push=snapshot_push, snapshot_pick=snapshot_pick, snapshot_pick_target=snapshot_pick_target, snapshot_push_target=snapshot_push_target)
     
     while True:
-        if not env.check_sim() or no_change_count>39 or env.check_sorted()==1:
+        if not env.check_sim() or actions_in_episode >= args.max_actions or env.check_sorted()==1:
     
             print("Restoring Simulation")
-            print("Restoring Simulation")
-            reward = reward if env.check_sim() else -100
             print("Episode Reward:", reward)
             most_recent_scores.append(reward)
             most_recent_success_rate.append(1 if (env.check_sorted()==1 and env.check_sim()) else 0)
@@ -417,10 +423,18 @@ def main(args):
             print("Average Reward", average_score)
             print("Average Success Rate", average_success)
             reward = 0
+            actions_in_episode = 0
+            if (not is_testing and len(most_recent_success_rate) == most_recent_success_rate.maxlen
+                    and average_success > 0.9 and num_obj < args.max_obj):
+                num_obj += 1
+                env.num_obj = [num_obj]
+                most_recent_success_rate.clear()
+                most_recent_scores.clear()
+                stage_iteration = 0  # restart exploration annealing for the new stage
+                print("Curriculum: now using %d objects" % num_obj)
             while True:
                 if(env.reset()):
                     if(env.check_sorted()<1):
-                        no_change_count = 0
                         relable = True
                         trainer.episode.memory.clear()
                         break
@@ -430,7 +444,8 @@ def main(args):
 
         
         
-        explore_prob = max(0.5 * np.power(0.9998, trainer.iteration),0.1)
+        # epsilon-greedy: 0.8 annealed to 0.01 for each curriculum stage (paper)
+        explore_prob = max(0.8 * np.power(0.9995, stage_iteration), 0.01)
 
         print('Observing Scene')
         obs = env.get_observation()
@@ -456,17 +471,12 @@ def main(args):
         else:
             next_obs = obs
 
-        change_detected,diff = utils.check_env_depth_change(obs['depth'],next_obs['depth'])
-
-        if not done:
-            reward_value = reward_value if change_detected else -5
-        # count consecutive actions that did not change the scene so stuck episodes get reset
-        no_change_count = 0 if change_detected else no_change_count + 1
-
+        # Reward (paper Eq. 2): -10 invalid state, 0 goal state, -1 otherwise
         if done and ok_status:
             reward_value = 0
-        reward_value = reward_value if ok_status else -50
+        reward_value = reward_value if ok_status else -10
         reward+=reward_value
+        actions_in_episode += 1
         done_episode = done or (not ok_status)
         if not is_testing:
             train_short_memory(obs,next_obs,reward_value, best_index, primitive_action,done_episode,trainer)
@@ -492,6 +502,7 @@ def main(args):
 
         optimize_model(trainer=trainer, is_testing=is_testing)
         trainer.iteration +=1
+        stage_iteration += 1
 
 if __name__ == '__main__':
 
@@ -517,8 +528,10 @@ if __name__ == '__main__':
     parser.add_argument('--logging_directory', dest='logging_directory', action='store', default='train_resnet_123_test')
     parser.add_argument('--save_visualizations', dest='save_visualizations', action='store_true', default=False,          help='save visualizations of FCN predictions?')
 
+    parser.add_argument('--max_obj', dest='max_obj', type=int, default=8, help='maximum number of objects of the curriculum')
+    parser.add_argument('--max_actions', dest='max_actions', type=int, default=40, help='maximum number of actions per episode')
     parser.add_argument('--gui', dest='gui', action='store_true', default=False, help='show the PyBullet GUI')
-    parser.add_argument('--num_obj', dest='num_obj', type=int, default=2, help='number of objects per episode (paper uses a curriculum 1..8)')
+    parser.add_argument('--num_obj', dest='num_obj', type=int, default=1, help='initial number of objects (curriculum starts at 1)')
 
     # Run main program with specified arguments
     args = parser.parse_args()
