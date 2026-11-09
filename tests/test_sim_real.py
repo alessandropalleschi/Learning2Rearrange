@@ -81,11 +81,14 @@ def test_learned_perception_path_with_an_oracle(sim):
 def test_parallel_jaw_gripper_picks_and_places_an_object_it_can_reach():
     """Oracle: jaws at the true centre of the front-most object, yawed to its orientation, hold it (>= 4 of 5 scenes), and the
     object can be placed back with the object-in-tool offsets."""
-    env = Environment(num_obj=[3], params=SimParams(end_effector='gripper'))
+    from l2r.config import Config
+    from l2r.envs.rearrange import RearrangeEnv
+    gym_env = RearrangeEnv(Config(end_effector='gripper'), num_obj=3, params=SimParams(end_effector='gripper'))
+    env = gym_env.sim
     p, successes = env.p, 0
     for seed in range(1, 6):
-        env.reset(seed=seed)
-        ids = [i for i in env.scene.object_ids if abs(p.getBasePositionAndOrientation(i)[0][1]) < 0.17]
+        gym_env.reset(seed=seed)
+        ids = [i for i in env.scene.object_ids if abs(p.getBasePositionAndOrientation(i)[0][1]) < 0.17] or list(env.scene.object_ids)
         uid = max(ids, key=lambda i: p.getBasePositionAndOrientation(i)[0][0])
         pos, orn = p.getBasePositionAndOrientation(uid)
         theta = p.getEulerFromQuaternion(orn)[2]
