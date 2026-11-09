@@ -35,10 +35,10 @@ def test_actor_critic_learns_a_continuous_push_length():
     obs_q = trainer.forward_batch([state])
     actor_length = float(obs_q.lengths[0, 0, row, col])
     assert abs(actor_length - 0.8) < 0.25, actor_length
-    x = trainer.prepare(state)[None]
+    x = trainer.prepare(state)[None].to(next(trainer.model.parameters()).device)
     with torch.no_grad():
         f0, _, _ = trainer.model._features(x, None, None, None)
-        critic = lambda l: trainer.model._push_critic(f0, torch.full((1, 1, *f0.shape[2:]), l))[0, 0, row + 4 + 0, col + 4 + 2].item()
+        critic = lambda l: trainer.model._push_critic(f0, torch.full((1, 1, *f0.shape[2:]), l, device=f0.device))[0, 0, row + 4 + 0, col + 4 + 2].item()
     assert critic(0.8) > critic(0.05)  # the critic knows that a very short push is worse
 
 

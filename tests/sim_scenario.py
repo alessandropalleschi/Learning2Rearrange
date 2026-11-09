@@ -43,7 +43,7 @@ def run(quality='legacy', seed=3, steps=4):
                            sim_quality=quality, camera_scale=1.0, force_limit=300.0, force_sense_x=None,
                            adaptive_step=False, velocity_scale=1.0)
     params = SimParams.from_args(args)
-    env = RearrangeEnv(Config(max_actions=50), num_obj=3, params=params)
+    env = RearrangeEnv(Config(max_actions=50, reward_mode='sparse'), num_obj=3, params=params)
     obs = env.reset(seed=seed)
     log = [{'reset_depth': round(float(obs['depthmap'].sum()), 3), 'reset_color': int(obs['colormap'].sum())}]
     for i in range(steps):
