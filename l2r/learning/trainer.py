@@ -43,9 +43,9 @@ class Trainer(object):
         n_len = len(self.cfg.push_lengths)
         if DEVICE.type == 'cuda':
             torch.backends.cudnn.benchmark = True  # the input size is fixed: let cuDNN pick the fastest kernels
-        self.model = QNet(in_channels, self.belief, self.cfg.recurrent_hidden, n_len, self.learned_placement).to(DEVICE)
-        self.model_target = QNet(in_channels, self.belief, self.cfg.recurrent_hidden, n_len,
-                                 self.learned_placement).to(DEVICE)
+        net_args = (in_channels, self.belief, self.cfg.recurrent_hidden, n_len, self.learned_placement, self.cfg.backbone,
+                    self.cfg.transformer_dim, self.cfg.transformer_layers)
+        self.model, self.model_target = QNet(*net_args).to(DEVICE), QNet(*net_args).to(DEVICE)
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
             self.model_target.load_state_dict(torch.load(snapshot_target or snapshot, map_location=DEVICE))

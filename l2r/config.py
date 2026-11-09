@@ -21,6 +21,12 @@ class Config:
     lr_decay: float = 1.0           # exponential LR decay per optimisation step (1.0 = fixed LR as in the paper)
     amp: bool = True                # mixed precision (only used on CUDA)
 
+    # --- Backbone (ablation): 'conv' = residual conv encoder-decoder with pooled global context;
+    #     'hybrid' = same, with a transformer encoder on the 1/8-resolution bottleneck ---
+    backbone: str = 'conv'
+    transformer_dim: int = 192
+    transformer_layers: int = 3
+
     # --- Placement (ablation): 'heuristic' = hand-written rule inside the pick-and-place action (paper);
     #     'learned' = pick and place are two decisions, the place pixel comes from a third Q-head
     #     (conditioned on the class of the held object, restricted to free cells) ---

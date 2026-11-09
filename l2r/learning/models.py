@@ -19,6 +19,7 @@ Belief state (ablation, `belief` argument of QNet):
 Pushing directions: the paper models two (left/right) = 0 and 180 degree rotations of the input. A 180
 degree rotation of a square image is an exact double flip, so no interpolation is needed.
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -63,6 +64,46 @@ class GlobalContext(nn.Module):
         return x + self.mlp(g)[:, :, None, None]
 
 
+def sincos_positions(height, width, dim):
+    """Fixed 2D sine-cosine position codes, (height * width, dim): half of the channels encode the row, half the column."""
+    assert dim % 4 == 0
+    quarter = dim // 4
+    freq = 1.0 / (10000 ** (torch.arange(quarter) / quarter))
+    rows, cols = torch.arange(height)[:, None] * freq[None], torch.arange(width)[:, None] * freq[None]
+    row_code = torch.cat([rows.sin(), rows.cos()], 1)[:, None, :].expand(height, width, 2 * quarter)
+    col_code = torch.cat([cols.sin(), cols.cos()], 1)[None, :, :].expand(height, width, 2 * quarter)
+    return torch.cat([row_code, col_code], -1).reshape(height * width, dim)
+
+
+class TransformerBottleneck(nn.Module):
+    """Global self-attention over the bottleneck grid (a token per 8x8 pixel block, 16x13 = 208 tokens for the 128x104
+    maps): lets every location look at all objects, target regions and occlusions at once, which convolutions only do
+    through their receptive field. Pre-norm encoder layers; the output projection starts at zero, so the network starts
+    as the convolutional one."""
+
+    def __init__(self, channels=512, dim=192, layers=3, heads=4):
+        super().__init__()
+        self.dim = dim
+        self.proj_in = nn.Conv2d(channels, dim, 1)
+        layer = nn.TransformerEncoderLayer(dim, heads, 4 * dim, dropout=0.0, activation='gelu', batch_first=True,
+                                           norm_first=True)
+        self.encoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
+        self.norm = nn.LayerNorm(dim)
+        self.proj_out = nn.Conv2d(dim, channels, 1)
+        nn.init.zeros_(self.proj_out.weight)
+        nn.init.zeros_(self.proj_out.bias)
+        self._positions = {}
+
+    def forward(self, x):
+        b, _, h, w = x.shape
+        key = (h, w, x.device)
+        if key not in self._positions:
+            self._positions[key] = sincos_positions(h, w, self.dim).to(x.device)
+        tokens = self.proj_in(x).flatten(2).transpose(1, 2) + self._positions[key]
+        tokens = self.norm(self.encoder(tokens))
+        return x + self.proj_out(tokens.transpose(1, 2).reshape(b, self.dim, h, w))
+
+
 HELD_CLASSES = {1: 0, 3: 1, 5: 2}  # class label (blue, green, yellow) -> one-hot index of the held object
 ACTION_CHANNELS = 4  # last action encoding at bottleneck resolution: push 0deg, push 180deg, pick, place
 
@@ -85,15 +126,18 @@ class ConvGRUCell(nn.Module):
 class QNet(nn.Module):
     nr_rotations = 2  # push left / right (0 and 180 degrees)
 
-    def __init__(self, in_channels=IN_CHANNELS, belief='none', hidden=64, n_push_lengths=1, learned_placement=True):
+    def __init__(self, in_channels=IN_CHANNELS, belief='none', hidden=64, n_push_lengths=1, learned_placement=True,
+                 backbone='conv', transformer_dim=192, transformer_layers=3):
         """learned_placement: build the place head (conditioned on the held class). Without it `forward` returns
         `None` as place map: the head would cost about as much as the pick head for nothing."""
         super().__init__()
         self.belief, self.hidden, self.n_push_lengths = belief, hidden, n_push_lengths
-        self.learned_placement = learned_placement
+        self.learned_placement, self.backbone = learned_placement, backbone
         self.stem = nn.Sequential(nn.Conv2d(in_channels, 64, 3, padding=1, bias=False), norm(64), nn.ReLU(inplace=True))
         self.rb1, self.rb2, self.rb3 = ResidualBlock(64, 128), ResidualBlock(128, 256), ResidualBlock(256, 512)
-        self.context = GlobalContext(512)
+        # bottleneck: pooled global context (conv backbone) or global self-attention (hybrid conv + transformer)
+        self.context = (TransformerBottleneck(512, transformer_dim, transformer_layers) if backbone == 'hybrid'
+                        else GlobalContext(512))
         if belief == 'recurrent':
             self.rec_in = nn.Conv2d(512 + ACTION_CHANNELS, hidden, 1)
             self.gru = ConvGRUCell(hidden, hidden)

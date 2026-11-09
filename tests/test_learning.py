@@ -88,3 +88,21 @@ def test_qnet_without_place_head_skips_it():
     assert place is None and push.shape == (2, 2, 128, 104) and pick.shape == (2, 1, 128, 104)
     out = net.forward_selected(x, torch.tensor([QNet.PUSH, QNet.PICK]), torch.tensor([1, 0]))
     assert torch.allclose(out[0], push[0, 1:2], atol=1e-4) and torch.allclose(out[1], pick[1], atol=1e-4)
+
+
+def test_hybrid_backbone_starts_as_the_conv_network_and_is_consistent():
+    from l2r.learning.models import TransformerBottleneck, sincos_positions
+    codes = sincos_positions(16, 13, 192)
+    assert codes.shape == (16 * 13, 192) and len({tuple(c.tolist()) for c in codes}) == 16 * 13  # every cell has its own code
+    block = TransformerBottleneck(512, 192, 2)
+    x = torch.randn(2, 512, 16, 13)
+    assert torch.allclose(block(x), x)  # zero-initialised output projection: identity at the start
+    net = QNet(4, 'none', 8, 1, False, 'hybrid', 64, 1)
+    for p in net.context.proj_out.parameters():  # make the transformer path active
+        torch.nn.init.normal_(p, std=0.05)
+    x = torch.randn(2, 4, 128, 104)
+    push, pick, _, _ = net(x)
+    out = net.forward_selected(x, torch.tensor([QNet.PUSH, QNet.PICK]), torch.tensor([1, 0]))
+    assert torch.allclose(out[0], push[0, 1:2], atol=1e-4) and torch.allclose(out[1], pick[1], atol=1e-4)
+    (push.mean() + pick.mean()).backward()
+    assert net.context.encoder.layers[0].self_attn.in_proj_weight.grad is not None  # gradients reach the attention

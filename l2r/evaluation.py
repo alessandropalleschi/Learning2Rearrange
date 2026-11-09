@@ -66,6 +66,7 @@ def main(argv=None):
     parser.add_argument('--max_actions', type=int, default=40)
     parser.add_argument('--push_lengths', type=float, nargs='+', default=[0.08], help='must match the snapshot')
     parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic', help='must match the snapshot')
+    parser.add_argument('--backbone', choices=['conv', 'hybrid'], default='conv', help='must match the snapshot')
     parser.add_argument('--footprint_placement', action='store_true', help='must match the training setting')
     parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
                         help='must match the belief the snapshot was trained with')
@@ -75,7 +76,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     cfg = Config(max_actions=args.max_actions, belief=args.belief, placement=args.placement,
-                 push_lengths=tuple(args.push_lengths), footprint_placement=args.footprint_placement)
+                 push_lengths=tuple(args.push_lengths), footprint_placement=args.footprint_placement,
+                 backbone=args.backbone)
     params = SimParams.from_args(args)
     ws = Workspace.from_params(params)
     seed_everything(args.seed)

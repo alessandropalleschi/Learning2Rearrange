@@ -51,7 +51,8 @@ class TrainingLoop:
         self.args = args
         self.cfg = Config(start_objects=args.num_obj, max_objects=args.max_obj, max_actions=args.max_actions,
                           belief=args.belief, placement=args.placement, eps_decay=args.eps_decay,
-                          push_lengths=tuple(args.push_lengths), footprint_placement=args.footprint_placement)
+                          push_lengths=tuple(args.push_lengths), footprint_placement=args.footprint_placement,
+                          backbone=args.backbone)
         params = SimParams.from_args(args)
         self.ws = Workspace.from_params(params)  # geometry for the main process (the workers build their own)
         seed_everything(args.random_seed)
@@ -186,6 +187,8 @@ def add_arguments(parser):
                         help='selectable push lengths in m; one value = fixed (paper: 0.08), several = learned')
     parser.add_argument('--placement', choices=['heuristic', 'learned'], default='heuristic',
                         help="'learned': a Q-head chooses where to place the held object (default: rule from the paper)")
+    parser.add_argument('--backbone', choices=['conv', 'hybrid'], default='conv',
+                        help="'hybrid': transformer encoder on the 1/8-resolution bottleneck of the conv network")
     parser.add_argument('--footprint_placement', action='store_true',
                         help='keep placement targets clear of the back wall by the held object\'s depth')
     parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
