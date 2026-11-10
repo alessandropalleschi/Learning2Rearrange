@@ -159,7 +159,12 @@ class ScriptedExpert:
         """True if the object lies outside its target region but within one push (NEAR_REGION m) of it, and was not pushed
         before (a push that did not work is followed by a grasp)."""
         scene = self.env.sim.scene
-        distance = scene.goal_distance(scene.poses()[object_id][0], scene.class_name(object_id))
+        pos = scene.poses()[object_id][0]
+        if hasattr(scene, 'goal_distance'):
+            distance = scene.goal_distance(pos, scene.class_name(object_id))
+        else:  # a scene without goal geometry (bands only)
+            low, high = scene.regions[scene.class_name(object_id)]
+            distance = max(low - pos[1], pos[1] - high, 0.0)
         transfer = 0.95 if getattr(getattr(self.env.sim, 'params', None), 'pusher', 'tip') == 'paddle' else 0.5  # measured push transfer
         reach = transfer * max(max(self.cfg.push_lengths) - 0.015, 0.0)  # how far one (longest) push really moves an object
         return 0.0 < distance <= reach and self.pushes.get(object_id, 0) < 1
