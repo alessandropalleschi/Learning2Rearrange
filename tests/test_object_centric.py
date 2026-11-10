@@ -4,7 +4,7 @@ import torch
 
 from l2r.config import Config
 from l2r.learning.memory import Transition
-from l2r.learning.object_centric import CLASS_RGB, ObjectQNet, build_state, collate, rasterize, slot_of
+from l2r.learning.object_centric import CLASS_RGB, FEATURES, ObjectQNet, build_state, collate, rasterize, slot_of
 from l2r.learning.object_trainer import ObjectTrainer
 
 H, W = 128, 104
@@ -26,7 +26,7 @@ def test_instances_features_and_candidates_come_from_the_observation_only():
     state = build_state(observation(), [16])
     assert [(i.cls, i.rows.size) for i in state['instances']] == [(0, 220), (1, 220)]
     tokens = state['tokens']
-    assert tokens.shape == (1 + 3 + 2, 20)
+    assert tokens.shape == (1 + 3 + 2, FEATURES)
     assert tokens[4, 12] == 0 and tokens[5, 12] == 1  # blue: misplaced, green: inside its region
     assert tokens[4, 15] > 0.5 and tokens[5, 15] == 0  # the blue object has grey (hidden) cells behind it
     pick = state['actions'][0, 0]
@@ -89,7 +89,7 @@ def belief_for(obs, ghost_rows=(60, 70), ghost_cols=(30, 40), age=0.5):
 def test_ghost_tokens_are_remembered_stale_objects_only_and_have_no_actions():
     obs = observation()
     plain = build_state(obs, [16])
-    assert plain['ghosts'] == [] and plain['ghost_tokens'].shape == (0, 20)  # no belief: no ghosts
+    assert plain['ghosts'] == [] and plain['ghost_tokens'].shape == (0, FEATURES)  # no belief: no ghosts
     obs['belief'] = belief_for(obs)
     state = build_state(obs, [16])
     assert len(state['ghosts']) == 1 and state['ghosts'][0].cls == 0  # the remembered blue object; visible objects (age 0) are not ghosts
@@ -206,3 +206,37 @@ def test_rl_trainer_learns_placement_and_backs_the_place_value_up_to_the_grasp_u
     place = q.place[0, 0]
     assert abs(place[good[1], good[2]] + 2) < 0.5 and abs(place[bad[1], bad[2]] + 6) < 0.5
     assert abs(q.pick[1, 0][grasp[1], grasp[2]] + 2) < 0.5  # the grasp is worth the best placement (-2), not gamma x it (-1)
+
+
+def test_tokens_know_the_last_action_and_its_outcome():
+    obs = observation()
+    state = build_state(obs, [16])
+    assert not state['tokens'][4:, 20:22].any() and not state['tokens'][0, 3:9].any()  # no record: no flags
+    blue = state['instances'][0]
+    failed = dict(obs, last_action=np.array([0, 1, 0, 0, 0, 0.0], np.float32),  # a grasp that did not execute and changed nothing
+                  last_pix=np.array([int(blue.rows.mean()), int(blue.cols.max()) - 2], np.int16))
+    tokens = build_state(failed, [16])['tokens']
+    assert tokens[4, 20] == 1 and tokens[5, 20] == 0  # on the blue object, not on the green one
+    assert tokens[0, 4] == 1 and tokens[0, 7] == 0 and tokens[0, 8] == 0  # global: last was a grasp, not executed, nothing changed
+    push = dict(obs, last_action=np.array([1, 0, 0, 0, 1, 0.02], np.float32),
+                last_pix=np.array([blue.rows.min() - 3, int(blue.cols.mean())], np.int16))
+    tokens = build_state(push, [16])['tokens']
+    assert tokens[4, 21] == 1 and tokens[4, 20] == 0 and abs(tokens[0, 8] - 0.2) < 1e-6
+
+
+def test_the_agent_learns_not_to_repeat_a_grasp_that_just_failed():
+    """Same scene twice: after a failed grasp on the blue object, grasping it again is bad; otherwise it is the best action."""
+    torch.manual_seed(0)
+    cfg = Config(placement='heuristic', batch_size=8, learning_rate=3e-3, prioritized=False, reward_mode='sparse')
+    trainer = ObjectTrainer(cfg)
+    obs = observation()
+    state = trainer.info(obs)
+    blue, green = tuple(state['actions'][0, 0]), tuple(state['actions'][1, 0])
+    failed = dict(obs, last_action=np.array([0, 1, 0, 0, 0, 0.0], np.float32), last_pix=np.array(blue[1:], np.int16))
+    batch = [Transition(obs, blue, obs, 0.0, 'grasp', True), Transition(obs, green, obs, -3.0, 'grasp', True),
+             Transition(failed, blue, failed, -6.0, 'grasp', True), Transition(failed, green, failed, -3.0, 'grasp', True)] * 2
+    for _ in range(300):
+        trainer.train_step(batch)
+    fresh, after = trainer.forward_batch([obs]).pick[0, 0], trainer.forward_batch([failed]).pick[0, 0]
+    assert fresh[blue[1], blue[2]] > fresh[green[1], green[2]] + 1
+    assert after[green[1], green[2]] > after[blue[1], blue[2]] + 1

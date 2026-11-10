@@ -23,7 +23,7 @@ from l2r.sim.constants import CLASSES, COLORS, LABELS
 
 MAX_OBJECTS = 16
 MAX_GHOSTS = 8  # remembered-but-hidden objects kept as tokens
-FEATURES = 20  # 18 object features + ghost flag + age (see instance_features)
+FEATURES = 24  # 18 object features + ghost flag + age + last-action flags (see instance_features, global_features)
 COLOR_TOLERANCE = 6  # summed absolute RGB difference that still counts as the class colour
 MIN_AREA = 6  # cells (5 mm): smaller pieces are noise
 OCCLUDED_RGB = 105
@@ -116,7 +116,24 @@ def instance_features(instances, obs, height_map=None, ages=None):
         out[i, 17] = 1.0  # a real token (padding rows are all zero)
         if ages is not None:
             out[i, 18], out[i, 19] = 1.0, ages[i]  # a ghost: remembered, not visible now
+        else:
+            out[i, 20:22] = last_action_flags(inst, obs)
     return out
+
+
+def last_action_flags(inst, obs):
+    """(the previous pick / place was on this object, the previous push started next to it), from the observation's record of the
+    last action (`RearrangeEnv` adds 'last_action' and 'last_pix'; missing in older data: no flags)."""
+    if 'last_pix' not in obs or 'last_action' not in obs:
+        return 0.0, 0.0
+    row, col = (int(v) for v in obs['last_pix'])
+    if row < 0:
+        return 0.0, 0.0
+    last = np.asarray(obs['last_action'])
+    on = bool(np.any((np.abs(inst.rows - row) <= 2) & (np.abs(inst.cols - col) <= 2)))
+    beside = (inst.rows.min() - PUSH_GAP - 3 <= row <= inst.rows.max() + PUSH_GAP + 3) and \
+        (inst.cols.min() - 3 <= col <= inst.cols.max() + 3)
+    return float(on and (last[1] > 0 or last[2] > 0 or last[3] > 0)), float(beside and last[0] > 0)
 
 
 def region_features(obs):
@@ -136,6 +153,9 @@ def global_features(instances, obs, ghosts=()):
     out[0] = len(instances) / 8.0
     out[2] = len(ghosts) / 8.0
     out[1] = float((features[:, 12] == 0).mean()) if len(features) else 0.0  # fraction still misplaced
+    if 'last_action' in obs:  # previous primitive (push, grasp, place, pull), executed, changed fraction of the height map (x10)
+        last = np.asarray(obs['last_action'], np.float32)
+        out[3:7], out[7], out[8] = last[:4], last[4], min(10.0 * last[5], 1.0)
     out[17] = 1.0
     return out
 

@@ -216,3 +216,14 @@ def test_placement_space_offers_only_cells_inside_the_target_region(fake_simulat
     none = np.zeros((120, 100), np.uint8)
     none[60:110, 30:90] = 1  # no free cell in the region at all: everything else is offered (nothing else to do)
     assert placement_space(FakeSim(), 1, none, (4, 4))[60:].any()
+
+
+def test_observations_record_the_last_action_and_its_outcome(fake_simulator):
+    from l2r.config import Config
+    from l2r.envs.rearrange import LAST_ACTION_SIZE, RearrangeEnv
+    env = RearrangeEnv(Config(placement='heuristic'), num_obj=1)
+    obs = env.reset()
+    assert obs['last_action'].shape == (LAST_ACTION_SIZE,) and not obs['last_action'].any() and tuple(obs['last_pix']) == (-1, -1)
+    obs = env.step({'primitive': 'push', 'pix': (0, 50, 60)})[0]
+    assert obs['last_action'][0] == 1 and tuple(obs['last_pix']) == (50, 60)
+    assert 0.0 <= obs['last_action'][5] <= 1.0

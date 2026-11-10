@@ -58,6 +58,10 @@ def run_episode(env, seed, obs, act):
                       'misplaced_after': sum(not v[1] for v in after.values()),
                       'hidden_misplaced_after': sum((not v[1]) and (not v[2]) for v in after.values()),
                       'invalid': bool(info.get('invalid', False)),
+                      'invalid_objects': env.sim.scene.invalid_objects() if info.get('invalid') else [],
+                      'object_heights': {int(i): round(float(np.subtract(*env.sim.p.getAABB(i)[::-1])[2]), 3)
+                                         for i in (env.sim.scene.invalid_objects() if info.get('invalid') else [])},
+                      'target': target, 'held': held,
                       'placed_in_region': (bool(after[held][1]) if held in after else None) if primitive == 'place' else None})
     acts = [s for s in steps if s['primitive'] != 'place']
     if info['sorted']:
@@ -150,6 +154,9 @@ def main(argv=None):
         'actions that moved nothing': float(np.mean([s['moved'] == 0 for s in acts] or [np.nan])),
         'steps that reduced the misplaced count': float(np.mean([s['misplaced_after'] < s['misplaced_before'] for s in every] or [np.nan])),
         'steps that increased it': float(np.mean([s['misplaced_after'] > s['misplaced_before'] for s in every] or [np.nan])),
+        'invalid: the grasped/held object itself': sum(1 for s in every if s['invalid'] and s['held'] in s['invalid_objects']),
+        'invalid: another object': sum(1 for s in every if s['invalid'] and s['invalid_objects'] and s['held'] not in s['invalid_objects']),
+        'invalid: by primitive': dict(Counter(s['primitive'] for s in every if s['invalid'])),
         'placements': len(places),
         'placed in its own region': float(np.mean([s['placed_in_region'] for s in places if s['placed_in_region'] is not None] or [np.nan])),
     }

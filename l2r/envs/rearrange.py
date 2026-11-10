@@ -24,6 +24,10 @@ def decode_push(index, push_lengths):
     return np.deg2rad(direction * 180.0 - 90), push_lengths[length]
 
 
+LAST_PRIMITIVES = ('push', 'grasp', 'place', 'pull')
+LAST_ACTION_SIZE = len(LAST_PRIMITIVES) + 2  # one-hot primitive, executed, changed fraction of the height map
+
+
 def check_push(ws, depth, pix_x, pix_y, angle, push_length=0.08):
     """True if there is something in the way of the push (there must be an object to push).
     `ws` is the `Workspace` (pixel <-> metre conversion); pixel coordinates are those of the Q-maps."""
@@ -147,6 +151,8 @@ class RearrangeEnv:
         self.tracker.reset()
         self._phi = self._potential()
         self.obs = self._full_obs(None)
+        self._last_action = np.zeros(LAST_ACTION_SIZE, np.float32)  # nothing done yet
+        self._last_pix = np.array([-1, -1], np.int16)
         self._relabel_state = self._relabel_status()
         return self.compact(self.obs)
 
@@ -198,6 +204,7 @@ class RearrangeEnv:
                 self.obs = mid
                 info = {'executed': True, 'attempted': True, 'sorted': False, 'invalid': False, 'place_pix': None, 'relabel': False,
                         'episode_return': self.episode_return, 'actions': self.actions, 'phase': 'place'}
+                self._record_last(prim, pix, True, obs, mid)
                 return self.compact(mid), 0.0, False, False, info
             if executed and not learned:
                 freespace = sim.observe()['freespace']
@@ -235,6 +242,7 @@ class RearrangeEnv:
                 'actions': self.actions, 'phase': 'act', 'force_stops': sim.force_stops - stops_before,
                 'shaping': shaping}
         self.obs = next_obs
+        self._record_last(prim, pix, executed, obs, next_obs)
         return self.compact(next_obs), reward, terminated, truncated, info
 
     def _placement_space(self, held_class, freespace, extent):
@@ -279,10 +287,22 @@ class RearrangeEnv:
         """(3, 2) rows [low, high] of the target region of each class (CLASSES order) in the un-padded heightmap."""
         return np.array([[self.ws.y_to_row(y) for y in self.sim.scene.regions[name]] for name in CLASSES], np.int16)
 
+    def _record_last(self, primitive, pix, executed, before, after):
+        """What the agent may know about its previous action (no privileged information: the robot knows what it did, whether the
+        primitive completed, and can compare two height maps): primitive one-hot, executed, fraction of the cabinet's cells whose height
+        changed by more than 1 cm; and the action pixel."""
+        out = np.zeros(LAST_ACTION_SIZE, np.float32)
+        out[LAST_PRIMITIVES.index(primitive) if primitive in LAST_PRIMITIVES else 0] = 1.0
+        out[len(LAST_PRIMITIVES)] = float(bool(executed))
+        out[len(LAST_PRIMITIVES) + 1] = float((np.abs(np.asarray(after['depthmap']) - np.asarray(before['depthmap'])) > 0.01).mean())
+        self._last_action, self._last_pix = out, np.array([pix[1], pix[2]], np.int16)
+
     def compact(self, obs):
         """What leaves the environment and is stored in the replay buffer (a few 100 KB instead of ~4 MB:
         the raw camera images and the auxiliary maps are dropped)."""
-        out = {'colormap': obs['colormap'], 'depthmap': obs['depthmap'], 'regions': self._regions()}
+        out = {'colormap': obs['colormap'], 'depthmap': obs['depthmap'], 'regions': self._regions(),
+               'last_action': getattr(self, '_last_action', np.zeros(LAST_ACTION_SIZE, np.float32)),
+               'last_pix': getattr(self, '_last_pix', np.array([-1, -1], np.int16))}
         if obs.get('held_class'):  # object in the gripper (learned placement): what the place head needs
             out['held_class'] = obs['held_class']
             out['freespace'] = (obs['freespace'] > 0).astype(np.uint8)
