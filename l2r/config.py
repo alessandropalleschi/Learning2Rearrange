@@ -340,6 +340,7 @@ class SimParams:
 
     # end effector: the suction cup (default) or a parallel-jaw gripper (`--end_effector gripper`)
     end_effector: str = 'suction'
+    tilt_limit_deg: object = None           # None: the original roll / pitch check; a value: an object is toppled at this true tilt
     goal_layout: str = 'bands'              # 'bands' (paper: three bands across the width) | 'grid' (3 of 2 x 3 rectangular slots)
     pusher: str = 'tip'                     # 'tip' (the tool's own 2.6 cm tip, original) | 'paddle' (T-shaped plate during pushes)
 
@@ -383,6 +384,7 @@ class SimParams:
         params.end_effector = getattr(args, 'end_effector', 'suction')
         params.pusher = getattr(args, 'pusher', 'tip')
         params.goal_layout = getattr(args, 'goal_layout', 'bands')
+        params.tilt_limit_deg = getattr(args, 'tilt_limit_deg', None)
         params.perception_weights = getattr(args, 'perception_weights', params.perception_weights)
         params.object_types = tuple(getattr(args, 'object_types', None) or ()) or None
         return params
@@ -401,6 +403,8 @@ class SimParams:
                             help="object masks: PyBullet ground truth, or a trained segmentation network (train_perception.py)")
         parser.add_argument('--object_types', nargs='+', default=None, help='YCB types of the episodes (>= 3), e.g. to hold one out')
         parser.add_argument('--perception_weights', default='assets/perception/segnet.pth', help='weights of the network')
+        parser.add_argument('--tilt_limit_deg', type=float, default=None,
+                            help='validity: an object counts as toppled at this true tilt (degrees); default: the original roll / pitch check')
         parser.add_argument('--goal_layout', choices=['bands', 'grid'], default='bands',
                             help='target areas: bands across the cabinet width (paper) or rectangular slots of a 2 x 3 grid')
         parser.add_argument('--pusher', choices=['tip', 'paddle'], default='tip',

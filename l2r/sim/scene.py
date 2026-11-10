@@ -108,17 +108,31 @@ class Scene:
         if not poses:
             return True
         z = np.array([pos[2] for pos, _ in poses.values()])
-        roll = [abs(self.p.getEulerFromQuaternion(q)[0]) for _, q in poses.values()]
-        pitch = [abs(self.p.getEulerFromQuaternion(q)[1]) for _, q in poses.values()]
-        upright = max(roll) < 1.2 and max(pitch) < 1.2
+        limit = getattr(self.params, 'tilt_limit_deg', None)
+        if limit is not None:  # the true tilt (angle between the object's z axis and the vertical)
+            upright = max(self.tilt_deg(q) for _, q in poses.values()) < limit
+        else:  # original check: roll and pitch separately (lets e.g. roll = pitch = 1 rad, a 73 degree tilt, pass)
+            roll = [abs(self.p.getEulerFromQuaternion(q)[0]) for _, q in poses.values()]
+            pitch = [abs(self.p.getEulerFromQuaternion(q)[1]) for _, q in poses.values()]
+            upright = max(roll) < 1.2 and max(pitch) < 1.2
         return bool(np.all(z > self.ws.bounds[2][0] - 0.1) and upright)
+
+    def tilt_deg(self, quaternion):
+        """Angle (degrees) between an object's own z axis and the world z axis."""
+        R = self.p.getMatrixFromQuaternion(quaternion)
+        return float(np.degrees(np.arccos(np.clip(R[8], -1.0, 1.0))))
 
     def invalid_objects(self):
         """Ids of the objects that make the scene invalid now (fell off the floor or toppled), without stepping the simulation."""
         out = []
+        limit = getattr(self.params, 'tilt_limit_deg', None)
         for object_id, (pos, quat) in self.poses().items():
-            roll, pitch, _ = self.p.getEulerFromQuaternion(quat)
-            if pos[2] <= self.ws.bounds[2][0] - 0.1 or abs(roll) >= 1.2 or abs(pitch) >= 1.2:
+            if limit is not None:
+                toppled = self.tilt_deg(quat) >= limit
+            else:
+                roll, pitch, _ = self.p.getEulerFromQuaternion(quat)
+                toppled = abs(roll) >= 1.2 or abs(pitch) >= 1.2
+            if pos[2] <= self.ws.bounds[2][0] - 0.1 or toppled:
                 out.append(int(object_id))
         return out
 
