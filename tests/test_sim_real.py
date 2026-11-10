@@ -165,3 +165,22 @@ def test_grid_goal_slots_decide_success_by_position():
     other = next(s for k, s in scene.slots.items() if k != key)
     p.resetBasePositionAndOrientation(uid, ((other[0] + other[1]) / 2, (other[2] + other[3]) / 2, pos[2]), orn)
     assert scene.fraction_sorted() == 0.0 and scene.goal_distance(p.getBasePositionAndOrientation(uid)[0], key) > 0
+
+
+def test_planning_expert_restores_the_scene_after_trying_its_candidates():
+    from l2r.config import Config
+    from l2r.envs.rearrange import RearrangeEnv
+    from l2r.planner import PlanningExpert
+    env = RearrangeEnv(Config(placement='learned', footprint_placement=True, max_actions=10), num_obj=4, params=SimParams())
+    env.reset(num_obj=4, seed=11)
+    expert = PlanningExpert(env, candidates=3, horizon=1)
+    before = env.sim.scene.positions().copy()
+    actions_before, obs_before = env.actions, env.obs
+    choice = expert.act()
+    assert choice is not None and choice[0] in ('grasp', 'push')
+    assert np.abs(env.sim.scene.positions() - before).max() < 1e-4  # every trial was undone
+    assert env.actions == actions_before and not env.holding and np.array_equal(env.obs['depthmap'], obs_before['depthmap'])
+    if len(getattr(expert, 'last_scores', [])) > 1:
+        assert len({round(s, 3) for _, s in expert.last_scores}) >= 1
+    _, _, _, _, info = env.step({'primitive': choice[0], 'pix': choice[1]})  # the chosen action executes normally
+    assert 'executed' in info

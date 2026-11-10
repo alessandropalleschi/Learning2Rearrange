@@ -115,11 +115,11 @@ def main(argv=None):
     env = make_env(cfg, False, args.objects, params, args.base_seed)
 
     if args.expert:
-        from l2r.demos import ScriptedExpert
+        from l2r.demos import make_expert
 
         def run_one(seed):
             obs = env.reset(num_obj=args.objects, seed=seed)
-            expert = ScriptedExpert(env)
+            expert = make_expert(env)
 
             def act(_):
                 choice = expert.act()

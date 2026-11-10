@@ -251,6 +251,15 @@ class ScriptedExpert:
         return None
 
 
+def make_expert(env):
+    """The scripted expert, or the planning expert (`cfg.expert_planner` = number of candidates tried per decision)."""
+    k = int(getattr(env.cfg, 'expert_planner', 0) or 0)
+    if k > 0:
+        from l2r.planner import PlanningExpert
+        return PlanningExpert(env, candidates=k, horizon=int(getattr(env.cfg, 'planner_horizon', 3)))
+    return ScriptedExpert(env)
+
+
 def record_episodes(env, episodes, num_objects, seed=0, max_steps=40, log=print):
     """Run the expert; returns (list of transitions as tuples, statistics). Transitions are
     (state, action, next_state, reward, primitive, done) like the training loop's, with the hindsight pair added."""
@@ -260,7 +269,7 @@ def record_episodes(env, episodes, num_objects, seed=0, max_steps=40, log=print)
     for episode in range(episodes):
         count = int(rng.integers(num_objects[0], num_objects[1] + 1))
         obs = env.reset(num_obj=count, seed=seed * 100003 + episode)
-        expert, steps, success = ScriptedExpert(env), 0, False
+        expert, steps, success = make_expert(env), 0, False
         while steps < max_steps:
             choice = expert.act()
             if choice is None:

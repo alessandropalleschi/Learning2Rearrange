@@ -7,7 +7,7 @@ Works with any variant of `arch_benchmark` (`train_step(batch)`, `predict(obs) -
 first three, so it is not a valid RL transition and must not be used for TD targets."""
 import numpy as np
 
-from l2r.demos import ScriptedExpert
+from l2r.demos import make_expert
 
 
 def collect_round(variant, env, episodes, num_objects, beta, rng, seed, max_steps=20, log=print):
@@ -18,7 +18,7 @@ def collect_round(variant, env, episodes, num_objects, beta, rng, seed, max_step
     for episode in range(episodes):
         count = int(rng.integers(num_objects[0], num_objects[1] + 1))
         obs = env.reset(num_obj=count, seed=seed * 100003 + episode)
-        expert, steps, success = ScriptedExpert(env), 0, False
+        expert, steps, success = make_expert(env), 0, False
         while steps < max_steps:
             choice = expert.act()
             if choice is None:

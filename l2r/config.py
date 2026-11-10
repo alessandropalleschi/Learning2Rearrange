@@ -99,6 +99,8 @@ class Config:
     #     (conditioned on the class of the held object, restricted to free cells) ---
     placement: str = 'heuristic'
     place_corridor: bool = False  # heuristic placement: prefer cells whose straight-in corridor has no other object (env/expert)
+    expert_planner: int = 0  # > 0: the planning expert tries this many candidate actions per decision in the simulator
+    planner_horizon: int = 3  # scripted-expert steps simulated after each candidate
     expert_ordering: bool = False  # scripted expert: least blocked target first, clear the blocker of a blocked grasp first
     grasp_approach: str = 'straight'  # 'straight' (original) | 'clear': the env picks the approach line with the fewest obstacles
     placement_space: str = 'depth'  # with footprint_placement: 'depth' = keep the back wall clear (original); 'region' = fit the whole
@@ -151,7 +153,7 @@ class Config:
                    max_actions=get('max_actions', defaults.max_actions), batch_size=get('batch_size', defaults.batch_size), belief=get('belief', 'none'),
                    placement=get('placement', 'heuristic'), eps_decay=get('eps_decay', defaults.eps_decay),
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
-                   footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), grasp_approach=get('grasp_approach', 'straight'), expert_ordering=get('expert_ordering', False), place_corridor=get('place_corridor', False), backbone=get('backbone', 'conv'),
+                   footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), grasp_approach=get('grasp_approach', 'straight'), expert_ordering=get('expert_ordering', False), expert_planner=get('expert_planner', 0), planner_horizon=get('planner_horizon', 3), place_corridor=get('place_corridor', False), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
                    hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), arch_decoder=get('arch_decoder', 'plain'), arch_encoder=get('arch_encoder', 'resnet'), policy_topk=get('policy_topk', 10), arch_skips=get('arch_skips', False), arch_stride4=get('arch_stride4', False),
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
@@ -239,6 +241,8 @@ class Config:
         parser.add_argument('--eps_end', type=float, default=0.01, help='floor of the epsilon-greedy exploration')
         parser.add_argument('--place_corridor', action='store_true', default=False,
                             help='heuristic placement: prefer cells whose carry-in corridor is free of other objects')
+        parser.add_argument('--expert_planner', type=int, default=0, help='planning expert: candidates tried per decision (0 = rules only)')
+        parser.add_argument('--planner_horizon', type=int, default=3, help='planning expert: scripted steps simulated after each candidate')
         parser.add_argument('--expert_ordering', action='store_true', default=False,
                             help='scripted expert: least blocked target first; clear the main blocker of a blocked grasp first')
         parser.add_argument('--grasp_approach', choices=['straight', 'clear'], default='straight',
