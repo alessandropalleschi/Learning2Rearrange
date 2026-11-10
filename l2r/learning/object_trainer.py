@@ -76,6 +76,9 @@ class ObjectTrainer(Trainer):
             else:
                 q = net(tokens, n_objects).float().cpu().numpy()
             q = self._acting_scores(net, tokens, n_objects, q)
+            if self._masking(network):  # learned feasibility: candidates predicted to fail or to change nothing are dropped
+                keep = self._feasible(torch.sigmoid(net.outcomes(tokens, n_objects)), collate(states, DEVICE)[2])
+                q = np.where(keep.cpu().numpy(), q, -1000.0)
             risk = self.cfg.outcome_penalty * abs(self.cfg.reward_invalid) if self.outcome and network == 'policy' else 0.0
             if risk:  # act cautiously: subtract the expected cost of making the scene invalid (the outcome model's P(invalid))
                 q = q - risk * torch.sigmoid(net.outcomes(tokens, n_objects)[..., 1]).float().cpu().numpy()
@@ -86,7 +89,12 @@ class ObjectTrainer(Trainer):
         place = np.full_like(pick, -1000.0)
         if self.learned_place and any(len(s['place_tokens']) for s in states):
             with torch.no_grad():
-                if risk:
+                if self._masking(network):
+                    place_tokens, place_valid = collate_place(states, DEVICE)
+                    _, outcome = net.place_values(tokens, n_objects, place_tokens, with_outcome=True)
+                    keep = self._feasible(torch.sigmoid(outcome), place_valid).cpu().numpy()
+                    values = np.where(keep, self._acting_place_scores(net, tokens, n_objects, place_tokens).float().cpu().numpy(), -1000.0)
+                elif risk:
                     values, outcome = net.place_values(tokens, n_objects, collate_place(states, DEVICE)[0], with_outcome=True)
                     values = (values - risk * torch.sigmoid(outcome[..., 1])).float().cpu().numpy()
                 else:
@@ -107,6 +115,19 @@ class ObjectTrainer(Trainer):
         prim[:, 2] = place.reshape(len(states), -1).max(1)
         return QMaps(push, pick, place, None, lengths, prim.astype(np.float32))
 
+    def _masking(self, network='policy'):
+        return self.outcome and self.cfg.outcome_mask > 0 and network == 'policy'
+
+    def _feasible(self, prob, valid):
+        """prob (..., OUTCOMES) outcome probabilities, valid (...) bool -> valid candidates predicted to execute AND change the scene
+        (P >= cfg.outcome_mask); a state (first dimension) whose candidates would all be dropped keeps its valid ones."""
+        tau = self.cfg.outcome_mask
+        keep = valid & (prob[..., 0] >= tau) & (prob[..., 2] >= tau)
+        empty = ~keep.flatten(1).any(1)
+        if empty.any():
+            keep[empty] = valid[empty]
+        return keep
+
     def _acting_scores(self, net, tokens, counts, q):
         """What the greedy action maximises over the object-action slots (numpy (B, N, S)): the Q-values (subclasses: a policy)."""
         return q
@@ -125,6 +146,8 @@ class ObjectTrainer(Trainer):
         if acting:
             group = [nexts[k] for k in acting]
             tokens_n, n_n, valid_n = collate(group, DEVICE)
+            if self.outcome and self.cfg.outcome_mask > 0:
+                valid_n = self._feasible(torch.sigmoid(self.model.outcomes(tokens_n, n_n)), valid_n)
             if self.continuous:  # the target critic values the policy actor's lengths
                 pol_q, pol_actor, _ = self.model.forward_full(tokens_n, n_n)
                 pol = pol_q.masked_fill(~valid_n, neg).flatten(1)
@@ -139,6 +162,9 @@ class ObjectTrainer(Trainer):
             group = [nexts[k] for k in holding]
             tokens_n, n_n, _ = collate(group, DEVICE)
             place_n, place_valid = collate_place(group, DEVICE)
+            if self.outcome and self.cfg.outcome_mask > 0:
+                _, outcome = self.model.place_values(tokens_n, n_n, place_n, with_outcome=True)
+                place_valid = self._feasible(torch.sigmoid(outcome), place_valid)
             pol = self.model.place_values(tokens_n, n_n, place_n).masked_fill(~place_valid, neg)
             tgt = self.model_target.place_values(tokens_n, n_n, place_n, heads=True).min(0).values
             future[holding] = tgt.gather(1, pol.argmax(1, keepdim=True))[:, 0]

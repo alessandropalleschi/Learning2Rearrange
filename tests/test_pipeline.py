@@ -50,6 +50,8 @@ def test_learned_placement_is_a_two_step_action(fake_simulator):
     ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--object_algo', 'iql', '--twin_q', '--n_step', '3']),
     ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--object_algo', 'iql', '--skill_params', '--twin_q']),
     ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--object_algo', 'iql', '--history_tokens']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--outcome_weight', '0.5', '--outcome_mask', '0.3']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--object_algo', 'iql', '--outcome_weight', '0.5', '--outcome_mask', '0.3']),
     ('none', 'learned', (0.08,), ['--arch_skips', '--n_step', '3']),
     ('none', 'learned', (0.08,), ['--agent', 'policy_critic']),
     ('none', 'learned', (0.08,), ['--arch_skips', '--region_channels', '--equiv_targets']),

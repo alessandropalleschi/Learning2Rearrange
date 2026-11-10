@@ -88,6 +88,7 @@ class Config:
     n_step: int = 1                   # > 1: n-step returns in the replay (see l2r/learning/nstep.py)
     twin_q: bool = False              # object agent: two value heads, TD targets from their minimum (TD3-style clipped double Q)
     outcome_weight: float = 0.0       # > 0: object agent outcome heads (executed / invalid / changed) trained with this weight
+    outcome_mask: float = 0.0         # > 0: drop candidates whose predicted P(executed) or P(changed) is below this (learned mask)
     outcome_penalty: float = 0.0      # > 0: action selection subtracts this x predicted P(invalid) x |reward_invalid| from Q
     demo_anneal_steps: int = 0        # > 0: the demonstration share (and with it the margin loss) fades linearly to 0 over this many
                                       #      gradient steps of RL, so the demonstrations bootstrap the agent without capping it
@@ -154,7 +155,7 @@ class Config:
                    equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
                    grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), demo_anneal_steps=get('demo_anneal_steps', defaults.demo_anneal_steps),
                    twin_q=get('twin_q', False), n_step=get('n_step', 1), object_algo=get('object_algo', 'dqn'), skill_params=get('skill_params', False), history_tokens=get('history_tokens', False),
-                   iql_expectile=get('iql_expectile', 0.8), iql_beta=get('iql_beta', 3.0), outcome_weight=get('outcome_weight', 0.0), outcome_penalty=get('outcome_penalty', 0.0),
+                   iql_expectile=get('iql_expectile', 0.8), iql_beta=get('iql_beta', 3.0), outcome_weight=get('outcome_weight', 0.0), outcome_penalty=get('outcome_penalty', 0.0), outcome_mask=get('outcome_mask', 0.0),
                    eps_end=get('eps_end', defaults.eps_end), eps_start=get('eps_start', defaults.eps_start), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
@@ -223,6 +224,8 @@ class Config:
                             help='object agent: clipped double Q (two value heads, targets from their minimum)')
         parser.add_argument('--outcome_weight', type=float, default=0.0,
                             help='object agent: weight of the outcome heads (executed / invalid / changed, free labels; 0 = off)')
+        parser.add_argument('--outcome_mask', type=float, default=0.0,
+                            help='object agent: learned feasibility mask from the outcome heads (threshold on P(executed), P(changed); 0 = off)')
         parser.add_argument('--outcome_penalty', type=float, default=0.0,
                             help='object agent: subtract this x P(invalid) x |reward_invalid| from Q when acting')
         parser.add_argument('--demo_anneal_steps', type=int, default=0,

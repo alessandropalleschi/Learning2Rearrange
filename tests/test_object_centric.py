@@ -368,3 +368,29 @@ def test_carry_builds_the_history_newest_first_and_only_when_enabled():
         current = nxt
     assert current['history'].shape == (HISTORY, 24) and current['history'][0, 5] == 1  # newest (a push) first
     assert 'history' not in carry(off, dict(obs), None, 'grasp', (0, 40, 40), None, obs)
+
+
+def test_outcome_mask_drops_candidates_predicted_to_fail_when_acting_and_in_targets():
+    torch.manual_seed(0)
+    cfg = Config(placement='heuristic', batch_size=8, learning_rate=3e-3, prioritized=False, reward_mode='sparse', outcome_weight=1.0)
+    trainer = ObjectTrainer(cfg)
+    obs = observation()
+    state = trainer.info(obs)
+    blue, green = tuple(state['actions'][0, 0]), tuple(state['actions'][1, 0])
+    failed = dict(obs, last_action=np.array([0, 1, 0, 0, 0, 0.0, 0], np.float32))  # not executed, nothing changed
+    worked = dict(obs, last_action=np.array([0, 1, 0, 0, 1, 0.2, 0], np.float32))
+    # the grasp on blue is (slightly) better valued but never executes; the green one works
+    batch = [Transition(obs, blue, failed, -1.0, 'grasp', True), Transition(obs, green, worked, -1.3, 'grasp', True)] * 4
+    for _ in range(300):
+        trainer.train_step(batch)
+    pick = trainer.forward_batch([obs]).pick[0, 0]
+    assert pick[blue[1], blue[2]] > pick[green[1], green[2]]  # without the mask: the failing grasp wins
+    trainer.cfg.outcome_mask = 0.5
+    masked = trainer.forward_batch([obs]).pick[0, 0]
+    assert masked[blue[1], blue[2]] == -1000.0 and masked[green[1], green[2]] > -1000.0
+    tokens, counts, valid = collate([state], DEVICE)
+    with torch.no_grad():
+        keep = trainer._feasible(torch.sigmoid(trainer.model.outcomes(tokens, counts)), valid)
+    assert not keep[0, 0, 0] and keep[0, 1, 0]
+    nothing = trainer._feasible(torch.zeros(1, 2, 3, 3, device=DEVICE), valid)  # everything predicted to fail: keep the valid ones
+    assert torch.equal(nothing, valid)
