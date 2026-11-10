@@ -1,0 +1,164 @@
+"""Inverse kinematics and the streaming Cartesian controller of the native MuJoCo robot.
+
+`Kinematics`: damped least squares on a private MjData (never disturbs the simulation), position + orientation of a site,
+joint limits, multi-start for a first solution.
+
+`Controller`: the way a real UR driver follows a Cartesian path (servoL-like): the tip target moves along a straight line at a
+constant speed (with a short ramp); every control tick (`substeps` physics steps) one damped-least-squares step from the
+*commanded* configuration towards the target gives the next joint command, limited to the joint velocity limits. No stop at
+every waypoint. A move ends when the target is reached and the measured tip is within tolerance, or early when the flange
+force / torque sensor exceeds a limit (filtered, debounced; tared at the start of the move), or a caller's `stop` test is true."""
+from dataclasses import dataclass
+
+import mujoco
+import numpy as np
+
+from l2r.sim.mj.robot import ARM_JOINTS
+
+V_MAX = np.array([0.5, 3.14, 3.14, 3.14, 6.28, 6.28, 6.28])  # slide m/s, joints rad/s (UR5e limits)
+
+
+def pose_error(target_pos, target_rot, pos, rot, rot_weight=1.0):
+    """6-vector (position error, rotation error as a world-frame rotation vector * rot_weight)."""
+    q_t, q_c, err = np.zeros(4), np.zeros(4), np.zeros(3)
+    mujoco.mju_mat2Quat(q_t, np.asarray(target_rot, float).flatten())
+    mujoco.mju_mat2Quat(q_c, np.asarray(rot, float).flatten())
+    mujoco.mju_subQuat(err, q_t, q_c)  # in the current frame
+    return np.concatenate([np.asarray(target_pos) - pos, rot_weight * (np.asarray(rot).reshape(3, 3) @ err)])
+
+
+class Kinematics:
+    def __init__(self, model, site='tip'):
+        self.m, self.d = model, mujoco.MjData(model)
+        self.site = model.site(site).id
+        self.joints = [model.joint(n).id for n in ARM_JOINTS]
+        self.qadr = np.array([model.jnt_qposadr[j] for j in self.joints])
+        self.dofs = np.array([model.jnt_dofadr[j] for j in self.joints])
+        self.low = np.array([model.jnt_range[j][0] for j in self.joints])
+        self.high = np.array([model.jnt_range[j][1] for j in self.joints])
+        self._jp, self._jr = np.zeros((3, model.nv)), np.zeros((3, model.nv))
+
+    def forward(self, q):
+        """(tip position, tip rotation 3x3) of the arm configuration q (7)."""
+        self.d.qpos[self.qadr] = q
+        mujoco.mj_kinematics(self.m, self.d)
+        return self.d.site_xpos[self.site].copy(), self.d.site_xmat[self.site].reshape(3, 3).copy()
+
+    def jacobian(self, q):
+        self.forward(q)
+        mujoco.mj_comPos(self.m, self.d)
+        mujoco.mj_jacSite(self.m, self.d, self._jp, self._jr, self.site)
+        return np.vstack([self._jp, self._jr])[:, self.dofs]
+
+    def step(self, q, target_pos, target_rot, damping=1e-3, rot_weight=0.3, max_step=0.2):
+        """One damped-least-squares step from q towards the target; returns (new q, error norm before the step)."""
+        pos, rot = self.forward(q)
+        error = pose_error(target_pos, target_rot, pos, rot, rot_weight)
+        J = self.jacobian(q)
+        J[3:] *= rot_weight
+        dq = J.T @ np.linalg.solve(J @ J.T + damping * np.eye(6), error)
+        scale = max(1.0, np.abs(dq).max() / max_step)
+        return np.clip(q + dq / scale, self.low, self.high), float(np.linalg.norm(error))
+
+    def solve(self, q0, target_pos, target_rot, iterations=300, tol_pos=1e-3, tol_rot=1e-2):
+        q = np.array(q0, float)
+        for _ in range(iterations):
+            pos, rot = self.forward(q)
+            error = pose_error(target_pos, target_rot, pos, rot)
+            if np.linalg.norm(error[:3]) < tol_pos and np.linalg.norm(error[3:]) < tol_rot:
+                return q, True
+            q, _ = self.step(q, target_pos, target_rot)
+        return q, False
+
+    def solve_multistart(self, target_pos, target_rot, seeds, rng, starts=16, accept=None):
+        """First solution (from `seeds`, then random starts) that passes `accept(q)` (e.g. collision free)."""
+        candidates = list(seeds) + [rng.uniform(np.maximum(self.low, -np.pi), np.minimum(self.high, np.pi))
+                                    for _ in range(starts)]
+        for q0 in candidates:
+            q0 = np.array(q0, float)
+            q0[0] = np.clip(target_pos[1], self.low[0], self.high[0])
+            q, ok = self.solve(q0, target_pos, target_rot)
+            if ok and (accept is None or accept(q)):
+                return q
+        return None
+
+
+@dataclass
+class MoveResult:
+    reached: bool
+    force_stop: bool = False
+    stopped: bool = False  # the caller's stop test
+    steps: int = 0
+    max_force: float = 0.0
+
+
+class Controller:
+    def __init__(self, model, data, kinematics, substeps=4, force_window=5, force_debounce=2):
+        self.m, self.d, self.k = model, data, kinematics
+        self.substeps = substeps
+        self.acts = np.array([model.actuator(n if n == 'slide' else n.replace('_joint', '')).id for n in ARM_JOINTS])
+        self.dt = model.opt.timestep * substeps
+        self.force_sensor = model.sensor('ft_force')
+        self.force_window, self.force_debounce = force_window, force_debounce
+        self.command = self.measured()
+
+    def measured(self):
+        return self.d.qpos[self.k.qadr].copy()
+
+    def tip(self):
+        return self.d.site_xpos[self.k.site].copy(), self.d.site_xmat[self.k.site].reshape(3, 3).copy()
+
+    def flange_force(self):
+        a = self.force_sensor.adr[0]
+        return self.d.sensordata[a:a + 3].copy()
+
+    def _tick(self):
+        self.d.ctrl[self.acts] = self.command
+        for _ in range(self.substeps):
+            mujoco.mj_step(self.m, self.d)
+
+    def hold(self, ticks=1):
+        for _ in range(ticks):
+            self._tick()
+
+    def move_joints(self, goal, tol=3e-3, max_time=6.0):
+        """Rate-limited joint move from the current command to `goal`; returns MoveResult."""
+        goal = np.clip(np.asarray(goal, float), self.k.low, self.k.high)
+        self.command = self.measured()
+        for tick in range(int(max_time / self.dt)):
+            self.command = self.command + np.clip(goal - self.command, -V_MAX * 0.5 * self.dt, V_MAX * 0.5 * self.dt)
+            self._tick()
+            if np.allclose(self.command, goal) and np.abs(self.measured() - goal).max() < tol \
+                    and np.abs(self.d.qvel[self.k.dofs]).max() < 0.05:
+                return MoveResult(True, steps=(tick + 1) * self.substeps)
+        return MoveResult(False, steps=int(max_time / self.dt) * self.substeps)
+
+    def move_line(self, end_pos, end_rot=None, speed=0.1, force_limit=None, stop=None, tol=2e-3, max_time=10.0):
+        """Tip along a straight line from where it is to `end_pos` (orientation kept, or `end_rot`) at `speed` m/s."""
+        start_pos, start_rot = self.tip()
+        end_rot = start_rot if end_rot is None else np.asarray(end_rot)
+        length = float(np.linalg.norm(np.asarray(end_pos) - start_pos))
+        duration = max(length / speed, self.dt)
+        self.command = self.measured()
+        history, over, peak = [], 0, 0.0
+        bias = self.flange_force()
+        for tick in range(int(max_time / self.dt)):
+            s = min(1.0, (tick + 1) * self.dt / duration)
+            s_smooth = s * s * (3 - 2 * s)  # smooth start and stop
+            target = start_pos + s_smooth * (np.asarray(end_pos) - start_pos)
+            target_rot = end_rot if s >= 1.0 else end_rot  # orientation: held at the end orientation
+            q_next, _ = self.k.step(self.command, target, target_rot)
+            self.command = self.command + np.clip(q_next - self.command, -V_MAX * self.dt, V_MAX * self.dt)
+            self._tick()
+            if force_limit is not None:
+                history.append(np.linalg.norm(self.flange_force() - bias))
+                filtered = float(np.median(history[-self.force_window:]))
+                peak = max(peak, filtered)
+                over = over + 1 if filtered > force_limit else 0
+                if over >= self.force_debounce:
+                    return MoveResult(False, force_stop=True, steps=(tick + 1) * self.substeps, max_force=peak)
+            if stop is not None and stop():
+                return MoveResult(True, stopped=True, steps=(tick + 1) * self.substeps, max_force=peak)
+            if s >= 1.0 and np.linalg.norm(self.tip()[0] - end_pos) < tol:
+                return MoveResult(True, steps=(tick + 1) * self.substeps, max_force=peak)
+        return MoveResult(False, steps=int(max_time / self.dt) * self.substeps, max_force=peak)
