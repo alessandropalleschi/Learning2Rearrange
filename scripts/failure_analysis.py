@@ -44,11 +44,13 @@ def run_episode(env, seed, obs, act):
     held = None
     while not (terminated or truncated):
         before = scene_state(env)
-        primitive, pix = act(obs)
+        chosen = act(obs)
+        primitive, pix = chosen[0], chosen[1]
+        q_value = chosen[2] if len(chosen) > 2 else None
         target = int(env.obs['idmap'][pix[1], pix[2]]) if primitive in ('grasp', 'push') else None
         if primitive == 'grasp':
             held = target
-        obs, _, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix})
+        obs, reward, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix})
         after = scene_state(env)
         moved = [i for i in before if i in after and np.linalg.norm(after[i][0][:2] - before[i][0][:2]) > MOVED]
         steps.append({'primitive': primitive, 'pix': [float(v) for v in pix], 'executed': bool(info['executed']),
@@ -62,7 +64,14 @@ def run_episode(env, seed, obs, act):
                       'object_heights': {int(i): round(float(np.subtract(*env.sim.p.getAABB(i)[::-1])[2]), 3)
                                          for i in (env.sim.scene.invalid_objects() if info.get('invalid') else [])},
                       'target': target, 'held': held,
-                      'placed_in_region': (bool(after[held][1]) if held in after else None) if primitive == 'place' else None})
+                      'placed_in_region': (bool(after[held][1]) if held in after else None) if primitive == 'place' else None,
+                      'q': q_value, 'reward': float(reward), 'terminal': bool(terminated)})
+    gamma = env.cfg.gamma
+    future = 0.0  # realised return from each step (as the trainer discounts: the grasp -> place step is not discounted)
+    for s in reversed(steps):
+        discount = 1.0 if s['phase'] == 'place' else gamma
+        future = s['reward'] + (0.0 if s['terminal'] else discount * future)
+        s['return'] = future
     acts = [s for s in steps if s['primitive'] != 'place']
     if info['sorted']:
         outcome, reason = 'sorted', ''
@@ -126,8 +135,8 @@ def main(argv=None):
 
         def act(obs):
             q = trainer.forward_batch([obs])
-            primitive, pix, _ = select_for(trainer, obs, q, 0, 0.0, cfg, ws)
-            return primitive, pix
+            primitive, pix, value = select_for(trainer, obs, q, 0, 0.0, cfg, ws)
+            return primitive, pix, value
 
         def run_one(seed):
             obs = attach_initial(trainer, env.reset(num_obj=args.objects, seed=seed))
@@ -160,6 +169,18 @@ def main(argv=None):
         'placements': len(places),
         'placed in its own region': float(np.mean([s['placed_in_region'] for s in places if s['placed_in_region'] is not None] or [np.nan])),
     }
+    valued = [s for s in every if s.get('q') is not None]
+    if valued:  # overestimation: predicted Q of the chosen action minus the return that followed
+        bias = lambda sel: float(np.mean([s['q'] - s['return'] for s in sel])) if sel else float('nan')
+        summary['Q - return (all)'] = bias(valued)
+        summary['Q - return (finished episodes only)'] = bias([s for e in episodes if e['outcome'] != 'out of actions'
+                                                               for s in e['steps'] if s.get('q') is not None])
+        for name in ('grasp', 'push', 'place'):
+            summary['Q - return (%s)' % name] = bias([s for s in valued if s['primitive'] == name])
+        summary['grasp on a placed object: Q - return'] = bias([s for s in valued if s['primitive'] == 'grasp'
+                                                                and s['target_misplaced'] is False])
+        summary['mean Q of the chosen actions'] = float(np.mean([s['q'] for s in valued]))
+        summary['mean realised return'] = float(np.mean([s['return'] for s in valued]))
     print(json.dumps(summary, indent=1))
     if args.out:
         with open(args.out, 'w') as f:
