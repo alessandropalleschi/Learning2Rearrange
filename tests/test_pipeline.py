@@ -44,6 +44,7 @@ def test_learned_placement_is_a_two_step_action(fake_simulator):
 @pytest.mark.parametrize('belief,placement,push_lengths,extra', [
     ('none', 'heuristic', (0.08,), ['--hierarchy']),
     ('none', 'heuristic', (0.08,), ['--agent', 'object']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy']),  # learned placement + continuous length + ghost tokens
     ('none', 'learned', (0.08,), ['--agent', 'policy_critic']),
     ('none', 'learned', (0.08,), ['--arch_skips', '--region_channels', '--equiv_targets']),
     ('none', 'heuristic', (0.08,), ['--end_effector', 'gripper', '--jaw_yaws', '3']),

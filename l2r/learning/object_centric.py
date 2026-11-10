@@ -30,8 +30,8 @@ OCCLUDED_RGB = 105
 GRASP_DEPTH_CELLS = 2  # aim this many cells behind the front-most cell (see demos.GRASP_DEPTH_CELLS)
 PUSH_GAP = 3  # cells between the blade start and the object
 TYPE_INSTANCE, TYPE_REGION, TYPE_GLOBAL, TYPE_GHOST = 0, 1, 2, 3
-PLACE_STRIDE = 2  # cells between place candidates (a grid over the free cells the held object fits in)
-MAX_PLACE = 384  # place candidates kept (evenly subsampled beyond)
+PLACE_STRIDE = 2  # cells between place candidates (finest) (a grid over the free cells the held object fits in)
+MAX_PLACE = 512  # at most this many place candidates (the grid gets coarser beyond)
 PLACE_FEATURES = 12
 CLASS_RGB = np.array([np.multiply(COLORS[name][:3], 255) for name in CLASSES]).round().astype(int)
 
@@ -187,14 +187,16 @@ def place_candidates(obs):
         return np.zeros((0, 3), np.int64), np.zeros((0, PLACE_FEATURES), np.float32)
     free = np.asarray(obs['freespace']) > 0
     h, w = free.shape
-    grid = np.zeros_like(free)
-    grid[::PLACE_STRIDE, ::PLACE_STRIDE] = True
-    rows, cols = np.nonzero(free & grid)
+    stride = PLACE_STRIDE
+    while True:  # the finest regular grid with at most MAX_PLACE free cells (uniform coverage of large free spaces)
+        rows, cols = np.nonzero(free[::stride, ::stride])
+        if rows.size <= MAX_PLACE:
+            rows, cols = rows * stride, cols * stride
+            break
+        stride += 1
     if rows.size == 0:
         rows, cols = np.nonzero(free)
-    if rows.size > MAX_PLACE:
-        keep = np.linspace(0, rows.size - 1, MAX_PLACE).astype(int)
-        rows, cols = rows[keep], cols[keep]
+        rows, cols = rows[:MAX_PLACE], cols[:MAX_PLACE]
     cls = CLASSES.index({v: k for k, v in LABELS.items()}[int(obs['held_class'])])  # class-map label (1 / 3 / 5) -> CLASSES index
     low, high = np.asarray(obs['regions'], np.float32)[cls]
     raised = crop(obs['depthmap']) > 0.008

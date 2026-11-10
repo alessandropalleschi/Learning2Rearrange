@@ -41,6 +41,8 @@ VARIANTS = {
     'object+continuous': dict(agent='object', placement='heuristic', hierarchy=True),
     'object+place': dict(agent='object', placement='learned'),
     'object+learned': dict(agent='object', placement='learned', hierarchy=True),  # learned placement and continuous push length
+    'object+place+belief': dict(agent='object', placement='learned', belief='spatial'),  # ghost tokens from the spatial belief
+    'skips+belief': dict(arch_skips=True, belief='spatial'),  # belief channels as network input
     'unet+convnext+ppm': dict(arch_skips=True, arch_encoder='convnext', backbone='ppm'),
     'unet+convnext+aspp': dict(arch_skips=True, arch_encoder='convnext', backbone='aspp'),
     'unet+aspp': dict(arch_skips=True, backbone='aspp'),

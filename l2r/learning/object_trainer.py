@@ -7,7 +7,8 @@ import torch
 import torch.nn.functional as F
 
 from l2r.learning.models import DEVICE
-from l2r.learning.object_centric import ObjectQNet, ObjectQNetContinuous, build_state, collate, collate_place, rasterize, slot_of
+from l2r.learning.object_centric import (ObjectQNet, ObjectQNetContinuous, build_state, collate, collate_place, place_index_of, rasterize,
+                                         slot_of)
 from l2r.learning.trainer import QMaps, Trainer
 
 CACHE_SIZE = 2048  # extracted states kept (the replay buffer re-uses observations many times)
@@ -15,13 +16,10 @@ CACHE_SIZE = 2048  # extracted states kept (the replay buffer re-uses observatio
 
 class ObjectTrainer(Trainer):
     def __init__(self, cfg=None, is_testing=False, load_snapshot=False, snapshot=None, snapshot_target=None, imitation=False):
-        """imitation: the network is trained by a supervised loss (`arch_benchmark.ObjectVariant`, DAgger), which supports learned
-        placement; the TD update of `train_step` does not train the place head yet."""
+        """imitation: the network is trained by a supervised loss (`arch_benchmark.ObjectVariant`, DAgger) instead of `train_step`
+        (kept for the call sites; both support learned placement)."""
         super().__init__(cfg, is_testing, False, None, None)  # builds the dense network we replace below: cheap
         self.learned_place = self.cfg.placement == 'learned'
-        if self.learned_place and not imitation:
-            raise ValueError("RL with the object-centric agent uses the heuristic placement (--placement heuristic); learned placement is "
-                             "trained by imitation only for now")
         self.n_slots = 1 + 2 * len(self.cfg.push_lengths)
         self.continuous = bool(self.cfg.hierarchy)  # --agent object --hierarchy: a continuous push length (actor + length-conditioned critic)
         if self.continuous:
@@ -97,23 +95,16 @@ class ObjectTrainer(Trainer):
         return QMaps(push, pick, place, None, lengths, prim.astype(np.float32))
 
     # ------------------------------------------------------------------ learning
-    def train_step(self, transitions, weights=None, demo=None):
-        """Double DQN on the taken object-action slot; for demonstration samples also a large margin over the other valid slots.
-        Samples whose action matches no candidate slot are skipped (they carry no gradient)."""
-        B = len(transitions)
-        states = [self.info(t.state) for t in transitions]
-        slots = [slot_of(s, t.primitive_action, t.action) for s, t in zip(states, transitions)]
-        keep = [i for i, slot in enumerate(slots) if slot is not None]
-        self.last_td = np.zeros(B, np.float32)
-        if not keep:
-            return 0.0
-        nexts = [self.info(transitions[i].next_state) for i in keep]
-        reward = torch.tensor([float(transitions[i].reward) for i in keep], device=DEVICE)
-        done = torch.tensor([float(transitions[i].done) for i in keep], device=DEVICE)
-
-        with torch.no_grad():  # double DQN: the policy network picks the next slot, the target network values it
-            tokens_n, n_n, valid_n = collate(nexts, DEVICE)
-            neg = -1e9
+    def _future(self, nexts):
+        """Double-DQN value of each next state (B,): the policy network picks the action, the target network values it. A next state
+        that holds an object (learned placement) is valued over its place candidates, any other over its object-action slots."""
+        neg = -1e9
+        future = torch.zeros(len(nexts), device=DEVICE)
+        holding = [k for k, s in enumerate(nexts) if self.learned_place and len(s['place_tokens'])]
+        acting = [k for k in range(len(nexts)) if k not in set(holding)]
+        if acting:
+            group = [nexts[k] for k in acting]
+            tokens_n, n_n, valid_n = collate(group, DEVICE)
             if self.continuous:  # the target critic values the policy actor's lengths
                 pol_q, pol_actor, _ = self.model.forward_full(tokens_n, n_n)
                 pol = pol_q.masked_fill(~valid_n, neg).flatten(1)
@@ -121,38 +112,97 @@ class ObjectTrainer(Trainer):
             else:
                 pol = self.model(tokens_n, n_n).masked_fill(~valid_n, neg).flatten(1)
                 tgt = self.model_target(tokens_n, n_n).flatten(1)
-            future = tgt.gather(1, pol.argmax(1, keepdim=True))[:, 0]
-            future = torch.where(pol.max(1).values < neg / 2, torch.zeros_like(future), future)
-            label = (reward + self.future_reward_discount * future * (1.0 - done)).clamp(self.q_min, self.q_max)
+            value = tgt.gather(1, pol.argmax(1, keepdim=True))[:, 0]
+            future[acting] = torch.where(pol.max(1).values < neg / 2, torch.zeros_like(value), value)
+        if holding:
+            group = [nexts[k] for k in holding]
+            tokens_n, n_n, _ = collate(group, DEVICE)
+            place_n, place_valid = collate_place(group, DEVICE)
+            pol = self.model.place_values(tokens_n, n_n, place_n).masked_fill(~place_valid, neg)
+            tgt = self.model_target.place_values(tokens_n, n_n, place_n)
+            future[holding] = tgt.gather(1, pol.argmax(1, keepdim=True))[:, 0]
+        return future
 
-        tokens, n_objects, valid = collate([states[i] for i in keep], DEVICE)
-        index = torch.tensor([slots[i] for i in keep], device=DEVICE)
-        arange = torch.arange(len(keep), device=DEVICE)
+    def train_step(self, transitions, weights=None, demo=None):
+        """Double DQN on the taken object-action slot or (learned placement) place candidate; for demonstration samples also a large
+        margin over the other valid slots / candidates. Samples whose action matches no candidate are skipped (no gradient). As in the
+        dense trainer, the grasp -> place step (the next state holds the object) is not discounted: pick and place are one action."""
+        B = len(transitions)
+        states = [self.info(t.state) for t in transitions]
+        kinds = []
+        for s, t in zip(states, transitions):
+            if t.primitive_action == 'place':
+                p = place_index_of(s, t.action) if self.learned_place else None
+                kinds.append(None if p is None else ('place', p))
+            else:
+                slot = slot_of(s, t.primitive_action, t.action)
+                kinds.append(None if slot is None else ('slot', slot))
+        keep = [i for i, k in enumerate(kinds) if k is not None]
+        self.last_td = np.zeros(B, np.float32)
+        if not keep:
+            return 0.0
+        nexts = [self.info(transitions[i].next_state) for i in keep]
+        reward = torch.tensor([float(transitions[i].reward) for i in keep], device=DEVICE)
+        done = torch.tensor([float(transitions[i].done) for i in keep], device=DEVICE)
+        gamma = torch.tensor([1.0 if (self.learned_place and len(n['place_tokens']) and kinds[i][0] == 'slot')
+                              else self.future_reward_discount for i, n in zip(keep, nexts)], device=DEVICE)
+        with torch.no_grad():
+            label = (reward + gamma * self._future(nexts) * (1.0 - done)).clamp(self.q_min, self.q_max)
+
+        pred = torch.zeros(len(keep), device=DEVICE)
+        margins = []
+        flags = np.zeros(len(keep), bool) if demo is None else np.asarray(demo)[keep].astype(bool)
+        neg = -1e9
         actor_loss = None
-        if self.continuous:
-            exec_len = torch.full((len(keep), valid.shape[1], 2), 0.5, device=DEVICE)
-            for k, i in enumerate(keep):
-                t = transitions[i]
-                if t.primitive_action == 'push':
-                    exec_len[k, slots[i][0], slots[i][1] - 1] = float(t.action[3])
-            q, actor, push_at_actor = self.model.forward_full(tokens, n_objects, lengths=exec_len)
-            push_valid = valid[..., 1:3]
-            actor_loss = -(push_at_actor * push_valid).sum() / push_valid.sum().clamp(min=1)
-        else:
-            q = self.model(tokens, n_objects)
-        pred = q[arange, index[:, 0], index[:, 1]]
+        slot_rows = [k for k, i in enumerate(keep) if kinds[i][0] == 'slot']
+        place_rows = [k for k, i in enumerate(keep) if kinds[i][0] == 'place']
+        if slot_rows:
+            items = [keep[k] for k in slot_rows]
+            tokens, n_objects, valid = collate([states[i] for i in items], DEVICE)
+            index = torch.tensor([kinds[i][1] for i in items], device=DEVICE)
+            arange = torch.arange(len(items), device=DEVICE)
+            if self.continuous:
+                exec_len = torch.full((len(items), valid.shape[1], 2), 0.5, device=DEVICE)
+                for k, i in enumerate(items):
+                    if transitions[i].primitive_action == 'push':
+                        exec_len[k, kinds[i][1][0], kinds[i][1][1] - 1] = float(transitions[i].action[3])
+                q, actor, push_at_actor = self.model.forward_full(tokens, n_objects, lengths=exec_len)
+                push_valid = valid[..., 1:3]
+                actor_loss = -(push_at_actor * push_valid).sum() / push_valid.sum().clamp(min=1)
+            else:
+                q = self.model(tokens, n_objects)
+            taken = q[arange, index[:, 0], index[:, 1]]
+            pred = pred.index_put((torch.tensor(slot_rows, device=DEVICE),), taken)
+            flagged = torch.as_tensor(flags[slot_rows], device=DEVICE)
+            if flagged.any():
+                penalty = torch.full_like(q, self.cfg.demo_margin)
+                penalty[arange, index[:, 0], index[:, 1]] = 0.0
+                valid = valid.clone()
+                valid[arange, index[:, 0], index[:, 1]] = True
+                best = torch.where(valid, q + penalty, torch.full_like(q, neg)).flatten(1).max(1).values
+                margins.append((best - taken)[flagged])
+        if place_rows:
+            items = [keep[k] for k in place_rows]
+            group = [states[i] for i in items]
+            tokens, n_objects, _ = collate(group, DEVICE)
+            place_tokens, place_valid = collate_place(group, DEVICE)
+            values = self.model.place_values(tokens, n_objects, place_tokens)
+            index = torch.tensor([kinds[i][1] for i in items], device=DEVICE)
+            arange = torch.arange(len(items), device=DEVICE)
+            taken = values[arange, index]
+            pred = pred.index_put((torch.tensor(place_rows, device=DEVICE),), taken)
+            flagged = torch.as_tensor(flags[place_rows], device=DEVICE)
+            if flagged.any():
+                penalty = torch.full_like(values, self.cfg.demo_margin)
+                penalty[arange, index] = 0.0
+                best = torch.where(place_valid, values + penalty, torch.full_like(values, neg)).max(1).values
+                margins.append((best - taken)[flagged])
         per_sample = F.smooth_l1_loss(pred, label, reduction='none')
         if weights is not None:
             per_sample = per_sample * torch.as_tensor(np.asarray(weights)[keep], device=DEVICE, dtype=per_sample.dtype)
         loss = per_sample.mean()
-        if demo is not None and np.any(np.asarray(demo)[keep]):
-            flagged = torch.as_tensor(np.asarray(demo)[keep], device=DEVICE)
-            penalty = torch.full_like(q, self.cfg.demo_margin)
-            penalty[arange, index[:, 0], index[:, 1]] = 0.0
-            valid = valid.clone()
-            valid[arange, index[:, 0], index[:, 1]] = True
-            best = torch.where(valid, q + penalty, torch.full_like(q, neg)).flatten(1).max(1).values
-            margin = (best - pred)[flagged].mean()
+        if margins:
+            margin = torch.cat(margins).mean()
             self.last_margin = float(margin.detach())
             loss = loss + self.cfg.demo_margin_weight * margin
         self.last_td_loss = float(per_sample.detach().mean())

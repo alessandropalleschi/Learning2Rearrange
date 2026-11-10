@@ -184,3 +184,25 @@ def test_learned_object_variant_imitates_placement_and_push_length():
     assert primitive == 'place' and abs(pix[1] - 20) <= 2 and abs(pix[2] - 70) <= 2
     q = t.forward_batch([held])
     assert q.place.max() > -1000 and q.prim.shape == (1, 3)
+
+
+def test_rl_trainer_learns_placement_and_backs_the_place_value_up_to_the_grasp_undiscounted():
+    torch.manual_seed(0)
+    cfg = Config(placement='learned', batch_size=8, learning_rate=3e-3, prioritized=False, reward_mode='sparse', gamma=0.5)
+    trainer = ObjectTrainer(cfg)
+    obs, held = observation(), held_observation()
+    candidates = trainer.info(held)['place_actions']
+    nearest = lambda r, c: tuple(int(v) for v in candidates[np.argmin(np.abs(candidates[:, 1] - r) + np.abs(candidates[:, 2] - c))])
+    good, bad = nearest(20, 70), nearest(100, 70)  # inside the blue region / far from it
+    grasp = tuple(trainer.info(obs)['actions'][0, 0])
+    # rewards inside the sparse mode's Q range [-20, 0]: the good placement is worth -2, the bad one -6
+    batch = [Transition(held, good, obs, -2.0, 'place', True)] * 3 + [Transition(held, bad, obs, -6.0, 'place', True)] * 3 + \
+        [Transition(obs, grasp, held, 0.0, 'grasp', False)] * 2
+    for step in range(300):
+        trainer.train_step(batch)
+        if step % 20 == 19:  # the training loop's target update
+            trainer.model_target.load_state_dict(trainer.model.state_dict())
+    q = trainer.forward_batch([held, obs])
+    place = q.place[0, 0]
+    assert abs(place[good[1], good[2]] + 2) < 0.5 and abs(place[bad[1], bad[2]] + 6) < 0.5
+    assert abs(q.pick[1, 0][grasp[1], grasp[2]] + 2) < 0.5  # the grasp is worth the best placement (-2), not gamma x it (-1)
