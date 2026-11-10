@@ -22,11 +22,23 @@ class ScriptedExpert:
     """Chooses (primitive, pix) for a `RearrangeEnv` from its full observation and the simulator state."""
 
     MAX_FAILURES = 2  # grasp attempts on one object that did not hold before the expert tries something else
-    NEAR_REGION = 0.06  # m: a misplaced object this close to its region is pushed into it (a push moves ~8 cm)
+    NEAR_MARGIN = 0.02  # m: a misplaced object closer to its region than the longest push minus this is pushed into it
     MAX_EXPOSE_PUSHES = 2  # pushes of one object to uncover hidden ones
 
-    def __init__(self, env):
+    CONTINUOUS_LENGTHS = (0.04, 0.08, 0.12)  # m: the lengths the expert chooses from when the environment's push length is continuous
+
+    def __init__(self, env, push_lengths=None):
+        """push_lengths: the selectable lengths (default: the environment's; with a continuous length (`cfg.hierarchy`)
+        CONTINUOUS_LENGTHS, and the chosen one is returned as a fraction of `cfg.push_length_range` in pix[3])."""
         self.env = env
+        base = env.cfg
+        self.continuous = bool(getattr(base, 'hierarchy', False))
+        if push_lengths is None and self.continuous:
+            push_lengths = self.CONTINUOUS_LENGTHS
+        if push_lengths is not None:
+            import dataclasses
+            base = dataclasses.replace(base, push_lengths=tuple(push_lengths), hierarchy=False)
+        self.cfg = base
         self.failures = {}  # object id -> failed grasps
         self.pushes = {}  # object id -> pushes made on it
 
@@ -65,8 +77,18 @@ class ScriptedExpert:
         return row, int(col if (cols == col).any() else cols.min())
 
     def act(self):
-        """(primitive, pix) or None if the expert has nothing sensible to do."""
-        env, cfg = self.env, self.env.cfg
+        """(primitive, pix) or None if the expert has nothing sensible to do. A push is (index, row, col) with index = direction * L +
+        length index, or (direction, row, col, fraction of the length range) if the environment's push length is continuous."""
+        choice = self._act()
+        if choice is None or choice[0] != 'push' or not self.continuous:
+            return choice
+        index, row, col = choice[1]
+        lengths, (low, high) = self.cfg.push_lengths, self.env.cfg.push_length_range
+        fraction = (lengths[index % len(lengths)] - low) / (high - low)
+        return 'push', (index // len(lengths), row, col, float(np.clip(fraction, 0.0, 1.0)))
+
+    def _act(self):
+        env, cfg = self.env, self.cfg
         if env.holding:
             col, row = env.obs['heuristic_place']
             return 'place', (0, int(row), int(col))
@@ -96,7 +118,9 @@ class ScriptedExpert:
         low, high = scene.regions[scene.class_name(object_id)]
         y = scene.poses()[object_id][0][1]
         distance = max(low - y, y - high, 0.0)
-        return 0.0 < distance <= self.NEAR_REGION and self.pushes.get(object_id, 0) < 1
+        transfer = 0.95 if getattr(getattr(self.env.sim, 'params', None), 'pusher', 'tip') == 'paddle' else 0.5  # measured push transfer
+        reach = transfer * max(max(self.cfg.push_lengths) - 0.015, 0.0)  # how far one (longest) push really moves an object
+        return 0.0 < distance <= reach and self.pushes.get(object_id, 0) < 1
 
     def _expose_hidden(self, cfg):
         """Push the front-most visible object (at most MAX_EXPOSE_PUSHES times each) towards the middle of its target region."""
@@ -121,7 +145,8 @@ class ScriptedExpert:
         low, high = scene.regions[scene.class_name(object_id)]
         y = scene.poses()[object_id][0][1]
         direction = 1 if (low + high) / 2 > y else 0  # 1: towards +y, 0: towards -y
-        index = direction * len(cfg.push_lengths) + len(cfg.push_lengths) // 2
+        transfer = 0.95 if getattr(getattr(env.sim, 'params', None), 'pusher', 'tip') == 'paddle' else 0.5  # measured (scripts/physics_sanity.py)
+        index = direction * len(cfg.push_lengths) + self._length_index(y, low, high, direction, cfg.push_lengths, transfer)
         angle, length = decode_push(index, cfg.push_lengths)
         height = obs['classmap'].shape[0]
         for gap in (3, 4, 2, 5):
@@ -130,6 +155,16 @@ class ScriptedExpert:
             if check_push(env.ws, obs['depthmap'], col, row, angle, length) and self._blade_touches(obs, row, col, direction, length):
                 return 'push', (index, row, col)
         return None
+
+    @staticmethod
+    def _length_index(y, low, high, direction, lengths, transfer=None):
+        """Index of the push length that moves an object at `y` closest to the middle of its region [low, high]. A push moves it by
+        `transfer` x (length - the 1.5 cm gap to the object) (measured: 0.5 with the tool tip, 0.95 with the paddle), or, without a
+        transfer, by about its length (the original rule). With a single length that is index 0 (the paper's 8 cm)."""
+        sign = 1.0 if direction == 1 else -1.0
+        moved = [length if transfer is None else transfer * max(length - 0.015, 0.0) for length in lengths]
+        landing = [abs((y + sign * m) - (low + high) / 2) for m in moved]
+        return int(np.argmin(landing))
 
     @staticmethod
     def _blade_touches(obs, row, col, direction, length):
@@ -197,6 +232,34 @@ def record_episodes(env, episodes, num_objects, seed=0, max_steps=40, log=print)
 def save_demos(path, transitions, stats):
     with open(path, 'wb') as f:
         pickle.dump({'transitions': [tuple(t) for t in transitions], 'stats': stats}, f, protocol=4)
+
+
+def adapt_demos(transitions, cfg):
+    """Make demonstrations recorded with a continuous push length (pix = (direction, row, col, fraction)) usable by an agent with
+    selectable lengths (`cfg.push_lengths`): the length becomes the nearest selectable one (pix = (direction * L + index, row, col)).
+    Demonstrations with selectable lengths are returned unchanged; they cannot be used with a continuous length (unknown lengths).
+    Without a belief (`cfg.belief == 'none'`) the recorded spatial belief is removed from the observations: the agent must not see a
+    memory its environment does not give it (the object agent turns any belief it finds into ghost tokens)."""
+    from l2r.learning.memory import Transition
+    if getattr(cfg, 'skill_params', False):  # parameterised skills: headings / approach angles in the action tuple
+        from l2r.learning.skill_params import adapt_demo_actions
+        transitions = adapt_demo_actions(transitions)
+    lengths, (low, high) = np.asarray(cfg.push_lengths), cfg.push_length_range
+    out = []
+    strip = cfg.belief == 'none'
+    for t in transitions:
+        if strip and ('belief' in t.state or 'belief' in t.next_state):
+            t = Transition({k: v for k, v in t.state.items() if k != 'belief'}, t.action,
+                           {k: v for k, v in t.next_state.items() if k != 'belief'}, *t[3:])
+        if t.primitive_action == 'push' and len(t.action) == 4 and not cfg.hierarchy:
+            direction, row, col, fraction = t.action
+            index = int(np.argmin(np.abs(lengths - (low + fraction * (high - low)))))
+            t = Transition(t.state, (int(direction) * len(lengths) + index, int(row), int(col)), *t[2:])
+        elif t.primitive_action == 'push' and len(t.action) == 3 and cfg.hierarchy:
+            raise ValueError('demonstrations with selectable push lengths cannot train a continuous push length: record them with '
+                             '--hierarchy')
+        out.append(t)
+    return out
 
 
 def load_demos(path):

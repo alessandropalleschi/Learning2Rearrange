@@ -12,7 +12,7 @@ from l2r.envs.rearrange import make_env
 from l2r.envs.vec import VecEnv
 from l2r.learning.memory import Transition
 from l2r.learning.policy import attach_initial, carry, carry_over, select_for
-from l2r.learning.trainer import Trainer
+from l2r.learning.factory import make_trainer
 from l2r.logger import Logger
 from l2r.sim.workspace import Workspace
 from l2r.utils import seed_everything
@@ -65,12 +65,13 @@ class TrainingLoop:
         n = args.num_envs
         self.venv = VecEnv([partial(make_env, self.cfg, args.gui and r == 0, self.cfg.start_objects, params,
                                     args.random_seed + r) for r in range(n)], start_method=args.start_method)
-        self.trainer = Trainer(self.cfg, is_testing=args.is_testing, load_snapshot=args.load_snapshot,
+        self.trainer = make_trainer(self.cfg, is_testing=args.is_testing, load_snapshot=args.load_snapshot,
                                snapshot=args.snapshot, snapshot_target=args.snapshot_target)
         self.logger = Logger(self.log_dir)
         if args.demos:
-            from l2r.demos import load_demos
+            from l2r.demos import adapt_demos, load_demos
             demos, stats = load_demos(args.demos)
+            demos = adapt_demos(demos, self.cfg)
             print('Demonstrations: %d transitions (expert success %.2f over %d episodes)'
                   % (len(demos), stats['success_rate'], stats['episodes']))
             self.trainer.demos = demos
@@ -78,6 +79,9 @@ class TrainingLoop:
                 self.trainer.pretrain(demos, args.pretrain_steps)
         self.curriculum = Curriculum(self.cfg, frozen=args.is_testing, validated=bool(args.curriculum_eval))
         self.validations = 0
+        from l2r.learning.nstep import NStepAccumulator
+        self.nstep = NStepAccumulator(self.cfg.n_step, self.cfg.gamma) if self.cfg.n_step > 1 else None
+        self.stage_validations = []  # (successes, episodes) of the validations at the current object count
         self.episode_objects = [self.curriculum.num_obj] * args.num_envs  # objects of each simulator's running episode
         self.stage_iteration = 0  # steps since the last curriculum change (epsilon is annealed per stage)
         self.episode = 0
@@ -103,11 +107,11 @@ class TrainingLoop:
                     [{'primitive': c[0], 'pix': c[1]} for c in choices])
                 for i in range(n):
                     carry(self.trainer, next_obs[i], None if q.hidden is None else q.hidden[i], choices[i][0],
-                          choices[i][1], infos[i]['place_pix'])
+                          choices[i][1], infos[i]['place_pix'], obs[i])
                 if args.save_visualizations:
                     self._save_visualization(q, obs[0], choices[0], infos[0])
                 if not args.is_testing:
-                    self._learn(obs, next_obs, rewards, terminated, choices, infos, eps)
+                    self._learn(obs, next_obs, rewards, terminated, choices, infos, eps, truncated)
                 self.trainer.iteration += n
                 self.stage_iteration += n
                 finished = [i for i in range(n) if terminated[i] or truncated[i]]
@@ -130,14 +134,22 @@ class TrainingLoop:
             self.logger.close()
 
     # ------------------------------------------------------------------ learning
-    def _learn(self, obs, next_obs, rewards, terminated, choices, infos, eps):
-        """Store the transitions (and their hindsight relabelling), learn from them, snapshot periodically."""
+    def _learn(self, obs, next_obs, rewards, terminated, choices, infos, eps, truncated=None):
+        """Store the transitions (and their hindsight relabelling), learn from them, snapshot periodically. With --n_step > 1
+        the stored transitions are n-step aggregates (the relabelled copies stay one-step: they end at the goal)."""
         trainer, args, n = self.trainer, self.args, self.args.num_envs
         batch = []
         for i in range(n):
             primitive, pix, _ = choices[i]
             transition = Transition(obs[i], pix, next_obs[i], rewards[i], primitive, terminated[i])
-            trainer.buffer.push(*transition)
+            if self.nstep is None:
+                trainer.buffer.push(*transition)
+            else:
+                ready = self.nstep.add(i, transition)
+                if truncated is not None and truncated[i] and not terminated[i]:
+                    ready += self.nstep.flush(i)
+                for t in ready:
+                    trainer.buffer.push(*t)
             batch.append(transition)
             if infos[i]['relabel']:  # hindsight experience replay (paper Fig. 8)
                 obs_r, next_r = infos[i]['relabel_pair']
@@ -195,18 +207,29 @@ class TrainingLoop:
         curriculum if the success rate reaches the threshold. All simulators are reset afterwards."""
         from l2r.evaluation import evaluate
         c, a = self.curriculum, self.args
-        seed = 10 ** 6 + self.validations * 1000
+        if self.nstep is not None:  # the validation resets every simulator: the pending n-step starts bootstrap from where they are
+            for i in range(a.num_envs):
+                for t in self.nstep.flush(i):
+                    self.trainer.buffer.push(*t)
+        # fixed seeds: the same scenes at every validation of a stage, so successive validations measure the policy, not the scenes
+        seed = 10 ** 6 + (c.num_obj * 1000 if a.fixed_validation_seeds else self.validations * 1000)
         result = evaluate(self.trainer, self.venv, self.cfg, self.ws, c.num_obj, a.curriculum_eval, seed)
         self.validations += 1
         rate = result['success_rate']
-        passed = rate >= self.cfg.success_threshold
-        print('Validation %d (%d objects, %d greedy episodes): success %.2f, mean actions %s -> %s'
+        self.stage_validations.append((rate * result['episodes'], result['episodes']))
+        window = self.stage_validations[-a.curriculum_window:]
+        pooled = sum(s for s, _ in window) / max(sum(n for _, n in window), 1)
+        # pooled over the last `curriculum_window` validations of this stage (1 = the original single-validation rule)
+        passed = len(window) >= a.curriculum_window and pooled >= self.cfg.success_threshold
+        print('Validation %d (%d objects, %d greedy episodes): success %.2f, mean actions %s%s -> %s'
               % (self.validations, c.num_obj, result['episodes'], rate, result['mean_actions_success'],
+                 ', pooled over %d: %.2f' % (len(window), pooled) if a.curriculum_window > 1 else '',
                  'advance' if passed else 'stay'))
         self.logger.scalar('curriculum/val_success', rate, self.trainer.iteration)
         with open(os.path.join(self.log_dir, 'validation.csv'), 'a') as f:
             f.write('%d,%d,%d,%.3f\n' % (self.validations, self.trainer.iteration, c.num_obj, rate))
         if passed and c.advance():
+            self.stage_validations = []
             self.stage_iteration = 0
             self.logger.scalar('curriculum/num_obj', c.num_obj, self.trainer.iteration)
             print('Curriculum: now using %d objects' % c.num_obj)
@@ -251,6 +274,12 @@ def add_arguments(parser):
                         help='advance the curriculum after a greedy validation on this many fresh random configurations '
                              '(success >= threshold) instead of the epsilon-greedy training window (0 = training window)')
     parser.add_argument('--curriculum_eval_every', type=int, default=25, help='training episodes between validations')
+    parser.add_argument('--curriculum_window', type=int, default=1,
+                        help='advance when the success pooled over the last K validations of the stage reaches the threshold '
+                             '(1 = a single validation, as before)')
+    parser.add_argument('--fixed_validation_seeds', action='store_true', default=False,
+                        help='validate on the same scenes at every validation of a stage (seeds depend on the object count only)')
+    parser.add_argument('--success_threshold', type=float, default=0.9, help='validation success needed to advance the curriculum')
     parser.add_argument('--demos', default='', help='recorded expert demonstrations (scripts/collect_demos.py; same model flags)')
     parser.add_argument('--pretrain_steps', type=int, default=0, help='gradient steps on the demonstrations before training (DQfD)')
     parser.add_argument('--max_episodes', type=int, default=0, help='stop after this many finished episodes (0 = no cap)')

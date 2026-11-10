@@ -15,7 +15,8 @@ class Config:
     #     F = gamma * phi(s') - phi(s), which leaves the optimal policy unchanged: phi = scale * (sorted fraction - 1) or
     #     -scale * mean distance of the objects to their target region (relative to the cabinet width). 'noop' adds a
     #     penalty to actions that moved no object (>= 5 mm). ---
-    reward_mode: str = 'progress'  # 'sparse' (paper) | 'progress' (default: potential-based shaping) | 'distance' | 'noop'
+    reward_mode: str = 'progress'  # 'sparse' (paper) | 'progress' (default: potential-based shaping) | 'distance' | 'noop' |
+                                   # 'combined' (progress + distance potential, plus the no-op penalty)
     reward_shaping_scale: float = 1.0
     noop_penalty: float = 1.0
 
@@ -37,9 +38,28 @@ class Config:
     transformer_dim: int = 192
     transformer_layers: int = 3
 
+    # --- Agent (architecture comparison): 'dense' = pixel Q-maps (default); 'object' = object-centric Q (one token per visible object,
+    #     Q per object-action slot); 'policy_critic' = dense Q critic + a policy heatmap trained on demonstrations that proposes cells ---
+    agent: str = 'dense'
+    policy_topk: int = 10  # policy_critic: cells proposed per primitive
+    policy_bc_weight: float = 1.0  # policy_critic: weight of the behaviour-cloning loss on demonstration samples
+    object_dim: int = 64
+    object_layers: int = 2
+
+    # --- Network architecture (ablation): U-Net skip connections; explicit task-geometry input channels (target-region bands per
+    #     class + row / column coordinates) ---
+    arch_skips: bool = False
+    arch_stride4: bool = False  # bottleneck at 1/4 resolution (U-Net decoders): 4x more cells at the context / belief level
+    arch_encoder: str = 'resnet'  # 'resnet' | 'convnext' (blocks of the encoder stages)
+    arch_decoder: str = 'plain'  # 'plain' | 'unet' | 'fpn' | 'attn_unet' | 'unet_attn4'  (arch_skips is the same as 'unet')
+    equiv_sigma: float = 0.0  # 0: equivalent cells all weigh 1 (hard); s > 0: weight exp(-d^2 / 2 s^2) by distance (cells) to the taken cell
+    equiv_targets: bool = False  # TD target applied to all cells equivalent to the taken one (an object's front band, a 5x5 neighbourhood)
+    region_channels: bool = False
+
     # --- Action masks on the dense Q-maps: 'basic' = grasp on any object cell, push near objects (original);
     #     'structured' = grasp only at the front face of an object, push only where the blade has something in its path ---
     mask_level: str = 'basic'
+    grasp_edge_margin: float = 0.15  # structured masks / equivalence bands: skip this fraction of an object's width at each edge
 
     # --- Hierarchical agent (ablation): level 1 chooses the primitive from global features, level 2 its parameters:
     #     the pixel from the dense Q-map and, for pushes, a *continuous* length from an actor head (DDPG-style) ---
@@ -56,12 +76,29 @@ class Config:
     # --- Demonstrations (DQfD): a large-margin loss keeps the expert action on top, TD keeps the values meaningful ---
     demo_margin: float = 0.8          # margin l(aE, a) of the expert action over every other feasible action
     demo_margin_weight: float = 1.0
+    demo_margin_radius: int = 0       # 0: the margin applies to every other pixel; r > 0: it grows linearly from 0 at the expert pixel to
+                                      # the full margin at Chebyshev distance r in the expert's own map (neighbouring cells of one
+                                      # object are equally good, a smooth network can not separate them)
     demo_fraction: float = 0.25       # share of each batch drawn from the demonstrations (when loaded)
+    history_tokens: bool = False      # object agent: the last steps as tokens (a temporal memory of what was done and its outcome)
+    skill_params: bool = False        # object agent: parameterised grasp (approach) / push (heading, length) skills, flow policy
+    object_algo: str = 'dqn'          # object agent: 'dqn' (double DQN) | 'iql' (implicit Q-learning, advantage-weighted policy)
+    iql_expectile: float = 0.8        # IQL: expectile of the value regression (0.5 = mean, -> 1 = max over the data's actions)
+    iql_beta: float = 3.0             # IQL: inverse temperature of the advantage weights
+    n_step: int = 1                   # > 1: n-step returns in the replay (see l2r/learning/nstep.py)
+    twin_q: bool = False              # object agent: two value heads, TD targets from their minimum (TD3-style clipped double Q)
+    outcome_weight: float = 0.0       # > 0: object agent outcome heads (executed / invalid / changed) trained with this weight
+    outcome_mask: float = 0.0         # > 0: drop candidates whose predicted P(executed) or P(changed) is below this (learned mask)
+    outcome_penalty: float = 0.0      # > 0: action selection subtracts this x predicted P(invalid) x |reward_invalid| from Q
+    demo_anneal_steps: int = 0        # > 0: the demonstration share (and with it the margin loss) fades linearly to 0 over this many
+                                      #      gradient steps of RL, so the demonstrations bootstrap the agent without capping it
 
     # --- Placement (ablation): 'heuristic' = hand-written rule inside the pick-and-place action (paper);
     #     'learned' = pick and place are two decisions, the place pixel comes from a third Q-head
     #     (conditioned on the class of the held object, restricted to free cells) ---
     placement: str = 'heuristic'
+    place_corridor: bool = False  # heuristic placement: prefer cells whose straight-in corridor has no other object (env/expert)
+    grasp_approach: str = 'straight'  # 'straight' (original) | 'clear': the env picks the approach line with the fewest obstacles
     placement_space: str = 'depth'  # with footprint_placement: 'depth' = keep the back wall clear (original); 'region' = fit the whole
                                      # footprint and offer only cells inside the object's own target region
     footprint_placement: bool = False  # keep the placement target clear of the back wall by the object's depth
@@ -108,12 +145,19 @@ class Config:
         get = lambda name, default: getattr(args, name, default)
         defaults = cls()
         return cls(start_objects=get('num_obj', defaults.start_objects), max_objects=get('max_obj', defaults.max_objects),
+                   success_threshold=get('success_threshold', defaults.success_threshold),
                    max_actions=get('max_actions', defaults.max_actions), batch_size=get('batch_size', defaults.batch_size), belief=get('belief', 'none'),
                    placement=get('placement', 'heuristic'), eps_decay=get('eps_decay', defaults.eps_decay),
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
-                   footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), backbone=get('backbone', 'conv'),
+                   footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), grasp_approach=get('grasp_approach', 'straight'), place_corridor=get('place_corridor', False), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
-                   hierarchy=get('hierarchy', False), mask_level=get('mask_level', 'basic'), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
+                   hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), arch_decoder=get('arch_decoder', 'plain'), arch_encoder=get('arch_encoder', 'resnet'), policy_topk=get('policy_topk', 10), arch_skips=get('arch_skips', False), arch_stride4=get('arch_stride4', False),
+                   region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
+                   equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
+                   grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), demo_anneal_steps=get('demo_anneal_steps', defaults.demo_anneal_steps),
+                   twin_q=get('twin_q', False), n_step=get('n_step', 1), object_algo=get('object_algo', 'dqn'), skill_params=get('skill_params', False), history_tokens=get('history_tokens', False),
+                   iql_expectile=get('iql_expectile', 0.8), iql_beta=get('iql_beta', 3.0), outcome_weight=get('outcome_weight', 0.0), outcome_penalty=get('outcome_penalty', 0.0), outcome_mask=get('outcome_mask', 0.0),
+                   eps_end=get('eps_end', defaults.eps_end), eps_start=get('eps_start', defaults.eps_start), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
 
@@ -127,7 +171,7 @@ class Config:
                             help="'learned': a Q-head chooses where to place the held object (default: rule from the paper)")
         parser.add_argument('--belief', choices=['none', 'spatial', 'recurrent'], default='none',
                             help='belief state ablation: memoryless / spatial memory map / ConvGRU latent')
-        parser.add_argument('--backbone', choices=['conv', 'hybrid'], default='conv',
+        parser.add_argument('--backbone', choices=['conv', 'hybrid', 'ppm', 'aspp', 'ppm_aspp'], default='conv',
                             help="'hybrid': transformer encoder on the 1/8-resolution bottleneck of the conv network")
         parser.add_argument('--jaw_yaws', type=int, default=5,
                             help='jaw orientations of the gripper over +-60 degrees (--end_effector gripper)')
@@ -136,15 +180,63 @@ class Config:
                                  'length (actor-critic) and the pixel are chosen')
         parser.add_argument('--push_length_range', type=float, nargs=2, default=[0.03, 0.15], metavar=('MIN', 'MAX'),
                             help='continuous push length range in m (with --hierarchy)')
-        parser.add_argument('--reward_mode', choices=['sparse', 'progress', 'distance', 'noop'], default='progress',
+        parser.add_argument('--reward_mode', choices=['sparse', 'progress', 'distance', 'noop', 'combined'], default='progress',
                             help="reward: the paper's sparse one, potential-based shaping by sorted fraction ('progress') or by "
                                  "distance to the target region ('distance'), or sparse + a penalty for actions that move nothing")
         parser.add_argument('--reward_scale', type=float, default=1.0, help='scale of the shaping potential')
         parser.add_argument('--noop_penalty', type=float, default=1.0, help="penalty of 'noop' actions (reward mode 'noop')")
+        parser.add_argument('--agent', choices=['dense', 'object', 'policy_critic'], default='dense',
+                            help="'object': object-centric Q (transformer over visible objects, Q per object-action slot; heuristic "
+                                 "placement); 'policy_critic': dense critic + demonstration-trained policy heatmap proposing cells")
+        parser.add_argument('--policy_topk', type=int, default=10, help='policy_critic: cells the policy proposes per primitive')
+        parser.add_argument('--arch_encoder', choices=['resnet', 'convnext', 'resnet18_imagenet', 'resnet18_scratch'], default='resnet',
+                            help='encoder: residual 3x3 blocks, ConvNeXt 7x7 blocks, or torchvision ResNet-18 stages (ImageNet-pretrained, '
+                                 'or the same structure from scratch); the ResNet-18 encoders need a U-Net style decoder')
+        parser.add_argument('--arch_decoder', choices=['plain', 'unet', 'fpn', 'attn_unet', 'unet_attn4', 'hrnet'], default='plain',
+                            help='decoder: plain (original), unet skips, fpn pyramid, attn_unet (attention-gated skips), unet_attn4 '
+                                 '(plus global attention at 1/4 resolution)')
+        parser.add_argument('--arch_stride4', action='store_true', help='bottleneck at 1/4 resolution instead of 1/8 (needs a U-Net decoder)')
+        parser.add_argument('--arch_skips', action='store_true', help='U-Net skip connections from the encoder to the decoder')
+        parser.add_argument('--equiv_targets', action='store_true',
+                            help='regress the TD target at every cell equivalent to the taken action (the whole front band of the '
+                                 'grasped object; a 5x5 neighbourhood for pushes / places) instead of one pixel')
+        parser.add_argument('--equiv_sigma', type=float, default=0.0,
+                            help='with --equiv_targets: Gaussian weight (cells) around the taken cell instead of weight 1 on all '
+                                 'equivalent cells (0 = hard)')
+        parser.add_argument('--region_channels', action='store_true',
+                            help='input channels with the target region of each class and row / column coordinates (needs observations '
+                                 'that carry the regions: demonstrations must be re-recorded)')
+        parser.add_argument('--grasp_edge_margin', type=float, default=0.15,
+                            help="structured masks and equivalence bands skip this fraction of an object's width at each edge "
+                                 '(suction on an edge fails: scripts/grasp_profile.py); 0 = whole front band')
         parser.add_argument('--mask_level', choices=['basic', 'structured'], default='basic',
                             help="'structured': mask the Q-maps to grasps at an object's front face and pushes with something in the "
                                  "blade's path")
         parser.add_argument('--demo_fraction', type=float, default=0.25, help='share of each batch from the demonstrations')
+        parser.add_argument('--history_tokens', action='store_true', default=False,
+                            help='object agent: the last steps (action, object class, outcome) as tokens of the transformer')
+        parser.add_argument('--skill_params', action='store_true', default=False,
+                            help='object agent (IQL): parameterised skills with a flow-matching parameter policy')
+        parser.add_argument('--object_algo', choices=['dqn', 'iql'], default='dqn', help='object agent learning algorithm')
+        parser.add_argument('--iql_expectile', type=float, default=0.8)
+        parser.add_argument('--iql_beta', type=float, default=3.0)
+        parser.add_argument('--n_step', type=int, default=1, help='n-step returns in the replay (1 = one-step TD, as before)')
+        parser.add_argument('--twin_q', action='store_true', default=False,
+                            help='object agent: clipped double Q (two value heads, targets from their minimum)')
+        parser.add_argument('--outcome_weight', type=float, default=0.0,
+                            help='object agent: weight of the outcome heads (executed / invalid / changed, free labels; 0 = off)')
+        parser.add_argument('--outcome_mask', type=float, default=0.0,
+                            help='object agent: learned feasibility mask from the outcome heads (threshold on P(executed), P(changed); 0 = off)')
+        parser.add_argument('--outcome_penalty', type=float, default=0.0,
+                            help='object agent: subtract this x P(invalid) x |reward_invalid| from Q when acting')
+        parser.add_argument('--demo_anneal_steps', type=int, default=0,
+                            help='fade the demonstration share linearly to 0 over this many RL gradient steps (0 = constant)')
+        parser.add_argument('--eps_start', type=float, default=0.8, help='epsilon at the start of every curriculum stage')
+        parser.add_argument('--eps_end', type=float, default=0.01, help='floor of the epsilon-greedy exploration')
+        parser.add_argument('--place_corridor', action='store_true', default=False,
+                            help='heuristic placement: prefer cells whose carry-in corridor is free of other objects')
+        parser.add_argument('--grasp_approach', choices=['straight', 'clear'], default='straight',
+                            help="grasp approach line: straight in (original) or the clearest of several angles in the height map")
         parser.add_argument('--placement_space', choices=['depth', 'region'], default='depth',
                             help="with --footprint_placement: 'region' fits the held object's whole footprint and offers only cells "
                                  "inside its target region (see SIMULATION_NOTES.md)")
@@ -165,9 +257,15 @@ class Config:
     @property
     def q_range(self):
         """(min, max) of the action values: rewards are bounded, and potential-based shaping shifts Q by -phi(s) <= scale."""
-        shaped = self.reward_mode in ('progress', 'distance')
-        low = (self.reward_invalid - (self.noop_penalty if self.reward_mode == 'noop' else 0.0)) / (1.0 - self.gamma)
-        return low, self.reward_goal + (self.reward_shaping_scale if shaped else 0.0)
+        shift = {'progress': 1.0, 'distance': 1.0, 'combined': 2.0}.get(self.reward_mode, 0.0) * self.reward_shaping_scale
+        noop = self.noop_penalty if self.reward_mode in ('noop', 'combined') else 0.0
+        low = (self.reward_invalid - noop) / (1.0 - self.gamma)
+        return low, self.reward_goal + shift
+
+    @property
+    def decoder(self):
+        """The decoder kind: arch_decoder, or 'unet' if only arch_skips is set."""
+        return 'unet' if (self.arch_skips and self.arch_decoder == 'plain') else self.arch_decoder
 
     def __post_init__(self):
         if self.hierarchy:  # the length is continuous: the feasibility mask uses the longest push
@@ -232,6 +330,7 @@ class SimParams:
 
     # end effector: the suction cup (default) or a parallel-jaw gripper (`--end_effector gripper`)
     end_effector: str = 'suction'
+    pusher: str = 'tip'                     # 'tip' (the tool's own 2.6 cm tip, original) | 'paddle' (T-shaped plate during pushes)
 
     # domain randomisation (applied at every reset)
     randomize: bool = False
@@ -271,6 +370,7 @@ class SimParams:
         params.joint_tolerance = getattr(args, 'joint_tolerance', params.joint_tolerance)
         params.perception = getattr(args, 'perception', 'gt')
         params.end_effector = getattr(args, 'end_effector', 'suction')
+        params.pusher = getattr(args, 'pusher', 'tip')
         params.perception_weights = getattr(args, 'perception_weights', params.perception_weights)
         params.object_types = tuple(getattr(args, 'object_types', None) or ()) or None
         return params
@@ -289,6 +389,8 @@ class SimParams:
                             help="object masks: PyBullet ground truth, or a trained segmentation network (train_perception.py)")
         parser.add_argument('--object_types', nargs='+', default=None, help='YCB types of the episodes (>= 3), e.g. to hold one out')
         parser.add_argument('--perception_weights', default='assets/perception/segnet.pth', help='weights of the network')
+        parser.add_argument('--pusher', choices=['tip', 'paddle'], default='tip',
+                            help='pushing geometry: the tool tip (original) or a T-shaped paddle fixed to the tool during pushes')
         parser.add_argument('--end_effector', choices=['suction', 'gripper'], default='suction',
                             help='suction cup, or a parallel-jaw gripper (the pick Q-map gets one channel per jaw yaw, --jaw_yaws)')
         parser.add_argument('--joint_tolerance', type=float, default=1e-3,

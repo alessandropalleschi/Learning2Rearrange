@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from l2r.learning.object_centric import CLASS_RGB
 from l2r.sim.vision import relabel_colormap
 from l2r.sim.workspace import Workspace
 
@@ -17,7 +18,8 @@ class FakeSim:
 
     def __init__(self, gui=False, num_obj=(1,), params=None, client=None):
         self.num_obj, self.t, self.ws = list(num_obj), 0, Workspace()
-        self.scene = SimpleNamespace(relabel_ids=[1], relabel_classes=[1], progress=self._progress, positions=self._positions)
+        self.scene = SimpleNamespace(relabel_ids=[1], relabel_classes=[1], progress=self._progress, positions=self._positions,
+                                     regions={'blue': [-0.28, -0.18], 'green': [-0.05, 0.05], 'yellow': [0.18, 0.28]})
         self.moving = True  # objects move a little with every action
         self.force_events = []
 
@@ -38,6 +40,7 @@ class FakeSim:
         classes = (depth > 0).astype(np.uint8)[4:-4, 4:]
         color = np.random.randint(0, 254, (H, W, 3), dtype=np.uint8)
         color[:, :30] = 105  # occluded (grey) cells
+        color[40:60, 50:70] = CLASS_RGB[0]  # the object is blue (a class colour), so colour-based instance extraction finds it
         return {'colormap': color, 'depthmap': depth, 'classmap': classes, 'idmap': classes.astype(np.float32),
                 'freespace': np.ones((ROWS, COLS), np.float32)}
 
@@ -47,7 +50,7 @@ class FakeSim:
     def push(self, *args, **kwargs):
         return True
 
-    pick = place = push
+    pick = place = pull = push
 
     def is_valid(self):
         return True

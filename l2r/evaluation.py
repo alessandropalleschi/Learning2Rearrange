@@ -15,7 +15,7 @@ from l2r.config import Config, SimParams
 from l2r.envs.rearrange import make_env
 from l2r.envs.vec import VecEnv
 from l2r.learning.policy import attach_initial, carry, select_for
-from l2r.learning.trainer import Trainer
+from l2r.learning.factory import make_trainer
 from l2r.sim.workspace import Workspace
 from l2r.utils import seed_everything
 
@@ -44,7 +44,7 @@ def evaluate(trainer, venv, cfg, ws, num_obj, episodes, base_seed):
         next_obs, _, terminated, truncated, infos = venv.step(actions)
         for k, i in enumerate(active):
             obs[i] = carry(trainer, next_obs[i], None if q.hidden is None else q.hidden[k], actions[i]['primitive'],
-                           actions[i]['pix'], infos[i]['place_pix'])
+                           actions[i]['pix'], infos[i]['place_pix'], obs[i])
             if terminated[i] or truncated[i]:
                 results.append({'seed': seed_of[i], 'success': bool(infos[i]['sorted']), 'actions': infos[i]['actions'],
                                 'return': infos[i]['episode_return']})
@@ -74,7 +74,7 @@ def main(argv=None):
     params = SimParams.from_args(args)
     ws = Workspace.from_params(params)
     seed_everything(args.seed)
-    trainer = Trainer(cfg, is_testing=True, load_snapshot=True, snapshot=args.snapshot)
+    trainer = make_trainer(cfg, is_testing=True, load_snapshot=True, snapshot=args.snapshot)
     venv = VecEnv([partial(make_env, cfg, False, 1, params, args.seed + r) for r in range(args.num_envs)])
     summary = []
     try:

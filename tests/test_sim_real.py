@@ -100,3 +100,46 @@ def test_parallel_jaw_gripper_picks_and_places_an_object_it_can_reach():
                 assert env.tool.holds() or not env.params.suction_verify
                 assert env.place((0.0, 0.0)) in (True, False) and not env.tool.activated
     assert successes >= 4
+
+
+def test_approach_lines_and_blade_yaw_geometry():
+    from types import SimpleNamespace
+
+    from l2r.sim.primitives import FRONT_MARGIN, Manipulator
+    from l2r.sim.workspace import Workspace
+    ws = Workspace()
+    m = Manipulator(SimpleNamespace(), None, None, ws, SimpleNamespace())
+    direction, start = m.approach_line((0.0, 0.0, 0.44), 0.0)
+    assert np.allclose(direction, (-1, 0, 0)) and np.isclose(start[0], ws.bounds[0][1] + FRONT_MARGIN) and np.isclose(start[1], 0)
+    direction, start = m.approach_line((0.0, 0.0, 0.44), np.deg2rad(30))
+    assert np.allclose(direction[:2], (-np.cos(np.pi / 6), -np.sin(np.pi / 6)))
+    assert start[1] > 0 and np.isclose(start[0], ws.bounds[0][1] + FRONT_MARGIN)  # comes in from +y, moving towards -y
+    assert m.approach_line((0.0, 0.0, 0.44), np.deg2rad(70)) is None  # too steep
+    assert m.approach_line((-0.2, 0.25, 0.44), np.deg2rad(40)) is None  # would enter through the side wall
+
+
+def _front_object(env):
+    p = env.p
+    ids = [i for i in env.scene.object_ids if abs(p.getBasePositionAndOrientation(i)[0][1]) < 0.15] or list(env.scene.object_ids)
+    return max(ids, key=lambda i: p.getBasePositionAndOrientation(i)[0][0])
+
+
+def test_push_towards_the_back_and_pull_towards_the_robot_move_the_object_that_way():
+    env = Environment(num_obj=[1], params=SimParams())
+    p, moved = env.p, {'push': 0, 'pull': 0}
+    for seed in range(3):
+        np.random.seed(seed)
+        random.seed(seed)
+        assert env.reset()
+        uid = _front_object(env)
+        before = np.asarray(p.getBasePositionAndOrientation(uid)[0])
+        face = p.rayTest((0.3, before[1], 0.45), (-0.3, before[1], 0.45))[0][3][0]  # the object's front face on the push line
+        start = (face + 0.02, before[1])  # just in front of it, pushing towards the back
+        env.push(start, heading=np.pi, push_length=0.06)
+        after = np.asarray(p.getBasePositionAndOrientation(uid)[0])
+        moved['push'] += after[0] < before[0] - 0.02
+        env.pull(after[:2], heading=0.0, distance=0.06)
+        pulled = np.asarray(p.getBasePositionAndOrientation(uid)[0])
+        moved['pull'] += pulled[0] > after[0] + 0.02
+    assert moved['push'] >= 2, moved
+    assert moved['pull'] >= 2, moved

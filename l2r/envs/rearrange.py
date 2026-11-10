@@ -14,7 +14,7 @@ from skimage.draw import line
 
 from l2r.config import Config
 from l2r.learning.belief import BeliefTracker, compact_belief
-from l2r.sim.constants import LABELS, TARGET_ORDER
+from l2r.sim.constants import CLASSES, LABELS, TARGET_ORDER
 from l2r.sim.environment import Environment
 
 
@@ -22,6 +22,10 @@ def decode_push(index, push_lengths):
     """Push action index (direction * L + length) -> (angle in rad, length in m). Direction 0/1 = -90/+90 degrees."""
     direction, length = divmod(int(index), len(push_lengths))
     return np.deg2rad(direction * 180.0 - 90), push_lengths[length]
+
+
+LAST_PRIMITIVES = ('push', 'grasp', 'place', 'pull')
+LAST_ACTION_SIZE = len(LAST_PRIMITIVES) + 3  # one-hot primitive, executed, changed fraction of the height map, scene invalid
 
 
 def check_push(ws, depth, pix_x, pix_y, angle, push_length=0.08):
@@ -147,11 +151,18 @@ class RearrangeEnv:
         self.tracker.reset()
         self._phi = self._potential()
         self.obs = self._full_obs(None)
+        self._last_action = np.zeros(LAST_ACTION_SIZE, np.float32)  # nothing done yet
+        self._last_pix = np.array([-1, -1], np.int16)
         self._relabel_state = self._relabel_status()
         return self.compact(self.obs)
 
     def step(self, action):
-        """action: {'primitive': 'push'|'grasp'|'place', 'pix': (rotation_index, row, col)} in Q-map coordinates.
+        """action: {'primitive': 'push'|'grasp'|'place'|'pull', 'pix': (rotation_index, row, col)} in Q-map coordinates.
+
+        Parameterised primitives (optional keys, see `l2r.sim.primitives`): 'push' with 'heading' (rad, any floor direction
+        away from the robot) and 'length' (m) instead of the encoded direction / length; 'grasp' with 'approach' (rad, the
+        approach line rotated about the vertical); 'pull' (attach at the pixel, drag 'length' m along 'heading', default
+        towards the robot, release) with an optional 'approach'.
 
         placement='heuristic': 'grasp' picks and places in one action (placement by rule).
         placement='learned':   'grasp' only picks. While the object is held, the observation (taken after the
@@ -160,7 +171,14 @@ class RearrangeEnv:
         """
         obs, sim, cfg = self.obs, self.sim, self.cfg
         prim, pix = action['primitive'], action['pix']
-        px_x, px_y = pix[2], pix[1]
+        # parameters carried in the action tuple (object agent with parameterised skills, `--skill_params`):
+        # push (0, row, col, length fraction, heading rad), grasp (0, row, col, approach rad)
+        if prim == 'push' and len(pix) >= 5 and 'heading' not in action:
+            low, high = cfg.push_length_range
+            action = dict(action, heading=float(pix[4]), length=low + float(pix[3]) * (high - low))
+        elif prim == 'grasp' and len(pix) >= 4 and 'approach' not in action:
+            action = dict(action, approach=float(pix[3]))
+        px_x, px_y = int(pix[2]), int(pix[1])
         position = self.ws.px_to_xy(px_x, px_y)
         executed, place_pix, attempted = False, None, False
         stops_before = sim.force_stops
@@ -170,7 +188,14 @@ class RearrangeEnv:
         if self.holding and prim != 'place':
             raise ValueError("an object is held: the next action must be 'place'")
 
-        if prim == 'push':
+        if prim == 'push' and 'heading' in action:  # parameterised push: any floor direction (rad), length in m
+            attempted = True
+            executed = sim.push(position, push_length=float(action.get('length', max(cfg.push_lengths))), heading=float(action['heading']))
+        elif prim == 'pull':  # attach (cup / jaws), drag along the floor, release
+            attempted = True
+            executed = sim.pull(position, approach=float(action.get('approach', 0.0)), heading=float(action.get('heading', 0.0)),
+                                distance=float(action.get('length', max(cfg.push_lengths))))
+        elif prim == 'push':
             angle, length = decode_push(pix[0], cfg.push_lengths)
             if cfg.hierarchy:  # continuous length: pix[3] in 0..1 of the range
                 length = cfg.push_length_range[0] + pix[3] * (cfg.push_length_range[1] - cfg.push_length_range[0])
@@ -187,23 +212,26 @@ class RearrangeEnv:
             held_class, held_id = obs['classmap'][px_y, px_x], obs['idmap'][px_y, px_x]
             held_extent = object_extent_px(obs, held_id) if cfg.footprint_placement else (0, 0)
             held_object = obs.get('instance_to_object', {}).get(int(held_id), held_id)  # ground-truth id (relabelling)
-            executed = sim.pick(position, yaw=cfg.jaw_angle(pix[0]) if cfg.end_effector == 'gripper' else 0.0)
+            executed = sim.pick(position, yaw=cfg.jaw_angle(pix[0]) if cfg.end_effector == 'gripper' else 0.0,
+                                approach=float(action['approach']) if 'approach' in action else self._approach_for(pix),
+                                height=None if action.get('height') is None else float(action['height']))
             if executed and learned and sim.is_valid():  # hold the object, ask for the placement
                 self.holding = True
                 mid = self._full_obs(action)
                 if cfg.footprint_placement:
                     mid['freespace'] = self._placement_space(held_class, mid['freespace'], held_extent)
                 mid['held_class'], mid['held_id'] = int(held_class), float(held_object)
-                mid['heuristic_place'] = get_place_pose(sim, held_class, mid['freespace'])
+                mid['heuristic_place'] = get_place_pose(sim, held_class, self._corridor_free(mid['freespace'], mid['depthmap'], held_extent))
                 self.obs = mid
                 info = {'executed': True, 'attempted': True, 'sorted': False, 'invalid': False, 'place_pix': None, 'relabel': False,
                         'episode_return': self.episode_return, 'actions': self.actions, 'phase': 'place'}
+                self._record_last(prim, pix, True, obs, mid)
                 return self.compact(mid), 0.0, False, False, info
             if executed and not learned:
                 freespace = sim.observe()['freespace']
                 if cfg.footprint_placement:
                     freespace = self._placement_space(held_class, freespace, held_extent)
-                place_pix = get_place_pose(sim, held_class, freespace)
+                place_pix = get_place_pose(sim, held_class, self._corridor_free(freespace, sim.observe()['depthmap'], held_extent))
                 executed = sim.place(self.ws.px_to_xy(*place_pix))
 
         sim.wait_static()
@@ -235,7 +263,29 @@ class RearrangeEnv:
                 'actions': self.actions, 'phase': 'act', 'force_stops': sim.force_stops - stops_before,
                 'shaping': shaping}
         self.obs = next_obs
+        # a terminal step returns the previous observation: the outcome record compares with what the scene looks like now
+        self._record_last(prim, pix, executed, obs, sim.observe() if terminated else next_obs, invalid=not valid)
         return self.compact(next_obs), reward, terminated, truncated, info
+
+    def _corridor_free(self, freespace, depthmap, extent):
+        """With cfg.place_corridor: the free cells whose carry-in corridor holds no other object, if there are any (else all)."""
+        if not self.cfg.place_corridor:
+            return freespace
+        from l2r.envs.approach import place_corridor_obstacles
+        o = self.cfg.offset_px
+        depth = np.asarray(depthmap)[o:np.asarray(depthmap).shape[0] - o, o:]
+        width = int(extent[1]) if extent is not None and len(extent) > 1 and extent[1] else 16
+        clear = place_corridor_obstacles(depth, width // 2 + 2) == 0
+        kept = (np.asarray(freespace) > 0) & clear[:np.asarray(freespace).shape[0], :np.asarray(freespace).shape[1]]
+        return kept.astype(np.asarray(freespace).dtype) if kept.any() else freespace
+
+    def _approach_for(self, pix):
+        """Approach angle of a grasp without an explicit one: straight in, or (cfg.grasp_approach == 'clear') the clearest line in
+        the height map (`l2r.envs.approach`)."""
+        if self.cfg.grasp_approach != 'clear':
+            return 0.0
+        from l2r.envs.approach import choose_approach
+        return choose_approach(self.obs, (int(pix[1]), int(pix[2])))[0]
 
     def _placement_space(self, held_class, freespace, extent):
         if self.cfg.placement_space == 'region':
@@ -246,23 +296,26 @@ class RearrangeEnv:
     def _potential(self):
         """Shaping potential phi(s) of the current scene (0 for the sparse reward); 0 at a goal state."""
         cfg = self.cfg
-        if cfg.reward_mode not in ('progress', 'distance'):
+        if cfg.reward_mode not in ('progress', 'distance', 'combined'):
             return 0.0
         fraction, distance = self.sim.scene.progress()
+        width = float(self.ws.bounds[1][1] - self.ws.bounds[1][0])
         if cfg.reward_mode == 'progress':
             return cfg.reward_shaping_scale * (fraction - 1.0)
-        return -cfg.reward_shaping_scale * distance / float(self.ws.bounds[1][1] - self.ws.bounds[1][0])
+        if cfg.reward_mode == 'distance':
+            return -cfg.reward_shaping_scale * distance / width
+        return cfg.reward_shaping_scale * ((fraction - 1.0) - distance / width)  # combined: placements and partial progress
 
     def _shaped(self, reward, terminated, valid):
         """Add the reward variant's extra term to the sparse reward; returns (reward, extra term)."""
         cfg, extra = self.cfg, 0.0
-        if cfg.reward_mode in ('progress', 'distance'):
+        if cfg.reward_mode in ('progress', 'distance', 'combined'):
             phi_next = self._potential() if (valid and not terminated) else 0.0  # absorbing states have potential 0
             extra = cfg.gamma * phi_next - self._phi
             self._phi = phi_next
-        elif cfg.reward_mode == 'noop' and not terminated:
+        if cfg.reward_mode in ('noop', 'combined') and not terminated:
             moved = np.abs(self.sim.scene.positions() - self._positions).max() if len(self._positions) else 0.0
-            extra = -cfg.noop_penalty if moved < 0.005 else 0.0
+            extra += -cfg.noop_penalty if moved < 0.005 else 0.0
         return reward + extra, extra
 
     # ------------------------------------------------------------------ observations
@@ -275,10 +328,28 @@ class RearrangeEnv:
             obs['belief_full'] = self.tracker.update(obs, last_action)
         return obs
 
+    def _regions(self):
+        """(3, 2) rows [low, high] of the target region of each class (CLASSES order) in the un-padded heightmap."""
+        return np.array([[self.ws.y_to_row(y) for y in self.sim.scene.regions[name]] for name in CLASSES], np.int16)
+
+    def _record_last(self, primitive, pix, executed, before, after, invalid=False):
+        """What the agent may know about its previous action (no privileged information: the robot knows what it did, whether the
+        primitive completed, and can compare two height maps): primitive one-hot, executed, fraction of the cabinet's cells whose height
+        changed by more than 1 cm, the scene became invalid; and the action pixel. The same record in the NEXT observation is the
+        label of the outcome heads (`object_trainer`)."""
+        out = np.zeros(LAST_ACTION_SIZE, np.float32)
+        out[LAST_PRIMITIVES.index(primitive) if primitive in LAST_PRIMITIVES else 0] = 1.0
+        out[len(LAST_PRIMITIVES)] = float(bool(executed))
+        out[len(LAST_PRIMITIVES) + 1] = float((np.abs(np.asarray(after['depthmap']) - np.asarray(before['depthmap'])) > 0.01).mean())
+        out[len(LAST_PRIMITIVES) + 2] = float(bool(invalid))
+        self._last_action, self._last_pix = out, np.array([pix[1], pix[2]], np.int16)
+
     def compact(self, obs):
         """What leaves the environment and is stored in the replay buffer (a few 100 KB instead of ~4 MB:
         the raw camera images and the auxiliary maps are dropped)."""
-        out = {'colormap': obs['colormap'], 'depthmap': obs['depthmap']}
+        out = {'colormap': obs['colormap'], 'depthmap': obs['depthmap'], 'regions': self._regions(),
+               'last_action': getattr(self, '_last_action', np.zeros(LAST_ACTION_SIZE, np.float32)),
+               'last_pix': getattr(self, '_last_pix', np.array([-1, -1], np.int16))}
         if obs.get('held_class'):  # object in the gripper (learned placement): what the place head needs
             out['held_class'] = obs['held_class']
             out['freespace'] = (obs['freespace'] > 0).astype(np.uint8)

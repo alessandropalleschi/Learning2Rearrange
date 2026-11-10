@@ -18,7 +18,7 @@ import numpy as np
 from l2r.config import Config, SimParams
 from l2r.envs.rearrange import RearrangeEnv
 from l2r.learning.policy import select_for
-from l2r.learning.trainer import Trainer
+from l2r.learning.factory import make_trainer
 from l2r.sim.constants import OCCLUDED_RGB
 from l2r.sim.workspace import Workspace
 
@@ -90,7 +90,7 @@ def main(argv=None):
     ws = Workspace.from_params(params)
     np.random.seed(args.seed)
     env = RearrangeEnv(cfg, num_obj=args.num_obj, params=params)
-    trainer = Trainer(cfg, is_testing=True)
+    trainer = make_trainer(cfg, is_testing=True)
     profiler = cProfile.Profile()
     profiler.enable()
     stats = run_random_actions(env, trainer, cfg, ws, args.actions)

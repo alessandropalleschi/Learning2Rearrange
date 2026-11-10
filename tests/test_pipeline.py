@@ -43,6 +43,18 @@ def test_learned_placement_is_a_two_step_action(fake_simulator):
 
 @pytest.mark.parametrize('belief,placement,push_lengths,extra', [
     ('none', 'heuristic', (0.08,), ['--hierarchy']),
+    ('none', 'heuristic', (0.08,), ['--agent', 'object']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy']),  # learned placement + continuous length + ghost tokens
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--outcome_weight', '0.5', '--outcome_penalty', '0.3']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--twin_q', '--n_step', '3']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--object_algo', 'iql', '--twin_q', '--n_step', '3']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--object_algo', 'iql', '--skill_params', '--twin_q']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--object_algo', 'iql', '--history_tokens']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--outcome_weight', '0.5', '--outcome_mask', '0.3']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--object_algo', 'iql', '--outcome_weight', '0.5', '--outcome_mask', '0.3']),
+    ('none', 'learned', (0.08,), ['--arch_skips', '--n_step', '3']),
+    ('none', 'learned', (0.08,), ['--agent', 'policy_critic']),
+    ('none', 'learned', (0.08,), ['--arch_skips', '--region_channels', '--equiv_targets']),
     ('none', 'heuristic', (0.08,), ['--end_effector', 'gripper', '--jaw_yaws', '3']),
     ('none', 'learned', (0.08,), ['--end_effector', 'gripper', '--jaw_yaws', '3', '--hierarchy']),
     ('none', 'heuristic', (0.08,), ['--backbone', 'hybrid']),
@@ -117,7 +129,7 @@ def run_fake_episode(**cfg_kwargs):
     return cfg, np.array(rewards), np.array(shaping), relabels
 
 
-@pytest.mark.parametrize('mode,phi0', [('progress', -1.0), ('distance', -0.2 / 0.6)])
+@pytest.mark.parametrize('mode,phi0', [('progress', -1.0), ('distance', -0.2 / 0.6), ('combined', -1.0 - 0.2 / 0.6)])
 def test_potential_based_shaping_keeps_the_discounted_return_up_to_the_initial_potential(fake_simulator, mode, phi0):
     """sum_t gamma^t (r_t + gamma phi(s_t+1) - phi(s_t)) = sum_t gamma^t r_t - phi(s_0) for an absorbing goal (phi = 0):
     the shaped return differs from the sparse one by a constant, so the optimal policy is the same."""
@@ -143,6 +155,14 @@ def test_relabelling_still_triggers_with_shaped_rewards_and_the_value_range_foll
     assert Config(reward_mode='sparse').q_range == pytest.approx((-100.0, 0.0))
     assert Config(reward_mode='progress', reward_shaping_scale=2.0).q_range == pytest.approx((-100.0, 2.0))
     assert Config(reward_mode='noop', noop_penalty=1.0).q_range[0] == pytest.approx(-110.0)
+    assert Config(reward_mode='combined', reward_shaping_scale=3.0, noop_penalty=0.5).q_range == pytest.approx((-105.0, 6.0))
+
+
+def test_combined_reward_adds_the_noop_penalty_to_the_potential_shaping(fake_simulator, monkeypatch):
+    monkeypatch.setattr(FakeSim, '_positions', lambda self: np.zeros((1, 3)))  # nothing ever moves
+    _, _, with_noop, _ = run_fake_episode(reward_mode='combined', noop_penalty=0.5)
+    _, _, potential_only, _ = run_fake_episode(reward_mode='combined', noop_penalty=0.0)
+    assert np.allclose(with_noop - potential_only, [-0.5, -0.5, 0.0])
 
 
 def test_curriculum_advances_after_a_greedy_validation(fake_simulator, tmp_path, monkeypatch, capsys):
@@ -157,6 +177,30 @@ def test_curriculum_advances_after_a_greedy_validation(fake_simulator, tmp_path,
     assert 'Validation 1 (1 objects, 3 greedy episodes): success 1.00' in out and 'Curriculum: now using 2 objects' in out
     rows = (tmp_path / 'logs/v/validation.csv').read_text().strip().splitlines()
     assert rows[0].split(',')[2:] == ['1', '1.000']
+
+
+def test_pooled_validation_waits_for_the_window_and_fixed_seeds_repeat_the_scenes(fake_simulator, tmp_path, monkeypatch, capsys):
+    from l2r import evaluation
+    monkeypatch.chdir(tmp_path)
+    seeds = []
+    real = evaluation.evaluate
+
+    def spy(trainer, venv, cfg, ws, num_obj, episodes, base_seed):
+        seeds.append((num_obj, base_seed))
+        return real(trainer, venv, cfg, ws, num_obj, episodes, base_seed)
+    monkeypatch.setattr(evaluation, 'evaluate', spy)
+    parser = argparse.ArgumentParser()
+    add_arguments(parser)
+    args = parser.parse_args(['--num_envs', '2', '--max_obj', '3', '--max_actions', '5', '--max_iterations', '80',
+                              '--start_method', 'fork', '--batch_size', '4', '--logging_directory', 'w',
+                              '--curriculum_eval', '3', '--curriculum_eval_every', '4', '--curriculum_window', '2',
+                              '--fixed_validation_seeds', '--success_threshold', '0.85'])
+    run(args)
+    out = capsys.readouterr().out
+    assert 'Validation 1 (1 objects, 3 greedy episodes): success 1.00, mean actions 3.0, pooled over 1: 1.00 -> stay' in out
+    assert 'pooled over 2: 1.00 -> advance' in out  # the fake scene is always sorted: advances once the window is full
+    first_stage = [seed for n, seed in seeds if n == 1]
+    assert len(first_stage) == 2 and len(set(first_stage)) == 1  # the same scenes at both validations of the stage
 
 
 def test_stage_mixing_draws_earlier_stages_and_logs_the_actual_object_count(fake_simulator, tmp_path, monkeypatch):
@@ -212,3 +256,47 @@ def test_placement_space_offers_only_cells_inside_the_target_region(fake_simulat
     none = np.zeros((120, 100), np.uint8)
     none[60:110, 30:90] = 1  # no free cell in the region at all: everything else is offered (nothing else to do)
     assert placement_space(FakeSim(), 1, none, (4, 4))[60:].any()
+
+
+def test_observations_record_the_last_action_and_its_outcome(fake_simulator):
+    from l2r.config import Config
+    from l2r.envs.rearrange import LAST_ACTION_SIZE, RearrangeEnv
+    env = RearrangeEnv(Config(placement='heuristic'), num_obj=1)
+    obs = env.reset()
+    assert obs['last_action'].shape == (LAST_ACTION_SIZE,) and not obs['last_action'].any() and tuple(obs['last_pix']) == (-1, -1)
+    obs = env.step({'primitive': 'push', 'pix': (0, 50, 60)})[0]
+    assert obs['last_action'][0] == 1 and tuple(obs['last_pix']) == (50, 60)
+    assert 0.0 <= obs['last_action'][5] <= 1.0
+
+
+def test_parameterised_actions_reach_the_simulator(fake_simulator):
+    from unittest import mock
+
+    from l2r.config import Config
+    from l2r.envs.rearrange import RearrangeEnv
+    env = RearrangeEnv(Config(placement='heuristic'), num_obj=1)
+    env.reset()
+    with mock.patch.object(env.sim, 'push', return_value=True) as push, mock.patch.object(env.sim, 'pull', return_value=True) as pull, \
+            mock.patch.object(env.sim, 'pick', return_value=False) as pick:
+        env.step({'primitive': 'push', 'pix': (0, 50, 60), 'heading': 3.0, 'length': 0.05})
+        assert push.call_args.kwargs == {'push_length': 0.05, 'heading': 3.0}
+        env.step({'primitive': 'pull', 'pix': (0, 50, 60), 'heading': 0.2, 'length': 0.07, 'approach': 0.1})
+        assert pull.call_args.kwargs == {'approach': 0.1, 'heading': 0.2, 'distance': 0.07}
+        env.step({'primitive': 'grasp', 'pix': (0, 50, 60), 'approach': -0.4})
+        assert pick.called and pick.call_args.kwargs['approach'] == -0.4
+
+
+def test_parameters_in_the_action_tuple_reach_the_simulator(fake_simulator):
+    from unittest import mock
+
+    from l2r.config import Config
+    from l2r.envs.rearrange import RearrangeEnv
+    cfg = Config(placement='heuristic')
+    env = RearrangeEnv(cfg, num_obj=1)
+    env.reset()
+    with mock.patch.object(env.sim, 'push', return_value=True) as push, mock.patch.object(env.sim, 'pick', return_value=False) as pick:
+        env.step({'primitive': 'push', 'pix': (0, 50.0, 60.0, 0.5, 3.0)})
+        low, high = cfg.push_length_range
+        assert push.call_args.kwargs == {'push_length': low + 0.5 * (high - low), 'heading': 3.0}
+        env.step({'primitive': 'grasp', 'pix': (0, 50, 60, -0.3)})
+        assert pick.call_args.kwargs['approach'] == -0.3

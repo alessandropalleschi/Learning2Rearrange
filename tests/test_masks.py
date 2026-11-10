@@ -3,7 +3,7 @@ import numpy as np
 
 from l2r.config import Config
 from l2r.envs.rearrange import check_push
-from l2r.learning.masks import front_grasp_cells, push_path_cells, structured_masks
+from l2r.learning.masks import front_grasp_cells, push_path_cells
 from l2r.learning.trainer import Trainer
 from l2r.sim.workspace import Workspace
 
@@ -11,7 +11,7 @@ from l2r.sim.workspace import Workspace
 def test_grasp_mask_keeps_the_cells_just_behind_the_front_face_of_each_run():
     objects = np.zeros((4, 12), bool)
     objects[0, 2:9] = objects[1, 0:4] = objects[1, 6:8] = objects[2, 5] = objects[3, 4:6] = True
-    mask = front_grasp_cells(objects)
+    mask = front_grasp_cells(objects, edge_margin=0)
     assert [np.flatnonzero(mask[r]).tolist() for r in range(4)] == [[5, 6, 7], [0, 1, 2, 6], [5], [4]]
     assert not (mask & ~objects).any()  # never outside an object
 
@@ -42,7 +42,7 @@ def test_structured_masks_through_the_trainer():
     structured = Trainer(Config(mask_level='structured'))
     assert structured.valid_mask(depth, 'grasp').sum() < basic.valid_mask(depth, 'grasp').sum() / 5  # a thin front band
     assert structured.valid_mask(depth, 'push').shape == basic.valid_mask(depth, 'push').shape == (2, 120, 100)
-    push_s, push_b = structured.valid_mask(depth, 'push'), basic.valid_mask(depth, 'push')
+    push_s = structured.valid_mask(depth, "push")
     assert push_s.sum() > 0
     objects = (depth[4:-4, 4:] > 0.008)
     assert not (push_s & objects[None]).any()  # the blade never starts inside an object
@@ -61,3 +61,18 @@ def test_blade_strip_mask_requires_an_object_in_the_blades_own_columns():
     assert loose[12, 5] and not towards_up[12, 5]  # check_push's rectangle accepts what the strip rejects
     towards_down = push_path_cells(objects, 10, False, half_width=2)
     assert towards_down[30, 11] and not towards_down[12, 11]
+
+
+def test_grasp_mask_drops_the_edges_of_an_objects_width():
+    objects = np.zeros((20, 30), bool)
+    objects[2:12, 10:24] = True  # one object, 10 rows wide
+    full = front_grasp_cells(objects, edge_margin=0)
+    centre = front_grasp_cells(objects, edge_margin=0.15)
+    rows_full, rows_centre = sorted(set(np.nonzero(full)[0])), sorted(set(np.nonzero(centre)[0]))
+    assert rows_full == list(range(2, 12))
+    assert rows_centre == list(range(4, 10))  # rows within 15% of the 2..11 extent (1.35 rows) are dropped on both sides
+    assert (centre <= full).all() and centre.sum() == 6 * 3
+    two = np.zeros((20, 30), bool)
+    two[1:5, 10:20] = two[12:18, 10:20] = True  # separate objects: each gets its own margin
+    rows = sorted(set(np.nonzero(front_grasp_cells(two, edge_margin=0.3))[0]))
+    assert rows == [2, 3, 14, 15]  # objects span rows 1..4 and 12..17: boundaries at 1.9 / 3.1 and 13.5 / 15.5
