@@ -50,6 +50,17 @@ def obstacles(obs, target_rc, approach):
     return int(np.sum(corridor & (depth > RAISED) & ~own))
 
 
+def place_corridor_obstacles(depth, half_width):
+    """(H, W) number of raised cells (other objects) in the straight-in corridor of a placement at every cell: rows within
+    `half_width` of the cell, columns from the cell to the cabinet front (the held object is carried in along it).
+    `depth`: height map in action coordinates (the held object is out of the cabinet)."""
+    raised = (np.asarray(depth) > RAISED).astype(np.int32)
+    towards_front = np.cumsum(raised[:, ::-1], axis=1)[:, ::-1]  # raised cells in columns >= c, per row
+    padded = np.pad(towards_front, ((half_width + 1, half_width), (0, 0)))
+    rows = np.cumsum(padded, axis=0)
+    return rows[2 * half_width + 1:] - rows[:-2 * half_width - 1]
+
+
 def choose_approach(obs, target_rc, candidates=CANDIDATES, opening_margin_cells=6):
     """(approach angle, obstacle count) of the clearest feasible candidate; ties go to the earlier candidate (straight in first)."""
     shape = crop(obs['depthmap']).shape

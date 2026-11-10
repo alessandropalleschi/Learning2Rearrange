@@ -31,3 +31,14 @@ def test_a_blocker_in_front_makes_the_straight_approach_bad_and_an_angled_one_is
 def test_entry_row_follows_the_approach_angle():
     assert entry_row((120, 100), (60, 40), 0.0) == 60
     assert entry_row((120, 100), (60, 40), np.deg2rad(45)) > 60  # positive angle: comes in from larger rows (larger y)
+
+
+def test_place_corridor_counts_other_objects_between_a_cell_and_the_front():
+    from l2r.envs.approach import place_corridor_obstacles
+    depth = np.zeros((120, 100), np.float32)
+    depth[50:60, 70:80] = 0.1  # an object between the back-middle and the front
+    counts = place_corridor_obstacles(depth, 4)
+    assert counts[55, 30] == 90  # behind it: rows 51..59 of the object (half width 4) are in the corridor
+    assert counts[55, 90] == 0  # in front of it: nothing to pass
+    assert counts[20, 30] == 0  # other rows: clear
+    assert 0 < counts[47, 30] < 100  # the corridor edge clips it

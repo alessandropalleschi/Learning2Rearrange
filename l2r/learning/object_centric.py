@@ -34,7 +34,7 @@ PUSH_GAP = 3  # cells between the blade start and the object
 TYPE_INSTANCE, TYPE_REGION, TYPE_GLOBAL, TYPE_GHOST = 0, 1, 2, 3
 PLACE_STRIDE = 2  # cells between place candidates (finest) (a grid over the free cells the held object fits in)
 MAX_PLACE = 512  # at most this many place candidates (the grid gets coarser beyond)
-PLACE_FEATURES = 12
+PLACE_FEATURES = 13
 OUTCOMES = 3  # executed, scene invalid, height map changed (see `RearrangeEnv._record_last`)
 CLASS_RGB = np.array([np.multiply(COLORS[name][:3], 255) for name in CLASSES]).round().astype(int)
 
@@ -263,6 +263,9 @@ def place_candidates(obs):
     out[:, 9] = density[rows, cols]
     out[:, 10] = np.minimum(distance[rows, cols], 20) / 20.0
     out[:, 11] = 1.0
+    from l2r.envs.approach import place_corridor_obstacles
+    corridor = place_corridor_obstacles(crop(obs['depthmap']), 8)  # other objects in the carry-in corridor (8-cell half width)
+    out[:, 12] = np.minimum(corridor[rows, cols], 200) / 200.0
     actions = np.stack([np.zeros_like(rows), rows, cols], axis=1).astype(np.int64)
     return actions, out
 

@@ -221,7 +221,7 @@ class RearrangeEnv:
                 if cfg.footprint_placement:
                     mid['freespace'] = self._placement_space(held_class, mid['freespace'], held_extent)
                 mid['held_class'], mid['held_id'] = int(held_class), float(held_object)
-                mid['heuristic_place'] = get_place_pose(sim, held_class, mid['freespace'])
+                mid['heuristic_place'] = get_place_pose(sim, held_class, self._corridor_free(mid['freespace'], mid['depthmap'], held_extent))
                 self.obs = mid
                 info = {'executed': True, 'attempted': True, 'sorted': False, 'invalid': False, 'place_pix': None, 'relabel': False,
                         'episode_return': self.episode_return, 'actions': self.actions, 'phase': 'place'}
@@ -231,7 +231,7 @@ class RearrangeEnv:
                 freespace = sim.observe()['freespace']
                 if cfg.footprint_placement:
                     freespace = self._placement_space(held_class, freespace, held_extent)
-                place_pix = get_place_pose(sim, held_class, freespace)
+                place_pix = get_place_pose(sim, held_class, self._corridor_free(freespace, sim.observe()['depthmap'], held_extent))
                 executed = sim.place(self.ws.px_to_xy(*place_pix))
 
         sim.wait_static()
@@ -266,6 +266,18 @@ class RearrangeEnv:
         # a terminal step returns the previous observation: the outcome record compares with what the scene looks like now
         self._record_last(prim, pix, executed, obs, sim.observe() if terminated else next_obs, invalid=not valid)
         return self.compact(next_obs), reward, terminated, truncated, info
+
+    def _corridor_free(self, freespace, depthmap, extent):
+        """With cfg.place_corridor: the free cells whose carry-in corridor holds no other object, if there are any (else all)."""
+        if not self.cfg.place_corridor:
+            return freespace
+        from l2r.envs.approach import place_corridor_obstacles
+        o = self.cfg.offset_px
+        depth = np.asarray(depthmap)[o:np.asarray(depthmap).shape[0] - o, o:]
+        width = int(extent[1]) if extent is not None and len(extent) > 1 and extent[1] else 16
+        clear = place_corridor_obstacles(depth, width // 2 + 2) == 0
+        kept = (np.asarray(freespace) > 0) & clear[:np.asarray(freespace).shape[0], :np.asarray(freespace).shape[1]]
+        return kept.astype(np.asarray(freespace).dtype) if kept.any() else freespace
 
     def _approach_for(self, pix):
         """Approach angle of a grasp without an explicit one: straight in, or (cfg.grasp_approach == 'clear') the clearest line in
