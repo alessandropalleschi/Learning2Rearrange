@@ -279,10 +279,11 @@ class RearrangeEnv:
                 self._record_last(prim, pix, True, obs, mid)
                 return self.compact(mid), 0.0, False, False, info
             if executed and not learned:
-                freespace = sim.observe()['freespace']
+                view = sim.observe()  # one render for both maps
+                freespace = view['freespace']
                 if cfg.footprint_placement:
                     freespace = self._placement_space(held_class, freespace, held_extent)
-                place_pix = get_place_pose(sim, held_class, self._corridor_free(freespace, sim.observe()['depthmap'], held_extent, held_class))
+                place_pix = get_place_pose(sim, held_class, self._corridor_free(freespace, view['depthmap'], held_extent, held_class))
                 executed = sim.place(self.ws.px_to_xy(*place_pix))
 
         sim.wait_static()
