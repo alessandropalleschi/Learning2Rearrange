@@ -155,7 +155,7 @@ class Config:
                    grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), demo_anneal_steps=get('demo_anneal_steps', defaults.demo_anneal_steps),
                    twin_q=get('twin_q', False), n_step=get('n_step', 1), object_algo=get('object_algo', 'dqn'), skill_params=get('skill_params', False), history_tokens=get('history_tokens', False),
                    iql_expectile=get('iql_expectile', 0.8), iql_beta=get('iql_beta', 3.0), outcome_weight=get('outcome_weight', 0.0), outcome_penalty=get('outcome_penalty', 0.0),
-                   eps_end=get('eps_end', defaults.eps_end), reward_mode=get('reward_mode', defaults.reward_mode),
+                   eps_end=get('eps_end', defaults.eps_end), eps_start=get('eps_start', defaults.eps_start), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
 
@@ -227,6 +227,7 @@ class Config:
                             help='object agent: subtract this x P(invalid) x |reward_invalid| from Q when acting')
         parser.add_argument('--demo_anneal_steps', type=int, default=0,
                             help='fade the demonstration share linearly to 0 over this many RL gradient steps (0 = constant)')
+        parser.add_argument('--eps_start', type=float, default=0.8, help='epsilon at the start of every curriculum stage')
         parser.add_argument('--eps_end', type=float, default=0.01, help='floor of the epsilon-greedy exploration')
         parser.add_argument('--grasp_approach', choices=['straight', 'clear'], default='straight',
                             help="grasp approach line: straight in (original) or the clearest of several angles in the height map")
