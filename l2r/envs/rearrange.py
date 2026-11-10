@@ -310,8 +310,10 @@ class RearrangeEnv:
         # their own one; reassigning the classes would make this a sorted state.
         relabel = (base_reward == cfg.reward_step and self._relabel_state[0]
                    and (not prev_relabel[0] or prev_relabel[1] != self._relabel_state[1]))
+        relabel_reward = self._relabel_reward() if relabel else None
         info = {'executed': bool(executed), 'attempted': attempted, 'sorted': bool(sorted_ and valid), 'invalid': not valid,
                 'place_pix': place_pix, 'relabel': bool(relabel), 'episode_return': self.episode_return,
+                **({'relabel_reward': relabel_reward} if relabel_reward is not None else {}),
                 'actions': self.actions, 'phase': 'act', 'force_stops': sim.force_stops - stops_before,
                 'shaping': shaping}
         self.obs = next_obs
@@ -361,10 +363,28 @@ class RearrangeEnv:
     # ------------------------------------------------------------------ reward variants
     def _potential(self):
         """Shaping potential phi(s) of the current scene (0 for the sparse reward); 0 at a goal state."""
-        cfg = self.cfg
-        if cfg.reward_mode not in ('progress', 'distance', 'combined'):
+        if self.cfg.reward_mode not in ('progress', 'distance', 'combined'):
             return 0.0
-        fraction, distance = self.sim.scene.progress()
+        return self._potential_from(*self.sim.scene.progress())
+
+    def _relabel_reward(self):
+        """Reward of the hindsight-relabelled goal transition with shaping (`cfg.relabel_shaping`): reward_goal - phi of the state
+        BEFORE the action under the RELABELLED classes, which is what a real final step earns. None when it does not apply."""
+        cfg, scene = self.cfg, self.sim.scene
+        if not cfg.relabel_shaping or cfg.reward_mode not in ('progress', 'distance', 'combined') or self._positions is None:
+            return None
+        names = {label: name for name, label in LABELS.items()}
+        relabelled = dict(zip(scene.relabel_ids, scene.relabel_classes))
+        distances = []
+        for object_id, position in zip(scene.object_ids, self._positions):
+            name = names[relabelled[object_id]] if object_id in relabelled else scene.class_name(object_id)
+            distances.append(scene.goal_distance(position, name))
+        fraction = float(np.mean([d == 0.0 for d in distances]))
+        return cfg.reward_goal - self._potential_from(fraction, float(np.mean(distances)))
+
+    def _potential_from(self, fraction, distance):
+        """The potential of the reward mode from the sorted fraction and the mean distance to the goals."""
+        cfg = self.cfg
         width = float(self.ws.bounds[1][1] - self.ws.bounds[1][0])
         if cfg.reward_mode == 'progress':
             return cfg.reward_shaping_scale * (fraction - 1.0)

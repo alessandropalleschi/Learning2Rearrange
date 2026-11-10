@@ -159,7 +159,7 @@ class TrainingLoop:
                 obs_r, next_r = infos[i]['relabel_pair']
                 carry_over(trainer, obs[i], obs_r)
                 carry_over(trainer, next_obs[i], next_r)
-                trainer.buffer.push(obs_r, pix, next_r, self.cfg.reward_goal, primitive, True)
+                trainer.buffer.push(obs_r, pix, next_r, infos[i].get('relabel_reward', self.cfg.reward_goal), primitive, True)
         trainer.train_step(batch)  # short-term memory: learn from the newest transitions at once
         for _ in range(args.updates_per_step * n):
             loss = trainer.optimize()
