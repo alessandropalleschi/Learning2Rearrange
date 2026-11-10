@@ -42,7 +42,7 @@ def test_structured_masks_through_the_trainer():
     structured = Trainer(Config(mask_level='structured'))
     assert structured.valid_mask(depth, 'grasp').sum() < basic.valid_mask(depth, 'grasp').sum() / 5  # a thin front band
     assert structured.valid_mask(depth, 'push').shape == basic.valid_mask(depth, 'push').shape == (2, 120, 100)
-    push_s, push_b = structured.valid_mask(depth, 'push'), basic.valid_mask(depth, 'push')
+    push_s = structured.valid_mask(depth, "push")
     assert push_s.sum() > 0
     objects = (depth[4:-4, 4:] > 0.008)
     assert not (push_s & objects[None]).any()  # the blade never starts inside an object

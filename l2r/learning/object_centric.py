@@ -157,6 +157,8 @@ def global_features(instances, obs, ghosts=()):
     if 'last_action' in obs:  # previous primitive (push, grasp, place, pull), executed, changed fraction of the height map (x10)
         last = np.asarray(obs['last_action'], np.float32)
         out[3:7], out[7], out[8] = last[:4], last[4], min(10.0 * last[5], 1.0)
+    if obs.get('held_class'):  # an object is held (learned placement): which class, so state values know what is being placed
+        out[9 + CLASSES.index({v: k for k, v in LABELS.items()}[int(obs['held_class'])])] = 1.0
     out[17] = 1.0
     return out
 
@@ -283,11 +285,14 @@ def slot_of(state, primitive, action, tolerance=3):
 class ObjectQNet(nn.Module):
     """Transformer over [global, 3 region, N instance] tokens -> Q for every (instance, slot)."""
 
-    def __init__(self, n_slots, dim=64, layers=2, heads=4, placement=False, outcome=False, twin=False):
+    def __init__(self, n_slots, dim=64, layers=2, heads=4, placement=False, outcome=False, twin=False, iql=False):
         """twin: two independent value heads on the shared encoder (TD3-style clipped double Q: the trainer's targets take their
         minimum; acting uses their mean)."""
         super().__init__()
-        self.n_slots, self.placement, self.outcome, self.twin = n_slots, placement, outcome, twin
+        self.n_slots, self.placement, self.outcome, self.twin, self.iql = n_slots, placement, outcome, twin, iql
+        if iql:  # implicit Q-learning: a state value (from the global token) and a policy over the candidates
+            self.value_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
+            self.pi_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, n_slots))
         self.embed = nn.Linear(FEATURES, dim)
         self.type_embed = nn.Embedding(4, dim)
         layer = nn.TransformerEncoderLayer(dim, heads, 2 * dim, dropout=0.0, activation='gelu', batch_first=True, norm_first=True)
@@ -307,14 +312,31 @@ class ObjectQNet(nn.Module):
                 self.place_head_twin = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
             if outcome:
                 self.place_outcome_head = nn.Linear(dim, OUTCOMES)
+            if iql:
+                self.place_pi_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
+
+    def value(self, tokens, counts):
+        """(B,) state value V(s) from the contextualised global token (IQL)."""
+        return self.value_head(self.encode(tokens, counts)[0][:, 0])[..., 0]
+
+    def policy_logits(self, tokens, counts):
+        """(B, Nmax, n_slots) policy logits of every object-action slot (IQL)."""
+        return self.pi_head(self.embed_tokens(tokens, counts))
+
+    def place_features(self, tokens, counts, place_tokens):
+        scene, pad = self.encode(tokens, counts)
+        query = self.place_embed(place_tokens)
+        attended, _ = self.place_attention(query, scene, scene, key_padding_mask=pad)
+        return self.place_norm(query + attended)
+
+    def place_policy_logits(self, tokens, counts, place_tokens):
+        """(B, P) policy logits of the place candidates (IQL)."""
+        return self.place_pi_head(self.place_features(tokens, counts, place_tokens))[..., 0]
 
     def place_values(self, tokens, counts, place_tokens, with_outcome=False, heads=False):
         """place_tokens (B, P, PLACE_FEATURES) -> (B, P) values of placing the held object at each candidate (the mean of the twin
         heads; heads=True: (H, B, P) per head), and with_outcome the (B, P, OUTCOMES) outcome logits."""
-        scene, pad = self.encode(tokens, counts)
-        query = self.place_embed(place_tokens)
-        attended, _ = self.place_attention(query, scene, scene, key_padding_mask=pad)
-        feature = self.place_norm(query + attended)
+        feature = self.place_features(tokens, counts, place_tokens)
         values = torch.stack([self.place_head(feature)[..., 0]] + ([self.place_head_twin(feature)[..., 0]] if self.twin else []))
         values = values if heads else values.mean(0)
         return (values, self.place_outcome_head(feature)) if with_outcome else values
@@ -400,8 +422,8 @@ class ObjectQNetContinuous(ObjectQNet):
     the length). Per instance token: a pick value, an actor that proposes a push length per direction (0..1 of the length range), and a
     push critic Q(token, direction, length). Slots: 0 pick, 1 / 2 push in direction 0 / 1."""
 
-    def __init__(self, dim=64, layers=2, heads=4, placement=False, outcome=False, twin=False):
-        super().__init__(n_slots=3, dim=dim, layers=layers, heads=heads, placement=placement, outcome=outcome, twin=twin)
+    def __init__(self, dim=64, layers=2, heads=4, placement=False, outcome=False, twin=False, iql=False):
+        super().__init__(n_slots=3, dim=dim, layers=layers, heads=heads, placement=placement, outcome=outcome, twin=twin, iql=iql)
         del self.head
         if twin:
             del self.head_twin

@@ -80,6 +80,9 @@ class Config:
                                       # the full margin at Chebyshev distance r in the expert's own map (neighbouring cells of one
                                       # object are equally good, a smooth network can not separate them)
     demo_fraction: float = 0.25       # share of each batch drawn from the demonstrations (when loaded)
+    object_algo: str = 'dqn'          # object agent: 'dqn' (double DQN) | 'iql' (implicit Q-learning, advantage-weighted policy)
+    iql_expectile: float = 0.8        # IQL: expectile of the value regression (0.5 = mean, -> 1 = max over the data's actions)
+    iql_beta: float = 3.0             # IQL: inverse temperature of the advantage weights
     n_step: int = 1                   # > 1: n-step returns in the replay (see l2r/learning/nstep.py)
     twin_q: bool = False              # object agent: two value heads, TD targets from their minimum (TD3-style clipped double Q)
     outcome_weight: float = 0.0       # > 0: object agent outcome heads (executed / invalid / changed) trained with this weight
@@ -148,7 +151,8 @@ class Config:
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
                    equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
                    grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), demo_anneal_steps=get('demo_anneal_steps', defaults.demo_anneal_steps),
-                   twin_q=get('twin_q', False), n_step=get('n_step', 1), outcome_weight=get('outcome_weight', 0.0), outcome_penalty=get('outcome_penalty', 0.0),
+                   twin_q=get('twin_q', False), n_step=get('n_step', 1), object_algo=get('object_algo', 'dqn'),
+                   iql_expectile=get('iql_expectile', 0.8), iql_beta=get('iql_beta', 3.0), outcome_weight=get('outcome_weight', 0.0), outcome_penalty=get('outcome_penalty', 0.0),
                    eps_end=get('eps_end', defaults.eps_end), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
@@ -205,6 +209,9 @@ class Config:
                             help="'structured': mask the Q-maps to grasps at an object's front face and pushes with something in the "
                                  "blade's path")
         parser.add_argument('--demo_fraction', type=float, default=0.25, help='share of each batch from the demonstrations')
+        parser.add_argument('--object_algo', choices=['dqn', 'iql'], default='dqn', help='object agent learning algorithm')
+        parser.add_argument('--iql_expectile', type=float, default=0.8)
+        parser.add_argument('--iql_beta', type=float, default=3.0)
         parser.add_argument('--n_step', type=int, default=1, help='n-step returns in the replay (1 = one-step TD, as before)')
         parser.add_argument('--twin_q', action='store_true', default=False,
                             help='object agent: clipped double Q (two value heads, targets from their minimum)')

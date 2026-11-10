@@ -22,15 +22,16 @@ class ObjectTrainer(Trainer):
         self.learned_place = self.cfg.placement == 'learned'
         self.outcome = self.cfg.outcome_weight > 0  # outcome heads (executed / invalid / changed), trained from free labels
         self.twin = bool(self.cfg.twin_q)  # clipped double Q: two value heads, targets from their minimum
+        self.iql = self.cfg.object_algo == 'iql'
         self.n_slots = 1 + 2 * len(self.cfg.push_lengths)
         self.continuous = bool(self.cfg.hierarchy)  # --agent object --hierarchy: a continuous push length (actor + length-conditioned critic)
         if self.continuous:
             self.n_slots = 3
             make = lambda: ObjectQNetContinuous(self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place,
-                                                     outcome=self.outcome, twin=self.twin).to(DEVICE)
+                                                     outcome=self.outcome, twin=self.twin, iql=self.iql).to(DEVICE)
         else:
             make = lambda: ObjectQNet(self.n_slots, self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place,
-                                      outcome=self.outcome, twin=self.twin).to(DEVICE)
+                                      outcome=self.outcome, twin=self.twin, iql=self.iql).to(DEVICE)
         self.model, self.model_target = make(), make()
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
@@ -74,6 +75,7 @@ class ObjectTrainer(Trainer):
                 q, actor = q.float().cpu().numpy(), actor.float().cpu().numpy()
             else:
                 q = net(tokens, n_objects).float().cpu().numpy()
+            q = self._acting_scores(net, tokens, n_objects, q)
             risk = self.cfg.outcome_penalty * abs(self.cfg.reward_invalid) if self.outcome and network == 'policy' else 0.0
             if risk:  # act cautiously: subtract the expected cost of making the scene invalid (the outcome model's P(invalid))
                 q = q - risk * torch.sigmoid(net.outcomes(tokens, n_objects)[..., 1]).float().cpu().numpy()
@@ -88,7 +90,7 @@ class ObjectTrainer(Trainer):
                     values, outcome = net.place_values(tokens, n_objects, collate_place(states, DEVICE)[0], with_outcome=True)
                     values = (values - risk * torch.sigmoid(outcome[..., 1])).float().cpu().numpy()
                 else:
-                    values = net.place_values(tokens, n_objects, collate_place(states, DEVICE)[0]).float().cpu().numpy()
+                    values = self._acting_place_scores(net, tokens, n_objects, collate_place(states, DEVICE)[0]).float().cpu().numpy()
             for b, s in enumerate(states):
                 for p, (_, row, col) in enumerate(s['place_actions']):
                     place[b, 0, row, col] = values[b, p]
@@ -104,6 +106,13 @@ class ObjectTrainer(Trainer):
         prim = np.stack([push.reshape(len(states), -1).max(1), pick.reshape(len(states), -1).max(1), np.full(len(states), -1000.0)], axis=1)
         prim[:, 2] = place.reshape(len(states), -1).max(1)
         return QMaps(push, pick, place, None, lengths, prim.astype(np.float32))
+
+    def _acting_scores(self, net, tokens, counts, q):
+        """What the greedy action maximises over the object-action slots (numpy (B, N, S)): the Q-values (subclasses: a policy)."""
+        return q
+
+    def _acting_place_scores(self, net, tokens, counts, place_tokens):
+        return net.place_values(tokens, counts, place_tokens)
 
     # ------------------------------------------------------------------ learning
     def _future(self, nexts):

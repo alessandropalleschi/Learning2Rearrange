@@ -291,3 +291,37 @@ def test_twin_heads_are_independent_and_the_target_takes_their_minimum():
             assert torch.isclose(trainer._future([state])[0], expected)
     single = ObjectTrainer(Config(placement='heuristic', reward_mode='sparse'))
     assert single.model.q_heads(*collate([single.info(obs)], DEVICE)[:2]).shape[0] == 1
+
+
+def test_iql_policy_prefers_the_better_actions_of_the_data_for_grasps_placements_and_push_lengths():
+    from l2r.learning.factory import make_trainer
+    from l2r.learning.object_centric import collate_place
+    torch.manual_seed(0)
+    cfg = Config(agent='object', object_algo='iql', placement='learned', hierarchy=True, twin_q=True, batch_size=8,
+                 learning_rate=3e-3, prioritized=False, reward_mode='sparse')
+    trainer = make_trainer(cfg)
+    obs, held = observation(), held_observation()
+    state, held_state = trainer.info(obs), trainer.info(held)
+    blue, green = tuple(state['actions'][0, 0]), tuple(state['actions'][1, 0])
+    row, col = state['actions'][0, 1][1:]
+    candidates = held_state['place_actions']
+    good = tuple(int(v) for v in candidates[0])
+    bad = tuple(int(v) for v in candidates[-1])
+    batch = [Transition(obs, blue, obs, 0.0, 'grasp', True), Transition(obs, green, obs, -5.0, 'grasp', True),
+             Transition(held, good, obs, 0.0, 'place', True), Transition(held, bad, obs, -5.0, 'place', True),
+             Transition(obs, (0, row, col, 0.2), obs, 0.0, 'push', True), Transition(obs, (0, row, col, 0.8), obs, -5.0, 'push', True)]
+    for step in range(400):
+        trainer.train_step(batch)
+        if step % 20 == 19:  # the training loop's target update (the advantages use the target critic)
+            trainer.model_target.load_state_dict(trainer.model.state_dict())
+    tokens, counts, _ = collate([state], DEVICE)
+    with torch.no_grad():
+        logits = trainer.model.policy_logits(tokens, counts)[0]
+        place_logits = trainer.model.place_policy_logits(*collate([held_state], DEVICE)[:2], collate_place([held_state], DEVICE)[0])[0]
+        value = float(trainer.model.value(tokens, counts)[0])
+    assert logits[0, 0] > logits[1, 0] + 1  # grasp the blue object, not the green one
+    assert place_logits[0] > place_logits[-1] + 1
+    q = trainer.forward_batch([obs])
+    assert abs(q.lengths[0, 0, row, col] - 0.2) < 0.15  # the actor follows the better executed length
+    assert -5.0 < value <= 0.5  # an expectile of the data's action values, no max over unseen actions
+    assert q.pick[0, 0][blue[1], blue[2]] > q.pick[0, 0][green[1], green[2]]  # acting follows the policy
