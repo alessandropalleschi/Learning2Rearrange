@@ -28,7 +28,7 @@ class Config:
     buffer_size: int = 8000
     polyak_beta: float = 1e-3       # target network soft update rate
     grad_clip: float = 10.0
-    clip_q: bool = True             # clamp TD targets to the reachable range [reward_invalid/(1-gamma), reward_goal]
+    clip_q: bool = True             # clamp TD targets to the reachable range `q_range` [min(invalid, (step - noop)/(1-gamma)), goal + shift]
     lr_decay: float = 1.0           # exponential LR decay per optimisation step (1.0 = fixed LR as in the paper)
     amp: bool = True                # mixed precision (only used on CUDA)
 
@@ -266,10 +266,12 @@ class Config:
 
     @property
     def q_range(self):
-        """(min, max) of the action values: rewards are bounded, and potential-based shaping shifts Q by -phi(s) <= scale."""
+        """(min, max) of the action values. Lower: an episode pays at most `reward_step - noop` per step and `reward_invalid` once,
+        at its end, so no return is below min(reward_invalid, (reward_step - noop) / (1 - gamma)) (-15 with step -1, no-op 0.5,
+        gamma 0.9). Upper: potential-based shaping shifts Q by -phi(s) <= scale (x2 for the combined potential)."""
         shift = {'progress': 1.0, 'distance': 1.0, 'combined': 2.0}.get(self.reward_mode, 0.0) * self.reward_shaping_scale
         noop = self.noop_penalty if self.reward_mode in ('noop', 'combined') else 0.0
-        low = (self.reward_invalid - noop) / (1.0 - self.gamma)
+        low = min(self.reward_invalid, (self.reward_step - noop) / (1.0 - self.gamma))
         return low, self.reward_goal + shift
 
     @property
