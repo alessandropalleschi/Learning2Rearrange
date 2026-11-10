@@ -24,8 +24,8 @@ def cabinet_walls(ws):
 
 
 def world_spec(ws, tool=None, suction_force=30.0, cabinet_friction=0.5, timestep=1 / 480, iterations=100, base=None,
-               slide=True):
-    spec = robot_spec(tool, suction_force, slide=slide, **({'base': base} if base is not None else {}))
+               slide=True, arm='ur5e'):
+    spec = robot_spec(tool, suction_force, slide=slide, arm=arm, **({'base': base} if base is not None else {}))
     spec.option.timestep = timestep
     spec.option.iterations = iterations
     spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST

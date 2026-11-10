@@ -17,7 +17,8 @@ import mujoco
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-UR5E = os.path.join(ROOT, 'assets', 'menagerie', 'universal_robots_ur5e')
+MENAGERIE = os.path.join(ROOT, 'assets', 'menagerie')
+UR5E = os.path.join(MENAGERIE, 'universal_robots_ur5e')
 BASE_POSITION = (0.85, 0.0, 0.0)  # 0.6 m in front of the cabinet, on the ground (scripts/mount_study.py)
 SLIDE_RANGE = 0.5  # m either side
 ARM_JOINTS = ('slide', 'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint',
@@ -27,6 +28,36 @@ STAGE_MARGIN = 0.02  # m: staging puts the tip this far in front of the cabinet 
 # cabinet floor), blade pointing in, flange down, the arm facing the cabinet with the elbow up. Every IK solve starts from it and is pulled towards it in the null
 # space, so the arm keeps this posture at every heading and depth (no flips between solutions).
 HOME = (-0.03, 0.56, -2.57, 1.85, 2.29, 1.5708, -1.01)  # arm facing the cabinet, elbow up (mount_study.py --facing)
+# Arms of the Menagerie: model file, the opening tag of the base body and its replacement (orientation in the world), the arm
+# joints in order, the flange body / site, landmark bodies (shoulder, elbow, wrist) for posture tests, joint speed limits.
+ARMS = {
+    'ur5e': dict(dir='universal_robots_ur5e', xml='ur5e.xml',
+                 top='<body name="base" quat="0 0 0 -1" childclass="ur5e">', top_new='<body name="base" quat="1 0 0 0" childclass="ur5e">',
+                 joints=ARM_JOINTS[1:], flange='wrist_3_link', landmarks=('upper_arm_link', 'forearm_link', 'wrist_1_link'),
+                 v_max=(3.14, 3.14, 3.14, 6.28, 6.28, 6.28), home=HOME[1:], base_housing=True),
+    'fr3': dict(dir='franka_fr3', xml='fr3.xml',
+                top='<body name="base" childclass="fr3">', top_new='<body name="base" quat="0 0 0 1" childclass="fr3">',
+                joints=tuple('fr3_joint%d' % i for i in range(1, 8)), flange='fr3_link7',
+                landmarks=('fr3_link2', 'fr3_link4', 'fr3_link6'), v_max=(2.62, 2.62, 2.62, 2.62, 5.26, 4.18, 5.26),
+                home=None, base_housing=False),
+}
+
+
+def arm_of(model):
+    """Name of the arm in a compiled model."""
+    for name, arm in ARMS.items():
+        if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, arm['joints'][0]) >= 0:
+            return name
+    raise ValueError('no known arm in the model')
+
+
+def joint_names(model):
+    """Controlled joints: the slide (if present) and the arm joints."""
+    arm = ARMS[arm_of(model)]['joints']
+    slide = ('slide',) if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, 'slide') >= 0 else ()
+    return slide + tuple(arm)
+
+
 ROBOT, SCENE = 2, 1  # collision bits: robot geoms contype ROBOT / conaffinity 0, scene geoms SCENE / SCENE | ROBOT:
 # the robot touches the scene, not itself; scene geoms touch each other
 
@@ -55,18 +86,18 @@ class ToolGeometry:
         return position, np.column_stack([x_tip, np.cross(direction, x_tip), direction])
 
 
-def _menagerie_spec(base=BASE_POSITION, slide=True):
-    path = os.path.join(UR5E, 'ur5e.xml')
+def _menagerie_spec(base=BASE_POSITION, slide=True, arm='ur5e'):
+    info = ARMS[arm]
+    path = os.path.join(MENAGERIE, info['dir'], info['xml'])
     if not os.path.exists(path):
-        raise FileNotFoundError('the Menagerie UR5e is missing: run scripts/fetch_menagerie.sh')
+        raise FileNotFoundError('the Menagerie %s is missing: run scripts/fetch_menagerie.sh' % arm)
     with open(path) as f:
         xml = f.read()
-    xml = xml.replace('meshdir="assets"', 'meshdir="%s"' % os.path.join(UR5E, 'assets'))
+    xml = xml.replace('meshdir="assets"', 'meshdir="%s"' % os.path.join(MENAGERIE, info['dir'], 'assets'))
     joint = ('<joint name="slide" type="slide" axis="0 1 0" range="%g %g" damping="50"/>' % (-SLIDE_RANGE, SLIDE_RANGE)
              if slide else '')
-    xml = xml.replace('<body name="base" quat="0 0 0 -1" childclass="ur5e">',
-                      '<body name="slide_carriage" pos="%g %g %g">%s<body name="base" quat="1 0 0 0" childclass="ur5e">'
-                      % (*base, joint), 1)
+    assert info['top'] in xml, 'unexpected %s model' % arm
+    xml = xml.replace(info['top'], '<body name="slide_carriage" pos="%g %g %g">%s%s' % (*base, joint, info['top_new']), 1)
     xml = xml.replace('</worldbody>', '</body></worldbody>', 1)
     spec = mujoco.MjSpec.from_string(xml)
     for key in list(spec.keys):
@@ -74,11 +105,12 @@ def _menagerie_spec(base=BASE_POSITION, slide=True):
     return spec
 
 
-def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION, slide=True):
+def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION, slide=True, arm='ur5e'):
     """MjSpec with the arm (its base at `base`, on a pedestal when raised), the slide actuator, gravity compensation, the
     tool, the flange sensor and the suction actuator."""
     tool = tool or ToolGeometry()
-    spec = _menagerie_spec(base, slide)
+    spec = _menagerie_spec(base, slide, arm)
+    info = ARMS[arm]
     if base[2] > 0.02:
         width = SLIDE_RANGE + 0.15 if slide else 0.12
         spec.worldbody.add_geom(name='pedestal', type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.12, width, base[2] / 2 - 0.01],
@@ -97,7 +129,7 @@ def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION, slide=True):
         act.ctrllimited = act.forcelimited = 1
 
     site = spec.site('attachment_site')
-    body = spec.body('wrist_3_link').add_body(name='tool', pos=list(site.pos), quat=list(site.quat))
+    body = spec.body(info['flange']).add_body(name='tool', pos=list(site.pos), quat=list(site.quat))
     body.gravcomp = 1.0
     grey, dark = [0.55, 0.57, 0.6, 1], [0.2, 0.2, 0.22, 1]
     shares = {'bracket': 0.25 if tool.shape == 'L' else 0.0, 'blade': 0.6}
@@ -132,8 +164,9 @@ def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION, slide=True):
     suction.gaintype, suction.biastype = mujoco.mjtGain.mjGAIN_FIXED, mujoco.mjtBias.mjBIAS_NONE
     suction.gainprm[0] = float(suction_force)  # N at full vacuum: the cup lets go above it
     suction.ctrlrange, suction.ctrllimited = [0.0, 1.0], 1
-    spec.body('base').add_geom(name='base_housing', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[0.076, 0.045, 0],
-                               pos=[0, 0, 0.045], rgba=[0, 0, 0, 0], group=3)  # the Menagerie base has no collision shape
+    if info['base_housing']:
+        spec.body('base').add_geom(name='base_housing', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[0.076, 0.045, 0],
+                                   pos=[0, 0, 0.045], rgba=[0, 0, 0, 0], group=3)  # the Menagerie UR5e base has no collision shape
     tool_geoms = {'tool_bracket', 'tool_blade', 'cup'}
     for g in spec.geoms:
         if g.contype or g.conaffinity or g.name == 'base_housing':

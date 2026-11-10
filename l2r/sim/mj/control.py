@@ -15,9 +15,9 @@ from dataclasses import dataclass
 import mujoco
 import numpy as np
 
-from l2r.sim.mj.robot import ARM_JOINTS, HOME
+from l2r.sim.mj.robot import ARMS, arm_of, joint_names
 
-V_MAX = np.array([0.5, 3.14, 3.14, 3.14, 6.28, 6.28, 6.28])  # slide m/s, joints rad/s (UR5e limits)
+SLIDE_V_MAX = 0.5  # m/s
 
 
 def pose_error(target_pos, target_rot, pos, rot, rot_weight=1.0):
@@ -30,22 +30,26 @@ def pose_error(target_pos, target_rot, pos, rot, rot_weight=1.0):
 
 
 class Kinematics:
-    # posture pull per joint: none on the slide (it follows the target sideways) and on joint 6 (it sets the heading)
-    REST_WEIGHTS = (0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0)
-
-    def __init__(self, model, site='tip', home=HOME, rest_gain=0.05):
+    def __init__(self, model, site='tip', home=None, rest_gain=0.05):
+        """home: the posture of the controlled joints (slide first if present); default: the arm's registered home, else
+        the middle of the joint ranges. The posture pull spares the slide (it follows the target sideways) and the last joint
+        (it sets the heading)."""
         self.m, self.d = model, mujoco.MjData(model)
-        names = [n for n in ARM_JOINTS if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n) >= 0]  # the slide is optional
-        keep = [ARM_JOINTS.index(n) for n in names]
-        self.names = names
-        self.home, self.rest_gain = np.asarray(home, float)[keep], rest_gain
-        self.rest_weights = np.asarray(self.REST_WEIGHTS, float)[keep]
+        info = ARMS[arm_of(model)]
+        self.names = names = list(joint_names(model))
+        self.v_max = np.array(([SLIDE_V_MAX] if names[0] == 'slide' else []) + list(info['v_max']))
+        self.rest_gain = rest_gain
+        self.rest_weights = np.array([0.0 if (n == 'slide' or n == names[-1]) else 1.0 for n in names])
         self.site = model.site(site).id
         self.joints = [model.joint(n).id for n in names]
         self.qadr = np.array([model.jnt_qposadr[j] for j in self.joints])
         self.dofs = np.array([model.jnt_dofadr[j] for j in self.joints])
         self.low = np.array([model.jnt_range[j][0] for j in self.joints])
         self.high = np.array([model.jnt_range[j][1] for j in self.joints])
+        if home is None:
+            arm_home = info['home'] if info['home'] is not None else 0.5 * (self.low + self.high)[-len(info['joints']):]
+            home = ([0.0] if names[0] == 'slide' else []) + list(arm_home)
+        self.home = np.asarray(home, float)
         self._jp, self._jr = np.zeros((3, model.nv)), np.zeros((3, model.nv))
 
     def forward(self, q):
@@ -116,7 +120,8 @@ class Controller:
     def __init__(self, model, data, kinematics, substeps=4, force_window=5, force_debounce=2):
         self.m, self.d, self.k = model, data, kinematics
         self.substeps = substeps
-        self.acts = np.array([model.actuator(n if n == 'slide' else n.replace('_joint', '')).id for n in kinematics.names])
+        by_joint = {int(model.actuator_trnid[a][0]): a for a in range(model.nu) if model.actuator_trntype[a] == mujoco.mjtTrn.mjTRN_JOINT}
+        self.acts = np.array([by_joint[j] for j in kinematics.joints])
         self.dt = model.opt.timestep * substeps
         self.force_sensor = model.sensor('ft_force')
         self.force_window, self.force_debounce = force_window, force_debounce
@@ -146,7 +151,7 @@ class Controller:
         goal = np.clip(np.asarray(goal, float), self.k.low, self.k.high)
         self.command = self.measured()
         for tick in range(int(max_time / self.dt)):
-            v = V_MAX[-len(goal):] * 0.5 * self.dt
+            v = self.k.v_max * 0.5 * self.dt
             self.command = self.command + np.clip(goal - self.command, -v, v)
             self._tick()
             if np.allclose(self.command, goal) and np.abs(self.measured() - goal).max() < tol \
@@ -188,7 +193,7 @@ class Controller:
             u = s * s * (3 - 2 * s) * segments  # smooth start and stop, in path segments
             i = min(int(u), segments - 1) if segments else 0
             target = path[i] + (u - i) * (path[min(i + 1, segments)] - path[i]) if segments else path[0]
-            v = V_MAX[-len(target):] * self.dt
+            v = self.k.v_max * self.dt
             self.command = self.command + np.clip(target - self.command, -v, v)
             self._tick()
             if force_limit is not None:

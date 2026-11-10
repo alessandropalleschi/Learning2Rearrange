@@ -18,7 +18,7 @@ import numpy as np  # noqa: E402
 
 from l2r.config import SimParams  # noqa: E402
 from l2r.sim.mj.control import Kinematics  # noqa: E402
-from l2r.sim.mj.robot import ToolGeometry  # noqa: E402
+from l2r.sim.mj.robot import ARMS, ToolGeometry, arm_of  # noqa: E402
 from l2r.sim.mj.world import world_spec  # noqa: E402
 from l2r.sim.workspace import Workspace  # noqa: E402
 
@@ -34,6 +34,7 @@ class Probe:
 
     def __init__(self, model, kin):
         self.m, self.d, self.k = model, mujoco.MjData(model), kin
+        self.shoulder, self.elbow, self.wrist = ARMS[arm_of(model)]['landmarks']
 
     def free(self, q):
         self.d.qpos[self.k.qadr] = q
@@ -47,17 +48,17 @@ class Probe:
         """The arm faces the cabinet: the elbow between the shoulder and the cabinet (smaller x) and above the shoulder."""
         self.d.qpos[self.k.qadr] = q
         mujoco.mj_kinematics(self.m, self.d)
-        shoulder, elbow = (self.d.xpos[self.m.body(n).id] for n in ('upper_arm_link', 'forearm_link'))
+        shoulder, elbow = (self.d.xpos[self.m.body(n).id] for n in (self.shoulder, self.elbow))
         if not (elbow[0] < shoulder[0] - 0.05 and elbow[2] > shoulder[2] + 0.1):
             return False
         if self.elbow_high:  # the classic pose: the elbow above the wrist, the forearm going down to it
-            return bool(elbow[2] > self.d.xpos[self.m.body('wrist_1_link').id][2] + 0.05)
+            return bool(elbow[2] > self.d.xpos[self.m.body(self.wrist).id][2] + 0.05)
         return True
 
     def elbow_up(self, q):
         self.d.qpos[self.k.qadr] = q
         mujoco.mj_kinematics(self.m, self.d)
-        sh, el, wr = (self.d.xpos[self.m.body(n).id] for n in ('upper_arm_link', 'forearm_link', 'wrist_1_link'))
+        sh, el, wr = (self.d.xpos[self.m.body(n).id] for n in (self.shoulder, self.elbow, self.wrist))
         t = np.clip(np.dot(el - sh, wr - sh) / max(np.dot(wr - sh, wr - sh), 1e-9), 0, 1)
         return float(el[2] - (sh + t * (wr - sh))[2])
 
@@ -73,9 +74,15 @@ def seed_grid(n_joints):
 
 def candidate_homes(kin, probe, stage, rot, rng=None, facing=False):
     """Distinct collision-free solutions of the staging pose (slide centred), from the seed grid and the PyBullet home
-    posture; with `facing`, only the arm facing the cabinet. Deterministic."""
+    posture (UR5e), or seeds spread over the joint ranges (other arms); with `facing`, only the arm facing the cabinet.
+    Deterministic."""
     first = 1 if kin.names[0] == 'slide' else 0
-    seeds = [(np.array([0, 1, -1, 0.5, 0.5, 0.5, 1]) * np.pi)[-len(kin.low):]] + seed_grid(len(kin.low))
+    ur = arm_of(kin.m) == 'ur5e'
+    if ur:
+        seeds = [(np.array([0, 1, -1, 0.5, 0.5, 0.5, 1]) * np.pi)[-len(kin.low):]] + seed_grid(len(kin.low))
+    else:
+        spread = np.random.default_rng(123)
+        seeds = [kin.home] + [spread.uniform(kin.low, kin.high) for _ in range(1000)]
     kin.rest_gain, found = 0.0, []
     for q0 in seeds:
         q, ok = kin.solve(np.array(q0, float), stage, rot)
@@ -83,7 +90,8 @@ def candidate_homes(kin, probe, stage, rot, rng=None, facing=False):
             continue
         if facing and not probe.facing(q):
             continue
-        q = np.concatenate([q[:first], (q[first:] + np.pi) % (2 * np.pi) - np.pi])
+        if ur:  # the UR joints turn +-2 pi: the same posture modulo 2 pi
+            q = np.concatenate([q[:first], (q[first:] + np.pi) % (2 * np.pi) - np.pi])
         if all(np.abs(q - other).max() > 0.3 for other in found):
             found.append(q)
     kin.rest_gain = 0.05
@@ -111,8 +119,8 @@ def reach(kin, probe, home, lines):
     return reached / max(len(lines), 1), dexterity, stray
 
 
-def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L', facing=False, stage_margin=0.1):
-    model = world_spec(ws, tool=ToolGeometry(shape=shape, blade=blade), base=base, slide=slide).compile()
+def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L', facing=False, stage_margin=0.1, arm='ur5e'):
+    model = world_spec(ws, tool=ToolGeometry(shape=shape, blade=blade), base=base, slide=slide, arm=arm).compile()
     kin = Kinematics(model)
     probe = Probe(model, kin)
     b, floor = ws.bounds, ws.bounds[2][0]
@@ -142,6 +150,7 @@ def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L', facing=False, sta
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--x', type=float, nargs='+', default=[0.6, 0.9, 1.1, 1.3, 1.5])
+    parser.add_argument('--arm', choices=sorted(ARMS), default='ur5e')
     parser.add_argument('--facing', action='store_true', help='only homes with the arm facing the cabinet (elbow up, in front)')
     parser.add_argument('--elbow_high', action='store_true', help='with --facing: the elbow above the wrist')
     parser.add_argument('--stage_margin', type=float, default=0.1, help='staging: the tip this far in front of the cabinet (m)')
@@ -154,11 +163,12 @@ def main():
     ws = Workspace.from_params(SimParams())
     Probe.elbow_high = args.elbow_high
     for blade, x, y, z in itertools.product(args.blade, args.x, args.y, args.z):
-        out = evaluate((x, y, z), ws, np.random.default_rng(0), blade, not args.no_slide, args.shape, args.facing, args.stage_margin)
+        out = evaluate((x, y, z), ws, np.random.default_rng(0), blade, not args.no_slide, args.shape, args.facing, args.stage_margin,
+                       args.arm)
         if out is None:
-            print(args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: no home posture' % (blade, x, y, z), flush=True)
+            print(args.arm + ' ' + args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: no home posture' % (blade, x, y, z), flush=True)
             continue
-        print(args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: reachable %.2f  dexterity p10 %s median %s  joint stray %s  home %s' % (
+        print(args.arm + ' ' + args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: reachable %.2f  dexterity p10 %s median %s  joint stray %s  home %s' % (
             blade, x, y, z, out['reachable'], *(None if out[k] is None else round(out[k], 3) for k in
                                       ('dexterity p10', 'dexterity median', 'max joint stray from home (rad, median)')),
             out['home']), flush=True)
