@@ -85,6 +85,7 @@ class Config:
     object_algo: str = 'dqn'          # object agent: 'dqn' (double DQN) | 'iql' (implicit Q-learning, advantage-weighted policy)
     iql_expectile: float = 0.8        # IQL: expectile of the value regression (0.5 = mean, -> 1 = max over the data's actions)
     iql_beta: float = 3.0             # IQL: inverse temperature of the advantage weights
+    rudder: float = 0.0               # > 0: share of the reward replaced by RUDDER's redistributed reward (l2r/learning/rudder.py)
     n_step: int = 1                   # > 1: n-step returns in the replay (see l2r/learning/nstep.py)
     twin_q: bool = False              # object agent: two value heads, TD targets from their minimum (TD3-style clipped double Q)
     outcome_weight: float = 0.0       # > 0: object agent outcome heads (executed / invalid / changed) trained with this weight
@@ -156,7 +157,7 @@ class Config:
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
                    equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
                    grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), demo_anneal_steps=get('demo_anneal_steps', defaults.demo_anneal_steps),
-                   twin_q=get('twin_q', False), n_step=get('n_step', 1), object_algo=get('object_algo', 'dqn'), skill_params=get('skill_params', False), history_tokens=get('history_tokens', False),
+                   twin_q=get('twin_q', False), n_step=get('n_step', 1), rudder=get('rudder', 0.0), object_algo=get('object_algo', 'dqn'), skill_params=get('skill_params', False), history_tokens=get('history_tokens', False),
                    iql_expectile=get('iql_expectile', 0.8), iql_beta=get('iql_beta', 3.0), outcome_weight=get('outcome_weight', 0.0), outcome_penalty=get('outcome_penalty', 0.0), outcome_mask=get('outcome_mask', 0.0),
                    eps_end=get('eps_end', defaults.eps_end), eps_start=get('eps_start', defaults.eps_start), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
@@ -221,6 +222,8 @@ class Config:
         parser.add_argument('--object_algo', choices=['dqn', 'iql'], default='dqn', help='object agent learning algorithm')
         parser.add_argument('--iql_expectile', type=float, default=0.8)
         parser.add_argument('--iql_beta', type=float, default=3.0)
+        parser.add_argument('--rudder', type=float, default=0.0,
+                            help='return decomposition: share of the reward replaced by the redistributed reward (0 = off)')
         parser.add_argument('--n_step', type=int, default=1, help='n-step returns in the replay (1 = one-step TD, as before)')
         parser.add_argument('--twin_q', action='store_true', default=False,
                             help='object agent: clipped double Q (two value heads, targets from their minimum)')

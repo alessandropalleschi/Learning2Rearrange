@@ -81,6 +81,11 @@ class TrainingLoop:
         self.validations = 0
         from l2r.learning.nstep import NStepAccumulator
         self.nstep = NStepAccumulator(self.cfg.n_step, self.cfg.gamma) if self.cfg.n_step > 1 else None
+        self.rudder = None
+        if self.cfg.rudder > 0:
+            from l2r.learning.rudder import Rudder
+            self.rudder = Rudder()
+            self.pending = {}  # env index -> [(transition, step token)] of the running episode
         self.stage_validations = []  # (successes, episodes) of the validations at the current object count
         self.episode_objects = [self.curriculum.num_obj] * args.num_envs  # objects of each simulator's running episode
         self.stage_iteration = 0  # steps since the last curriculum change (epsilon is annealed per stage)
@@ -142,14 +147,13 @@ class TrainingLoop:
         for i in range(n):
             primitive, pix, _ = choices[i]
             transition = Transition(obs[i], pix, next_obs[i], rewards[i], primitive, terminated[i])
-            if self.nstep is None:
-                trainer.buffer.push(*transition)
+            if self.rudder is not None:  # hold the episode until it ends, then store it with redistributed rewards
+                from l2r.learning.rudder import step_token
+                self.pending.setdefault(i, []).append((transition, step_token(obs[i], primitive, pix, next_obs[i])))
+                if terminated[i] or (truncated is not None and truncated[i]):
+                    self._store_episode(i)
             else:
-                ready = self.nstep.add(i, transition)
-                if truncated is not None and truncated[i] and not terminated[i]:
-                    ready += self.nstep.flush(i)
-                for t in ready:
-                    trainer.buffer.push(*t)
+                self._store(i, transition, truncated is not None and truncated[i] and not terminated[i])
             batch.append(transition)
             if infos[i]['relabel']:  # hindsight experience replay (paper Fig. 8)
                 obs_r, next_r = infos[i]['relabel_pair']
@@ -164,6 +168,37 @@ class TrainingLoop:
         if trainer.iteration // args.save_every != (trainer.iteration - n) // args.save_every:
             trainer.save(os.path.join(self.log_dir, 'models', 'snapshot-%07d.pth' % trainer.iteration),
                          os.path.join(self.log_dir, 'models', 'target-%07d.pth' % trainer.iteration))
+
+    def _store(self, i, transition, cut=False):
+        """One transition into the replay (through the n-step accumulator when enabled); `cut`: the episode ends here unfinished."""
+        trainer = self.trainer
+        if self.nstep is None:
+            trainer.buffer.push(*transition)
+            return
+        ready = self.nstep.add(i, transition)
+        if cut:
+            ready += self.nstep.flush(i)
+        for t in ready:
+            trainer.buffer.push(*t)
+
+    def _store_episode(self, i):
+        """RUDDER: learn the return predictor from the finished episode of env i, redistribute its reward, store its transitions with
+        reward (1 - lambda) r + lambda r'."""
+        steps = self.pending.pop(i, [])
+        if not steps:
+            return
+        transitions, tokens = zip(*steps)
+        ret = float(sum(float(t.reward) for t in transitions))
+        self.rudder.add(np.stack(tokens), ret)
+        loss = self.rudder.train(updates=8)
+        if loss is not None:
+            self.logger.scalar('train/rudder_loss', loss, self.trainer.iteration)
+        redistributed = self.rudder.redistribute(np.stack(tokens), ret)
+        lam = self.cfg.rudder
+        last = len(transitions) - 1
+        for k, (t, r) in enumerate(zip(transitions, redistributed)):
+            mixed = (1 - lam) * float(t.reward) + lam * float(r)
+            self._store(i, t._replace(reward=mixed), cut=(k == last and not t.done))
 
     def _log_training(self, loss, eps):
         t, step = self.trainer, self.trainer.iteration
@@ -207,6 +242,9 @@ class TrainingLoop:
         curriculum if the success rate reaches the threshold. All simulators are reset afterwards."""
         from l2r.evaluation import evaluate
         c, a = self.curriculum, self.args
+        if self.rudder is not None:  # the validation resets every simulator: the running episodes end here
+            for i in list(self.pending):
+                self._store_episode(i)
         if self.nstep is not None:  # the validation resets every simulator: the pending n-step starts bootstrap from where they are
             for i in range(a.num_envs):
                 for t in self.nstep.flush(i):

@@ -362,8 +362,13 @@ class RearrangeEnv:
     def _goal_map(self):
         """(H, W) uint8 goal of every cell: 1 + CLASSES index of the class whose goal it is, 0 elsewhere (any layout)."""
         out = np.zeros(self.ws.heightmap_shape, np.uint8)
+        scene = self.sim.scene
+        if not hasattr(scene, 'goal_masks'):  # a backend without goal masks: the band rows
+            for k, (low, high) in enumerate(self._regions()):
+                out[max(int(low), 0):max(int(high), 0)] = k + 1
+            return out
         for k, name in enumerate(CLASSES):
-            out[self.sim.scene.goal_masks()[name]] = k + 1
+            out[scene.goal_masks()[name]] = k + 1
         return out
 
     def _regions(self):
