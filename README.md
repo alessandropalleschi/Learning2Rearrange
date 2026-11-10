@@ -447,6 +447,7 @@ would not be Q-values); a generative policy (diffusion / ACT) is not used: a den
 | `--physics paper` | the paper's cabinet dimensions, weaker suction, lighter objects (unvalidated) |
 | `--adaptive_step`, `--joint_tolerance`, `--camera_scale`, `--step_distance` | speed options (measured in `SIMULATION_NOTES.md`) |
 | `--randomize` | domain randomisation (friction, mass, camera pose, sensor noise) |
+| `--backend mujoco` | MuJoCo instead of PyBullet (scaffold, `l2r/sim/mj`): the same arm, suction, primitives and scenes (a seed gives the same scene on both engines); suction cup and tip pusher only, no GUI; `--mj_servo_bandwidth` sets the joint servos |
 
 ---
 

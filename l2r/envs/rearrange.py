@@ -171,11 +171,19 @@ def get_place_pose(sim, obj_class, freespace):
     return select_placement(y_up[index], y_down[index], freespace)
 
 
+def make_simulator(params):
+    """The simulator class of `params.backend` (PyBullet by default; MuJoCo is imported only when asked for)."""
+    if getattr(params, 'backend', 'pybullet') == 'mujoco':
+        from l2r.sim.mj.environment import MujocoEnvironment
+        return MujocoEnvironment
+    return Environment
+
+
 class RearrangeEnv:
     def __init__(self, cfg=None, gui=False, num_obj=1, params=None):
         self.cfg = cfg or Config()
         self.num_obj = num_obj
-        self.sim = Environment(gui=gui, num_obj=[num_obj], params=params)
+        self.sim = make_simulator(params)(gui=gui, num_obj=[num_obj], params=params)
         self.ws = self.sim.ws
         self.obs = None  # full (internal) observation of the current state
         self.tracker = BeliefTracker(self.cfg.belief_age_horizon)

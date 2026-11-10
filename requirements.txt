@@ -4,6 +4,7 @@ scikit-image
 matplotlib
 opencv-python-headless
 pybullet
+mujoco>=3.3  # --backend mujoco (l2r/sim/mj)
 tensorboard
 # torch / torchvision come from the base image (CUDA build) or: pip install torch --index-url https://download.pytorch.org/whl/cpu
 ruff

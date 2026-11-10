@@ -346,6 +346,8 @@ class SimParams:
     # end effector: the suction cup (default) or a parallel-jaw gripper (`--end_effector gripper`)
     end_effector: str = 'suction'
     tilt_limit_deg: object = None           # None: the original roll / pitch check; a value: an object is toppled at this true tilt
+    backend: str = 'pybullet'               # physics engine: 'pybullet' or 'mujoco' (l2r.sim.mj, scaffold: suction + tip pusher)
+    mj_servo_bandwidth: float = 80.0        # MuJoCo backend: joint servo bandwidth (rad/s; critically damped, effort limited)
     goal_layout: str = 'bands'              # 'bands' (paper: three bands across the width) | 'grid' (3 of 2 x 3 rectangular slots)
     pusher: str = 'tip'                     # 'tip' (the tool's own 2.6 cm tip, original) | 'paddle' (T-shaped plate during pushes)
 
@@ -390,6 +392,8 @@ class SimParams:
         params.pusher = getattr(args, 'pusher', 'tip')
         params.goal_layout = getattr(args, 'goal_layout', 'bands')
         params.tilt_limit_deg = getattr(args, 'tilt_limit_deg', None)
+        params.backend = getattr(args, 'backend', 'pybullet')
+        params.mj_servo_bandwidth = getattr(args, 'mj_servo_bandwidth', 80.0)
         params.perception_weights = getattr(args, 'perception_weights', params.perception_weights)
         params.object_types = tuple(getattr(args, 'object_types', None) or ()) or None
         return params
@@ -408,6 +412,10 @@ class SimParams:
                             help="object masks: PyBullet ground truth, or a trained segmentation network (train_perception.py)")
         parser.add_argument('--object_types', nargs='+', default=None, help='YCB types of the episodes (>= 3), e.g. to hold one out')
         parser.add_argument('--perception_weights', default='assets/perception/segnet.pth', help='weights of the network')
+        parser.add_argument('--backend', choices=['pybullet', 'mujoco'], default='pybullet',
+                            help="physics engine; 'mujoco' is a scaffold (suction cup, tip pusher; see l2r/sim/mj)")
+        parser.add_argument('--mj_servo_bandwidth', type=float, default=80.0,
+                            help='MuJoCo backend: joint servo bandwidth (rad/s)')
         parser.add_argument('--tilt_limit_deg', type=float, default=None,
                             help='validity: an object counts as toppled at this true tilt (degrees); default: the original roll / pitch check')
         parser.add_argument('--goal_layout', choices=['bands', 'grid'], default='bands',
