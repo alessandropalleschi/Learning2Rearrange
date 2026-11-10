@@ -122,6 +122,26 @@ def placement_space(sim, obj_class, freespace, extent):
 GOAL_INNER_MARGIN = 6  # cells (3 cm): placements keep the object's centre this far inside a goal slot
 
 
+def corridor_choice(freespace, kept, own):
+    """Free space for the heuristic placement with corridor preference. `kept`: free cells whose carry-in corridor is clear; `own`:
+    the held object's target region. The first that applies:
+    1. clear cells inside the region (`kept & own`);
+    2. the unfiltered free space, if the region has free cells but none with a clear corridor (stay in the region);
+    3. clear cells elsewhere (`kept`), if the region has no free cell (the best temporary spot);
+    4. the unfiltered free space.
+    The result has the dtype of `freespace`."""
+    free = np.asarray(freespace) > 0
+    kept, own = np.asarray(kept, bool), np.asarray(own, bool)
+    dtype = np.asarray(freespace).dtype
+    if (kept & own).any():
+        return (kept & own).astype(dtype)
+    if (free & own).any():
+        return freespace
+    if kept.any():
+        return kept.astype(dtype)
+    return freespace
+
+
 def goal_mask(sim, obj_class):
     """(H, W) bool goal cells of the class with label `obj_class` for mask layouts, or None for the 'bands' layout."""
     scene = getattr(sim, 'scene', None)
@@ -252,7 +272,7 @@ class RearrangeEnv:
                 if cfg.footprint_placement:
                     mid['freespace'] = self._placement_space(held_class, mid['freespace'], held_extent)
                 mid['held_class'], mid['held_id'] = int(held_class), float(held_object)
-                mid['heuristic_place'] = get_place_pose(sim, held_class, self._corridor_free(mid['freespace'], mid['depthmap'], held_extent))
+                mid['heuristic_place'] = get_place_pose(sim, held_class, self._corridor_free(mid['freespace'], mid['depthmap'], held_extent, held_class))
                 self.obs = mid
                 info = {'executed': True, 'attempted': True, 'sorted': False, 'invalid': False, 'place_pix': None, 'relabel': False,
                         'episode_return': self.episode_return, 'actions': self.actions, 'phase': 'place'}
@@ -262,7 +282,7 @@ class RearrangeEnv:
                 freespace = sim.observe()['freespace']
                 if cfg.footprint_placement:
                     freespace = self._placement_space(held_class, freespace, held_extent)
-                place_pix = get_place_pose(sim, held_class, self._corridor_free(freespace, sim.observe()['depthmap'], held_extent))
+                place_pix = get_place_pose(sim, held_class, self._corridor_free(freespace, sim.observe()['depthmap'], held_extent, held_class))
                 executed = sim.place(self.ws.px_to_xy(*place_pix))
 
         sim.wait_static()
@@ -298,17 +318,31 @@ class RearrangeEnv:
         self._record_last(prim, pix, executed, obs, sim.observe() if terminated else next_obs, invalid=not valid)
         return self.compact(next_obs), reward, terminated, truncated, info
 
-    def _corridor_free(self, freespace, depthmap, extent):
-        """With cfg.place_corridor: the free cells whose carry-in corridor holds no other object, if there are any (else all)."""
+    def _corridor_free(self, freespace, depthmap, extent, held_class):
+        """With cfg.place_corridor: the free space offered to the heuristic placement, preferring cells whose carry-in corridor holds
+        no other object, without ever trading the object's own target region for a clear corridor (see `corridor_choice`)."""
         if not self.cfg.place_corridor:
             return freespace
         from l2r.envs.approach import place_corridor_obstacles
         o = self.cfg.offset_px
         depth = np.asarray(depthmap)[o:np.asarray(depthmap).shape[0] - o, o:]
         width = int(extent[1]) if extent is not None and len(extent) > 1 and extent[1] else 16
+        free = np.asarray(freespace)
         clear = place_corridor_obstacles(depth, width // 2 + 2) == 0
-        kept = (np.asarray(freespace) > 0) & clear[:np.asarray(freespace).shape[0], :np.asarray(freespace).shape[1]]
-        return kept.astype(np.asarray(freespace).dtype) if kept.any() else freespace
+        kept = (free > 0) & clear[:free.shape[0], :free.shape[1]]
+        return corridor_choice(freespace, kept, self._own_region(held_class, free.shape))
+
+    def _own_region(self, held_class, shape):
+        """(shape) bool: the target region of the class with label `held_class` (goal mask, or the band rows)."""
+        goal = goal_mask(self.sim, held_class)
+        if goal is not None:
+            return np.asarray(goal, bool)[:shape[0], :shape[1]]
+        y_down, y_up, _ = self.sim.target_pixels()
+        index = [LABELS[name] for name in TARGET_ORDER].index(int(held_class))
+        low, high = sorted((int(y_down[index]), int(y_up[index])))
+        own = np.zeros(shape, bool)
+        own[max(low, 0):max(high, 0)] = True
+        return own
 
     def _approach_for(self, pix):
         """Approach angle of a grasp without an explicit one: straight in, or (cfg.grasp_approach == 'clear') the clearest line in
