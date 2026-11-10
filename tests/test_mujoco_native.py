@@ -14,14 +14,10 @@ if not os.path.exists(os.path.join(robot.UR5E, 'ur5e.xml')):
     pytest.skip('the Menagerie UR5e is not fetched (scripts/fetch_menagerie.sh)', allow_module_level=True)
 
 from l2r.sim.mj.control import Controller, Kinematics  # noqa: E402
-from l2r.sim.mj.world import add_box, world_spec  # noqa: E402
+from l2r.sim.mj.world import add_box, collision_check, world_spec  # noqa: E402
 from l2r.sim.workspace import Workspace  # noqa: E402
 
 HOME = np.array([0, 1, -1, 0.5, 0.5, 0.5, 1]) * np.pi
-# The mount of the arm for the L tool is undecided (scripts/mount_study.py): at the default base (0.6, 0, 0) the blade meets the
-# forearm in these motions now that the tool collides with the arm.
-MOUNT_UNDECIDED = pytest.mark.xfail(reason='L-tool mount undecided: the blade meets the forearm at the default base',
-                                    strict=False)
 WS = Workspace.from_params(SimParams())
 FLOOR = WS.bounds[2][0]
 
@@ -39,12 +35,7 @@ def setup(start, rot):
     d = mujoco.MjData(m)
     mujoco.mj_forward(m, d)
     k = Kinematics(m)
-
-    def free(q):
-        probe = mujoco.MjData(m)
-        probe.qpos[k.qadr] = q
-        mujoco.mj_forward(m, probe)
-        return not any(c.dist < 0 for c in probe.contact[:probe.ncon])
+    free = collision_check(m)
     q = k.solve_multistart(start, rot, [HOME], np.random.default_rng(0), accept=free)
     assert q is not None
     d.qpos[k.qadr] = q
@@ -52,10 +43,10 @@ def setup(start, rot):
     c = Controller(m, d, k)
     c.command = q.copy()
     c.hold(50)
+    c.free = free
     return m, d, c
 
 
-@MOUNT_UNDECIDED
 @pytest.mark.parametrize('heading_deg', [0, 30])
 def test_blade_push_moves_the_block_along_the_heading(heading_deg):
     rot = horizontal(np.radians(heading_deg))
@@ -65,14 +56,13 @@ def test_blade_push_moves_the_block_along_the_heading(heading_deg):
     m, d, c = setup(start, rot)
     block = m.body('block').id
     before = d.xpos[block].copy()
-    result = c.move_line(face + direction * 0.08, rot, speed=0.1, force_limit=200.0)
+    result = c.move_line(face + direction * 0.08, rot, speed=0.1, force_limit=200.0, collision_free=c.free)
     assert result.reached and not result.force_stop
     moved = d.xpos[block] - before
     assert 0.05 < moved[:2] @ direction[:2] < 0.1
     assert d.xmat[block][8] > np.cos(np.radians(5))  # still upright
 
 
-@MOUNT_UNDECIDED
 def test_suction_carries_the_block_out_of_the_cabinet():
     rot = horizontal(0.0)
     face = np.array([0.025, 0.0, FLOOR + 0.04])

@@ -49,49 +49,33 @@ class Probe:
         return float(el[2] - (sh + t * (wr - sh))[2])
 
 
-def find_home(kin, probe, stage, rot, rng, starts=200):
-    """Collision-free, elbow-up solution of the staging pose with the best dexterity (slide centred)."""
-    best = None
-    for _ in range(starts):
-        q0 = rng.uniform(np.maximum(kin.low, -np.pi), np.minimum(kin.high, np.pi))
-        q0[0] = 0.0
-        kin.rest_gain = 0.0
+def candidate_homes(kin, probe, stage, rot, rng, starts=200):
+    """Distinct collision-free solutions of the staging pose (slide centred), the PyBullet home posture among the seeds."""
+    seeds = [np.array([0, 1, -1, 0.5, 0.5, 0.5, 1]) * np.pi]
+    seeds = [s[-len(kin.low):] for s in seeds]
+    seeds += [rng.uniform(np.maximum(kin.low, -np.pi), np.minimum(kin.high, np.pi)) for _ in range(starts)]
+    first = 1 if kin.names[0] == 'slide' else 0
+    kin.rest_gain, found = 0.0, []
+    for q0 in seeds:
+        q0 = np.array(q0, float)
+        if first:
+            q0[0] = 0.0
         q, ok = kin.solve(q0, stage, rot)
-        if not ok or not probe.free(q) or probe.elbow_up(q) < 0.05:
+        if not ok or not probe.free(q) or (first and abs(q[0]) > 0.05):
             continue
-        q = np.concatenate([[q[0]], (q[1:] + np.pi) % (2 * np.pi) - np.pi])
-        if abs(q[0]) > 0.05:
-            continue  # the slide centred at home
-        score = probe.dexterity(q)
-        if best is None or score > best[0]:
-            best = (score, q)
+        q = np.concatenate([q[:first], (q[first:] + np.pi) % (2 * np.pi) - np.pi])
+        if all(np.abs(q - other).max() > 0.3 for other in found):
+            found.append(q)
     kin.rest_gain = 0.05
-    return None if best is None else best[1]
+    return found
 
 
-def evaluate(base, ws, rng, blade=0.75):
-    model = world_spec(ws, tool=ToolGeometry(blade=blade), base=base).compile()
-    kin = Kinematics(model)
-    probe = Probe(model, kin)
-    b, floor = ws.bounds, ws.bounds[2][0]
-    front = b[0][1] + 0.1
-    home = find_home(kin, probe, np.array([front, 0.0, floor + 0.05]), horizontal(0.0), rng)
-    if home is None:
-        return None
+def reach(kin, probe, home, lines):
+    """Share of the approach lines solved in order from `home` without collisions; also the dexterity and stray samples."""
     kin.home = home
-    xs = np.linspace(b[0][0] + 0.06, b[0][1] - 0.06, 5)
-    ys = np.linspace(b[1][0] + 0.06, b[1][1] - 0.06, 5)
-    total = reached = 0
-    dexterity, stray = [], []
-    for x, y, heading in itertools.product(xs, ys, np.radians([-60, -30, 0, 30, 60])):
-        rot = horizontal(heading)
-        direction = rot[:, 2]
-        crossing = y - direction[1] * (b[0][1] - x) / -direction[0]
-        if not (b[1][0] + 0.02 <= crossing <= b[1][1] - 0.02):
-            continue  # the line does not pass the opening: no tool reaches it
-        total += 1
-        target = np.array([x, y, floor + 0.05])
-        start = target - direction * ((front - x) / -direction[0])
+    reached, dexterity, stray = 0, [], []
+    first = 1 if kin.names[0] == 'slide' else 0
+    for start, target, rot in lines:
         q, ok = kin.solve(home, start, rot)
         if not ok or not probe.free(q):
             continue
@@ -102,9 +86,34 @@ def evaluate(base, ws, rng, blade=0.75):
                 fine = False
                 break
             dexterity.append(probe.dexterity(q))
-            stray.append(float(np.abs(q[1:] - home[1:]).max()))
+            stray.append(float(np.abs(q[first:] - home[first:]).max()))
         reached += fine
-    return {'home': np.round(home, 2).tolist(), 'reachable': reached / total,
+    return reached / max(len(lines), 1), dexterity, stray
+
+
+def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L'):
+    model = world_spec(ws, tool=ToolGeometry(shape=shape, blade=blade), base=base, slide=slide).compile()
+    kin = Kinematics(model)
+    probe = Probe(model, kin)
+    b, floor = ws.bounds, ws.bounds[2][0]
+    front = b[0][1] + 0.1
+    lines = []
+    xs = np.linspace(b[0][0] + 0.06, b[0][1] - 0.06, 5)
+    ys = np.linspace(b[1][0] + 0.06, b[1][1] - 0.06, 5)
+    for x, y, heading in itertools.product(xs, ys, np.radians([-60, -30, 0, 30, 60])):
+        rot = horizontal(heading)
+        direction = rot[:, 2]
+        crossing = y - direction[1] * (b[0][1] - x) / -direction[0]
+        if b[1][0] + 0.02 <= crossing <= b[1][1] - 0.02:  # lines that do not pass the opening are out for any tool
+            target = np.array([x, y, floor + 0.05])
+            lines.append((target - direction * ((front - x) / -direction[0]), target, rot))
+    homes = candidate_homes(kin, probe, np.array([front, 0.0, floor + 0.05]), horizontal(0.0), rng)
+    if not homes:
+        return None
+    coarse = lines[::7]  # pick the home that reaches the most of a subset, then evaluate it on all lines
+    home = max(homes, key=lambda h: reach(kin, probe, h, coarse)[0])
+    share, dexterity, stray = reach(kin, probe, home, lines)
+    return {'home': np.round(home, 2).tolist(), 'reachable': share, 'homes tried': len(homes),
             'dexterity p10': float(np.percentile(dexterity, 10)) if dexterity else None,
             'dexterity median': float(np.median(dexterity)) if dexterity else None,
             'max joint stray from home (rad, median)': float(np.median(stray)) if stray else None}
@@ -113,17 +122,19 @@ def evaluate(base, ws, rng, blade=0.75):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--x', type=float, nargs='+', default=[0.6, 0.9, 1.1, 1.3, 1.5])
+    parser.add_argument('--shape', choices=['L', 'straight'], default='L')
+    parser.add_argument('--no_slide', action='store_true', help='a fixed base (no lateral slide)')
     parser.add_argument('--blade', type=float, nargs='+', default=[0.75], help='blade length (m)')
     parser.add_argument('--y', type=float, nargs='+', default=[0.0], help='sideways offset of the base (slide centre)')
     parser.add_argument('--z', type=float, nargs='+', default=[0.0, 0.25, 0.45])
     args = parser.parse_args()
     ws = Workspace.from_params(SimParams())
     for blade, x, y, z in itertools.product(args.blade, args.x, args.y, args.z):
-        out = evaluate((x, y, z), ws, np.random.default_rng(0), blade)
+        out = evaluate((x, y, z), ws, np.random.default_rng(0), blade, not args.no_slide, args.shape)
         if out is None:
-            print('blade %.2f base x %.2f y %.2f z %.2f: no home posture' % (blade, x, y, z), flush=True)
+            print(args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: no home posture' % (blade, x, y, z), flush=True)
             continue
-        print('blade %.2f base x %.2f y %.2f z %.2f: reachable %.2f  dexterity p10 %s median %s  joint stray %s  home %s' % (
+        print(args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: reachable %.2f  dexterity p10 %s median %s  joint stray %s  home %s' % (
             blade, x, y, z, out['reachable'], *(None if out[k] is None else round(out[k], 3) for k in
                                       ('dexterity p10', 'dexterity median', 'max joint stray from home (rad, median)')),
             out['home']), flush=True)

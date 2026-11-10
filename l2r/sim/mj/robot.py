@@ -23,13 +23,14 @@ ARM_JOINTS = ('slide', 'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint
 # Home (slide, 6 joints): the tip at the staging point in front of the cabinet (x = front + 0.1 m, centre, 5 cm above the
 # cabinet floor), blade pointing in, flange down, elbow up. Every IK solve starts from it and is pulled towards it in the null
 # space, so the arm keeps this posture at every heading and depth (no flips between solutions).
-HOME = (0.0, -0.29, -1.53, 1.37, -1.41, -1.5708, 1.28)
+HOME = (0.0, -2.94, -2.78, 0.65, 0.55, -1.5708, -1.37)  # chosen by scripts/mount_study.py (most lines reached)
 ROBOT, SCENE = 2, 1  # collision bits: robot geoms contype ROBOT / conaffinity 0, scene geoms SCENE / SCENE | ROBOT:
 # the robot touches the scene, not itself; scene geoms touch each other
 
 
 @dataclass
 class ToolGeometry:
+    shape: str = 'L'  # 'L': bracket down then a horizontal blade; 'straight': the blade along the flange normal (no bracket)
     drop: float = 0.10  # m from the flange along its normal to the blade
     blade: float = 0.75  # m, horizontal
     blade_height: float = 0.04
@@ -38,24 +39,31 @@ class ToolGeometry:
     cup_length: float = 0.02
     mass: float = 0.6  # kg, the whole tool
 
+    def axis(self):
+        """(blade start, blade direction, the tip's 'x' axis) in the flange frame."""
+        if self.shape == 'straight':
+            return np.zeros(3), np.array([0, 0, 1.0]), np.array([1.0, 0, 0])
+        return np.array([0, 0, self.drop]), np.array([1.0, 0, 0]), np.array([0, 0, 1.0])
+
     def tip(self):
-        """Tip (cup face) position and axes in the flange frame: z = pointing direction, x = 'down' with the flange down."""
-        position = np.array([self.blade + self.cup_length, 0.0, self.drop])
-        x_tip, z_tip = np.array([0, 0, 1.0]), np.array([1.0, 0, 0])
-        return position, np.column_stack([x_tip, np.cross(z_tip, x_tip), z_tip])
+        """Tip (cup face) position and axes in the flange frame: z = pointing direction (x = 'down' with the L flange down)."""
+        start, direction, x_tip = self.axis()
+        position = start + direction * (self.blade + self.cup_length)
+        return position, np.column_stack([x_tip, np.cross(direction, x_tip), direction])
 
 
-def _menagerie_spec(base=BASE_POSITION):
+def _menagerie_spec(base=BASE_POSITION, slide=True):
     path = os.path.join(UR5E, 'ur5e.xml')
     if not os.path.exists(path):
         raise FileNotFoundError('the Menagerie UR5e is missing: run scripts/fetch_menagerie.sh')
     with open(path) as f:
         xml = f.read()
     xml = xml.replace('meshdir="assets"', 'meshdir="%s"' % os.path.join(UR5E, 'assets'))
+    joint = ('<joint name="slide" type="slide" axis="0 1 0" range="%g %g" damping="50"/>' % (-SLIDE_RANGE, SLIDE_RANGE)
+             if slide else '')
     xml = xml.replace('<body name="base" quat="0 0 0 -1" childclass="ur5e">',
-                      '<body name="slide_carriage" pos="%g %g %g"><joint name="slide" type="slide" axis="0 1 0" '
-                      'range="%g %g" damping="50"/><body name="base" quat="1 0 0 0" childclass="ur5e">'
-                      % (*base, -SLIDE_RANGE, SLIDE_RANGE), 1)
+                      '<body name="slide_carriage" pos="%g %g %g">%s<body name="base" quat="1 0 0 0" childclass="ur5e">'
+                      % (*base, joint), 1)
     xml = xml.replace('</worldbody>', '</body></worldbody>', 1)
     spec = mujoco.MjSpec.from_string(xml)
     for key in list(spec.keys):
@@ -63,46 +71,56 @@ def _menagerie_spec(base=BASE_POSITION):
     return spec
 
 
-def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION):
+def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION, slide=True):
     """MjSpec with the arm (its base at `base`, on a pedestal when raised), the slide actuator, gravity compensation, the
     tool, the flange sensor and the suction actuator."""
     tool = tool or ToolGeometry()
-    spec = _menagerie_spec(base)
+    spec = _menagerie_spec(base, slide)
     if base[2] > 0.02:
-        spec.worldbody.add_geom(name='pedestal', type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.12, SLIDE_RANGE + 0.15, base[2] / 2 - 0.01],
+        width = SLIDE_RANGE + 0.15 if slide else 0.12
+        spec.worldbody.add_geom(name='pedestal', type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.12, width, base[2] / 2 - 0.01],
                                 pos=[base[0], base[1], base[2] / 2 - 0.01], rgba=[0.35, 0.35, 0.38, 1], contype=0, conaffinity=0)
     for body in spec.bodies[1:]:
         body.gravcomp = 1.0  # the UR controller compensates gravity
     carriage = spec.body('slide_carriage')
     carriage.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.08, 0.12, 0.01], pos=[0, 0, -0.01], contype=0, conaffinity=0,
                       rgba=[0.3, 0.3, 0.3, 1], mass=10.0)
-    act = spec.add_actuator(name='slide', target='slide')
-    act.trntype = mujoco.mjtTrn.mjTRN_JOINT
-    act.gaintype, act.biastype = mujoco.mjtGain.mjGAIN_FIXED, mujoco.mjtBias.mjBIAS_AFFINE
-    act.gainprm[0], act.biasprm[:3] = 20000.0, [0.0, -20000.0, -3000.0]
-    act.ctrlrange, act.forcerange = [-SLIDE_RANGE, SLIDE_RANGE], [-1000.0, 1000.0]
-    act.ctrllimited = act.forcelimited = 1
+    if slide:
+        act = spec.add_actuator(name='slide', target='slide')
+        act.trntype = mujoco.mjtTrn.mjTRN_JOINT
+        act.gaintype, act.biastype = mujoco.mjtGain.mjGAIN_FIXED, mujoco.mjtBias.mjBIAS_AFFINE
+        act.gainprm[0], act.biasprm[:3] = 20000.0, [0.0, -20000.0, -3000.0]
+        act.ctrlrange, act.forcerange = [-SLIDE_RANGE, SLIDE_RANGE], [-1000.0, 1000.0]
+        act.ctrllimited = act.forcelimited = 1
 
     site = spec.site('attachment_site')
     body = spec.body('wrist_3_link').add_body(name='tool', pos=list(site.pos), quat=list(site.quat))
     body.gravcomp = 1.0
     grey, dark = [0.55, 0.57, 0.6, 1], [0.2, 0.2, 0.22, 1]
-    shares = {'bracket': 0.25, 'blade': 0.6}
-    body.add_geom(name='tool_bracket', type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.025, 0.02, tool.drop / 2],
-                  pos=[0, 0, tool.drop / 2], rgba=grey, mass=tool.mass * shares['bracket'])
-    body.add_geom(name='tool_blade', type=mujoco.mjtGeom.mjGEOM_BOX,
-                  size=[tool.blade / 2, tool.blade_thickness / 2, tool.blade_height / 2],
-                  pos=[tool.blade / 2, 0, tool.drop], rgba=dark, mass=tool.mass * shares['blade'], friction=[0.4, 0.005, 0.0001])
+    shares = {'bracket': 0.25 if tool.shape == 'L' else 0.0, 'blade': 0.6}
+    start, direction, x_tip = tool.axis()
+    blade_quat = np.zeros(4)
+    mujoco.mju_mat2Quat(blade_quat, np.column_stack([direction, np.cross(x_tip, direction), x_tip]).flatten())
+    if tool.shape == 'L':
+        body.add_geom(name='tool_bracket', type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.025, 0.02, tool.drop / 2],
+                      pos=[0, 0, tool.drop / 2], rgba=grey, mass=tool.mass * shares['bracket'])
+    body.add_geom(name='tool_blade', type=mujoco.mjtGeom.mjGEOM_BOX,  # length along `direction`, height along `x_tip`
+                  size=[tool.blade / 2, tool.blade_thickness / 2, tool.blade_height / 2], quat=list(blade_quat),
+                  pos=list(start + direction * tool.blade / 2), rgba=dark, mass=tool.mass * shares['blade'],
+                  friction=[0.4, 0.005, 0.0001])
     body.add_site(name='ft_sensor', pos=[0, 0, 0])
     tip_pos, tip_rot = tool.tip()
     quat = np.zeros(4)
     mujoco.mju_mat2Quat(quat, tip_rot.flatten())
-    cup = body.add_body(name='cup', pos=[tool.blade, 0, tool.drop])
+    cup_origin = start + direction * tool.blade
+    cup = body.add_body(name='cup', pos=list(cup_origin))
     cup.gravcomp = 1.0
+    cup_quat = np.zeros(4)  # cylinder axis (its z) along the blade direction
+    mujoco.mju_mat2Quat(cup_quat, np.column_stack([x_tip, np.cross(direction, x_tip), direction]).flatten())
     cup.add_geom(name='cup', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[tool.cup_radius, tool.cup_length / 2, 0],
-                 pos=[tool.cup_length / 2, 0, 0], quat=[np.sqrt(0.5), 0, np.sqrt(0.5), 0], rgba=[0.15, 0.35, 0.8, 1],
+                 pos=list(direction * tool.cup_length / 2), quat=list(cup_quat), rgba=[0.15, 0.35, 0.8, 1],
                  mass=tool.mass * (1 - sum(shares.values())), margin=0.004, gap=0.004, friction=[1.0, 0.005, 0.0001])
-    cup.add_site(name='tip', pos=list(tip_pos - [tool.blade, 0, tool.drop]), quat=list(quat))
+    cup.add_site(name='tip', pos=list(tip_pos - cup_origin), quat=list(quat))
     spec.add_sensor(name='ft_force', type=mujoco.mjtSensor.mjSENS_FORCE, objtype=mujoco.mjtObj.mjOBJ_SITE, objname='ft_sensor')
     spec.add_sensor(name='ft_torque', type=mujoco.mjtSensor.mjSENS_TORQUE, objtype=mujoco.mjtObj.mjOBJ_SITE,
                     objname='ft_sensor')

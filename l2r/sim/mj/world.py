@@ -23,8 +23,9 @@ def cabinet_walls(ws):
             'ceiling': ([sx / 2 + w / 2, sy / 2 + w, tw / 2], [-w / 2, 0, height + bottom + tw / 2])}
 
 
-def world_spec(ws, tool=None, suction_force=30.0, cabinet_friction=0.5, timestep=1 / 480, iterations=100, base=None):
-    spec = robot_spec(tool, suction_force, **({'base': base} if base is not None else {}))
+def world_spec(ws, tool=None, suction_force=30.0, cabinet_friction=0.5, timestep=1 / 480, iterations=100, base=None,
+               slide=True):
+    spec = robot_spec(tool, suction_force, slide=slide, **({'base': base} if base is not None else {}))
     spec.option.timestep = timestep
     spec.option.iterations = iterations
     spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
@@ -50,3 +51,23 @@ def add_box(spec, name, position, half, mass, friction=0.5, yaw=0.0, rgba=(1, 1,
     body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=list(half), mass=mass, rgba=list(rgba),
                   contype=SCENE, conaffinity=SCENE | ROBOT, friction=[friction, 0.005, 0.0001], condim=4)
     return body
+
+
+def collision_check(model):
+    """`free(q)` for the planner: True if the arm configuration q (the controller's joints) has no contact other than with
+    movable objects (pushing an object is the point of a push; the cabinet, the pedestal and the robot itself are obstacles)."""
+    from l2r.sim.mj.control import Kinematics
+    probe, joints = mujoco.MjData(model), Kinematics(model)
+    movable = {b for b in range(model.nbody) if model.body_jntnum[b] and
+               model.jnt_type[model.body_jntadr[b]] == mujoco.mjtJoint.mjJNT_FREE}
+
+    def free(q, data=None):
+        if data is not None:  # the objects where they are now
+            probe.qpos[:] = data.qpos
+        probe.qpos[joints.qadr] = q
+        mujoco.mj_forward(model, probe)
+        for c in probe.contact[:probe.ncon]:
+            if c.dist < 0 and model.geom_bodyid[c.geom1] not in movable and model.geom_bodyid[c.geom2] not in movable:
+                return False
+        return True
+    return free

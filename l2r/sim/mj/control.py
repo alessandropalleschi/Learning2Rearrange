@@ -4,11 +4,12 @@
 joint limits, and a pull towards the home posture in the null space (the arm is redundant with the slide: without it the
 solutions drift and flip between configurations).
 
-`Controller`: the way a real UR driver follows a Cartesian path (servoL-like): the tip target moves along a straight line at a
-constant speed (with a short ramp); every control tick (`substeps` physics steps) one damped-least-squares step from the
-*commanded* configuration towards the target gives the next joint command, limited to the joint velocity limits. No stop at
-every waypoint. A move ends when the target is reached and the measured tip is within tolerance, or early when the flange
-force / torque sensor exceeds a limit (filtered, debounced; tared at the start of the move), or a caller's `stop` test is true."""
+`Controller`: plan, then execute. A straight tip line is first solved as joint waypoints every centimetre (IK warm started
+along the line, pulled towards the home posture, optionally collision checked: a line that cannot be followed is refused before
+the robot moves); the joint path is then followed continuously with a smooth time profile within the joint velocity limits (no
+stop at every waypoint), the servos tracking the command every `substeps` physics steps. A move ends when the tip is at the end
+within tolerance, or early when the flange force / torque sensor exceeds a limit (filtered, debounced; tared at the start of the
+move), or a caller's `stop` test is true."""
 from dataclasses import dataclass
 
 import mujoco
@@ -34,10 +35,13 @@ class Kinematics:
 
     def __init__(self, model, site='tip', home=HOME, rest_gain=0.05):
         self.m, self.d = model, mujoco.MjData(model)
-        self.home, self.rest_gain = np.asarray(home, float), rest_gain
-        self.rest_weights = np.asarray(self.REST_WEIGHTS, float)
+        names = [n for n in ARM_JOINTS if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n) >= 0]  # the slide is optional
+        keep = [ARM_JOINTS.index(n) for n in names]
+        self.names = names
+        self.home, self.rest_gain = np.asarray(home, float)[keep], rest_gain
+        self.rest_weights = np.asarray(self.REST_WEIGHTS, float)[keep]
         self.site = model.site(site).id
-        self.joints = [model.joint(n).id for n in ARM_JOINTS]
+        self.joints = [model.joint(n).id for n in names]
         self.qadr = np.array([model.jnt_qposadr[j] for j in self.joints])
         self.dofs = np.array([model.jnt_dofadr[j] for j in self.joints])
         self.low = np.array([model.jnt_range[j][0] for j in self.joints])
@@ -91,7 +95,8 @@ class Kinematics:
         found = []
         for _ in range(starts):
             q0 = rng.uniform(np.maximum(self.low, -np.pi), np.minimum(self.high, np.pi))
-            q0[0] = np.clip(target_pos[1], self.low[0], self.high[0])
+            if self.names[0] == 'slide':
+                q0[0] = np.clip(target_pos[1], self.low[0], self.high[0])
             q, ok = self.solve(q0, target_pos, target_rot)
             if ok and (accept is None or accept(q)):
                 found.append(q)
@@ -111,7 +116,7 @@ class Controller:
     def __init__(self, model, data, kinematics, substeps=4, force_window=5, force_debounce=2):
         self.m, self.d, self.k = model, data, kinematics
         self.substeps = substeps
-        self.acts = np.array([model.actuator(n if n == 'slide' else n.replace('_joint', '')).id for n in ARM_JOINTS])
+        self.acts = np.array([model.actuator(n if n == 'slide' else n.replace('_joint', '')).id for n in kinematics.names])
         self.dt = model.opt.timestep * substeps
         self.force_sensor = model.sensor('ft_force')
         self.force_window, self.force_debounce = force_window, force_debounce
@@ -141,29 +146,50 @@ class Controller:
         goal = np.clip(np.asarray(goal, float), self.k.low, self.k.high)
         self.command = self.measured()
         for tick in range(int(max_time / self.dt)):
-            self.command = self.command + np.clip(goal - self.command, -V_MAX * 0.5 * self.dt, V_MAX * 0.5 * self.dt)
+            v = V_MAX[-len(goal):] * 0.5 * self.dt
+            self.command = self.command + np.clip(goal - self.command, -v, v)
             self._tick()
             if np.allclose(self.command, goal) and np.abs(self.measured() - goal).max() < tol \
                     and np.abs(self.d.qvel[self.k.dofs]).max() < 0.05:
                 return MoveResult(True, steps=(tick + 1) * self.substeps)
         return MoveResult(False, steps=int(max_time / self.dt) * self.substeps)
 
-    def move_line(self, end_pos, end_rot=None, speed=0.1, force_limit=None, stop=None, tol=2e-3, max_time=10.0):
-        """Tip along a straight line from where it is to `end_pos` (orientation kept, or `end_rot`) at `speed` m/s."""
+    def plan_line(self, end_pos, end_rot=None, step=0.01, collision_free=None):
+        """Joint waypoints of the straight tip line from the current tip to `end_pos` (every `step` m, IK warm started from the
+        previous waypoint and pulled towards the home posture), or None if a waypoint has no solution or `collision_free(q)`
+        refuses it. The path the robot then follows is the one that was checked."""
         start_pos, start_rot = self.tip()
         end_rot = start_rot if end_rot is None else np.asarray(end_rot)
+        n = max(1, int(np.ceil(np.linalg.norm(np.asarray(end_pos) - start_pos) / step)))
+        q, path = self.measured(), [self.measured()]
+        for i in range(1, n + 1):
+            q, ok = self.k.solve(q, start_pos + (np.asarray(end_pos) - start_pos) * i / n, end_rot)
+            if not ok or (collision_free is not None and not collision_free(q)):
+                return None
+            path.append(q)
+        return np.array(path)
+
+    def move_line(self, end_pos, end_rot=None, speed=0.1, force_limit=None, stop=None, tol=2e-3, max_time=10.0,
+                  collision_free=None, path=None):
+        """Tip along a straight line to `end_pos` at about `speed` m/s: the joint path of `plan_line` (or `path`) followed with a
+        smooth time profile and the joint velocity limits. Returns MoveResult (not reached and no steps when there is no plan)."""
+        path = self.plan_line(end_pos, end_rot, collision_free=collision_free) if path is None else path
+        if path is None:
+            return MoveResult(False)
+        start_pos = self.tip()[0]
         length = float(np.linalg.norm(np.asarray(end_pos) - start_pos))
         duration = max(length / speed, self.dt)
-        self.command = self.measured()
+        segments = len(path) - 1
         history, over, peak = [], 0, 0.0
         bias = self.flange_force()
+        self.command = self.measured()
         for tick in range(int(max_time / self.dt)):
             s = min(1.0, (tick + 1) * self.dt / duration)
-            s_smooth = s * s * (3 - 2 * s)  # smooth start and stop
-            target = start_pos + s_smooth * (np.asarray(end_pos) - start_pos)
-            target_rot = end_rot if s >= 1.0 else end_rot  # orientation: held at the end orientation
-            q_next, _ = self.k.step(self.command, target, target_rot)
-            self.command = self.command + np.clip(q_next - self.command, -V_MAX * self.dt, V_MAX * self.dt)
+            u = s * s * (3 - 2 * s) * segments  # smooth start and stop, in path segments
+            i = min(int(u), segments - 1) if segments else 0
+            target = path[i] + (u - i) * (path[min(i + 1, segments)] - path[i]) if segments else path[0]
+            v = V_MAX[-len(target):] * self.dt
+            self.command = self.command + np.clip(target - self.command, -v, v)
             self._tick()
             if force_limit is not None:
                 history.append(np.linalg.norm(self.flange_force() - bias))
