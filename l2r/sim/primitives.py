@@ -121,28 +121,29 @@ class Manipulator:
         return success & self.scene.is_valid()
 
     # ------------------------------------------------------------------ pick
-    def pick(self, xy, speed=0.01, yaw=0.0, approach=0.0):
+    def pick(self, xy, speed=0.01, yaw=0.0, approach=0.0, height=None):
         """Pick the object at `xy` with the end effector: `_pick_with_cup`, or with the jaws (rotated by `yaw` about the
-        vertical) `_pick_with_jaws`. `approach` (rad) rotates the approach line about the vertical (see the module doc)."""
-        if approach:
-            return self._pick_along(xy, speed, approach, lift=True)
+        vertical) `_pick_with_jaws`. `approach` (rad) rotates the approach line about the vertical (see the module doc);
+        `height` (m above the cabinet floor) replaces the fixed contact height (PICK_HEIGHT / GRASP_HEIGHT)."""
+        if approach or height is not None:
+            return self._pick_along(xy, speed, approach, lift=True, height=height)
         if getattr(self.suction, 'is_gripper', False):
             return self._pick_with_jaws(xy, speed, yaw)
         return self._pick_with_cup(xy, speed)
 
-    def pull(self, xy, approach=0.0, heading=0.0, distance=0.08, speed=0.01):
+    def pull(self, xy, approach=0.0, heading=0.0, distance=0.08, speed=0.01, height=None):
         """Attach to the object at `xy` along the approach line, drag it by `distance` m along `heading` on the floor, release, leave.
         True if the object was attached, the drag completed and the scene is still valid."""
-        return self._pick_along(xy, speed, approach, lift=False, drag=(heading, distance))
+        return self._pick_along(xy, speed, approach, lift=False, drag=(heading, distance), height=height)
 
-    def _attach_along(self, xy, speed, approach):
+    def _attach_along(self, xy, speed, approach, height=None):
         """Go in along the approach line to the object at `xy` and attach (cup: contact + vacuum; jaws: close around it).
         Returns (attached, tool position, orientation, staging point), or None if the approach line is infeasible."""
         arm, tool, b = self.arm, self.suction, self.ws.bounds
         gripper = getattr(tool, 'is_gripper', False)
         arm.move_joints(HOME_JOINTS)
         home_quat = arm.tool_pose()[1]
-        height = b[2][0] + (GRASP_HEIGHT if gripper else PICK_HEIGHT)
+        height = b[2][0] + (height if height is not None else (GRASP_HEIGHT if gripper else PICK_HEIGHT))
         target = np.array([xy[0], xy[1], height])
         line = self.approach_line(target, approach)
         if line is None:
@@ -168,9 +169,9 @@ class Manipulator:
             attached = tool.activated
         return attached, np.asarray(arm.tool_pose()[0]), quat, front
 
-    def _pick_along(self, xy, speed, approach, lift=True, drag=None):
+    def _pick_along(self, xy, speed, approach, lift=True, drag=None, height=None):
         arm, tool, b = self.arm, self.suction, self.ws.bounds
-        result = self._attach_along(xy, speed, approach)
+        result = self._attach_along(xy, speed, approach, height)
         if result is None:
             return False  # infeasible approach line: nothing moved
         attached, pos, quat, front = result

@@ -141,14 +141,14 @@ class Environment:
         """Push from `xy`: along y (sign of sin(angle)), or along any floor direction `heading` (rad, see `primitives`)."""
         return self.manipulator.push(xy, angle, speed, push_length, heading)
 
-    def pick(self, xy, speed=0.01, yaw=0.0, approach=0.0):
+    def pick(self, xy, speed=0.01, yaw=0.0, approach=0.0, height=None):
         """Pick at `xy`; `yaw` (rad) rotates the parallel jaws about the vertical (ignored by the suction cup); `approach`
         (rad) rotates the approach line about the vertical."""
-        return self.manipulator.pick(xy, speed, yaw, approach)
+        return self.manipulator.pick(xy, speed, yaw, approach, height)
 
-    def pull(self, xy, approach=0.0, heading=0.0, distance=0.08, speed=0.01):
+    def pull(self, xy, approach=0.0, heading=0.0, distance=0.08, speed=0.01, height=None):
         """Attach to the object at `xy` (cup or jaws), drag it `distance` m along `heading` on the floor, release."""
-        return self.manipulator.pull(xy, approach, heading, distance, speed)
+        return self.manipulator.pull(xy, approach, heading, distance, speed, height)
 
     def place(self, xy, speed=0.01):
         return self.manipulator.place(xy, speed)

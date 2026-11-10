@@ -71,6 +71,15 @@ class Scene:
         upright = max(roll) < 1.2 and max(pitch) < 1.2
         return bool(np.all(z > self.ws.bounds[2][0] - 0.1) and upright)
 
+    def invalid_objects(self):
+        """Ids of the objects that make the scene invalid now (fell off the floor or toppled), without stepping the simulation."""
+        out = []
+        for object_id, (pos, quat) in self.poses().items():
+            roll, pitch, _ = self.p.getEulerFromQuaternion(quat)
+            if pos[2] <= self.ws.bounds[2][0] - 0.1 or abs(roll) >= 1.2 or abs(pitch) >= 1.2:
+                out.append(int(object_id))
+        return out
+
     def progress(self):
         """Task progress without stepping the simulation: (fraction of the objects inside the region of their class,
         mean distance in m of the objects to their region, 0 when inside)."""

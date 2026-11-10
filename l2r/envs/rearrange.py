@@ -200,7 +200,8 @@ class RearrangeEnv:
             held_extent = object_extent_px(obs, held_id) if cfg.footprint_placement else (0, 0)
             held_object = obs.get('instance_to_object', {}).get(int(held_id), held_id)  # ground-truth id (relabelling)
             executed = sim.pick(position, yaw=cfg.jaw_angle(pix[0]) if cfg.end_effector == 'gripper' else 0.0,
-                                approach=float(action.get('approach', 0.0)))
+                                approach=float(action['approach']) if 'approach' in action else self._approach_for(pix),
+                                height=None if action.get('height') is None else float(action['height']))
             if executed and learned and sim.is_valid():  # hold the object, ask for the placement
                 self.holding = True
                 mid = self._full_obs(action)
@@ -249,6 +250,14 @@ class RearrangeEnv:
                 'shaping': shaping}
         self.obs = next_obs
         return self.compact(next_obs), reward, terminated, truncated, info
+
+    def _approach_for(self, pix):
+        """Approach angle of a grasp without an explicit one: straight in, or (cfg.grasp_approach == 'clear') the clearest line in
+        the height map (`l2r.envs.approach`)."""
+        if self.cfg.grasp_approach != 'clear':
+            return 0.0
+        from l2r.envs.approach import choose_approach
+        return choose_approach(self.obs, (int(pix[1]), int(pix[2])))[0]
 
     def _placement_space(self, held_class, freespace, extent):
         if self.cfg.placement_space == 'region':
