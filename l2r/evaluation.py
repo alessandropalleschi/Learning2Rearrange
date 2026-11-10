@@ -44,7 +44,7 @@ def evaluate(trainer, venv, cfg, ws, num_obj, episodes, base_seed):
         next_obs, _, terminated, truncated, infos = venv.step(actions)
         for k, i in enumerate(active):
             obs[i] = carry(trainer, next_obs[i], None if q.hidden is None else q.hidden[k], actions[i]['primitive'],
-                           actions[i]['pix'], infos[i]['place_pix'])
+                           actions[i]['pix'], infos[i]['place_pix'], obs[i])
             if terminated[i] or truncated[i]:
                 results.append({'seed': seed_of[i], 'success': bool(infos[i]['sorted']), 'actions': infos[i]['actions'],
                                 'return': infos[i]['episode_return']})

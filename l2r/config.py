@@ -80,6 +80,7 @@ class Config:
                                       # the full margin at Chebyshev distance r in the expert's own map (neighbouring cells of one
                                       # object are equally good, a smooth network can not separate them)
     demo_fraction: float = 0.25       # share of each batch drawn from the demonstrations (when loaded)
+    history_tokens: bool = False      # object agent: the last steps as tokens (a temporal memory of what was done and its outcome)
     skill_params: bool = False        # object agent: parameterised grasp (approach) / push (heading, length) skills, flow policy
     object_algo: str = 'dqn'          # object agent: 'dqn' (double DQN) | 'iql' (implicit Q-learning, advantage-weighted policy)
     iql_expectile: float = 0.8        # IQL: expectile of the value regression (0.5 = mean, -> 1 = max over the data's actions)
@@ -152,7 +153,7 @@ class Config:
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
                    equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
                    grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), demo_anneal_steps=get('demo_anneal_steps', defaults.demo_anneal_steps),
-                   twin_q=get('twin_q', False), n_step=get('n_step', 1), object_algo=get('object_algo', 'dqn'), skill_params=get('skill_params', False),
+                   twin_q=get('twin_q', False), n_step=get('n_step', 1), object_algo=get('object_algo', 'dqn'), skill_params=get('skill_params', False), history_tokens=get('history_tokens', False),
                    iql_expectile=get('iql_expectile', 0.8), iql_beta=get('iql_beta', 3.0), outcome_weight=get('outcome_weight', 0.0), outcome_penalty=get('outcome_penalty', 0.0),
                    eps_end=get('eps_end', defaults.eps_end), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
@@ -210,6 +211,8 @@ class Config:
                             help="'structured': mask the Q-maps to grasps at an object's front face and pushes with something in the "
                                  "blade's path")
         parser.add_argument('--demo_fraction', type=float, default=0.25, help='share of each batch from the demonstrations')
+        parser.add_argument('--history_tokens', action='store_true', default=False,
+                            help='object agent: the last steps (action, object class, outcome) as tokens of the transformer')
         parser.add_argument('--skill_params', action='store_true', default=False,
                             help='object agent (IQL): parameterised skills with a flow-matching parameter policy')
         parser.add_argument('--object_algo', choices=['dqn', 'iql'], default='dqn', help='object agent learning algorithm')

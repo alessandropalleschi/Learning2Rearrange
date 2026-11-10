@@ -23,6 +23,8 @@ from l2r.sim.constants import CLASSES, COLORS, LABELS
 
 MAX_OBJECTS = 16
 MAX_GHOSTS = 8  # remembered-but-hidden objects kept as tokens
+HISTORY = 4  # previous steps kept as history tokens (`--history_tokens`, see make_history_entry)
+MAX_MEMORY = MAX_GHOSTS + HISTORY  # memory segment of the token sequence: ghosts, then history
 FEATURES = 24  # 18 object features + ghost flag + age + last-action flags (see instance_features, global_features)
 COLOR_TOLERANCE = 6  # summed absolute RGB difference that still counts as the class colour
 MIN_AREA = 6  # cells (5 mm): smaller pieces are noise
@@ -200,6 +202,30 @@ def candidate_actions(instances, obs, push_lengths_px, edge_margin=GRASP_EDGE_MA
     return actions, valid
 
 
+def make_history_entry(prev_obs, primitive, pix, next_obs):
+    """(FEATURES,) token summarising one executed step, from what the agent observed (no privileged information): class of the
+    object at the action cell (its colour), action cell, primitive, executed, changed fraction of the height map, continuous
+    parameters (if any); flag 22 marks a history token, 23 its age (set when the state is built)."""
+    out = np.zeros(FEATURES, np.float32)
+    color = crop(prev_obs['colormap']).astype(int)
+    h, w = color.shape[:2]
+    row, col = int(np.clip(pix[1], 0, h - 1)), int(np.clip(pix[2], 0, w - 1))
+    for k in range(len(CLASSES)):
+        if np.abs(color[row, col] - CLASS_RGB[k]).sum() <= COLOR_TOLERANCE:
+            out[k] = 1.0
+    out[3:5] = (2 * row / (h - 1) - 1, 2 * col / (w - 1) - 1)
+    primitives = ('push', 'grasp', 'place', 'pull')
+    if primitive in primitives:
+        out[5 + primitives.index(primitive)] = 1.0
+    record = next_obs.get('last_action') if isinstance(next_obs, dict) else None
+    if record is not None and len(record) >= 6:
+        out[9], out[10] = float(record[4]), min(10.0 * float(record[5]), 1.0)
+    extra = [float(v) for v in pix[3:5]]
+    out[11:11 + len(extra)] = np.clip(extra, -4, 4)
+    out[17], out[22] = 1.0, 1.0
+    return out
+
+
 def place_candidates(obs):
     """Learned placement: (P, 3) int place actions (0, row, col) and (P, PLACE_FEATURES) float32 tokens for the free cells the held
     object fits in (`obs['freespace']`, action coordinates), on a PLACE_STRIDE grid. Empty unless an object is held.
@@ -258,6 +284,11 @@ def build_state(obs, push_lengths_px):
     ghosts, remembered, ages = extract_ghosts(obs)
     ghost_tokens = instance_features(ghosts, obs, remembered, ages) if ghosts else np.zeros((0, FEATURES), np.float32)
     place_actions, place_tokens = place_candidates(obs)
+    history = np.asarray(obs.get('history', np.zeros((0, FEATURES), np.float32)), np.float32)[:HISTORY]
+    if len(history):  # the previous steps (newest first), with their age
+        history = history.copy()
+        history[:, 23] = (np.arange(len(history)) + 1) / HISTORY
+        ghost_tokens = np.concatenate([ghost_tokens, history], axis=0)
     return {'instances': instances, 'actions': actions, 'valid': valid, 'ghosts': ghosts, 'ghost_tokens': ghost_tokens,
             'place_actions': place_actions, 'place_tokens': place_tokens,
             'tokens': np.concatenate([global_features(instances, obs, ghosts)[None], region_features(obs),
@@ -348,15 +379,15 @@ class ObjectQNet(nn.Module):
 
     def embed_tokens(self, tokens, counts):
         """Contextualised instance tokens (B, Nmax, dim), see `encode`."""
-        n_max = tokens.shape[1] - 4 - MAX_GHOSTS
+        n_max = tokens.shape[1] - 4 - MAX_MEMORY
         return self.encode(tokens, counts)[0][:, 4:4 + n_max]
 
     def encode(self, tokens, counts):
-        """tokens (B, 4 + Nmax + MAX_GHOSTS, FEATURES), counts (B, 2) long (instances, ghosts) -> contextualised tokens of the
-        whole sequence (B, 4 + Nmax + MAX_GHOSTS, dim) and its padding mask: global + 3 region + Nmax instance + MAX_GHOSTS ghost
+        """tokens (B, 4 + Nmax + MAX_MEMORY, FEATURES), counts (B, 2) long (instances, memory) -> contextualised tokens of the
+        whole sequence (B, 4 + Nmax + MAX_MEMORY, dim) and its padding mask: global + 3 region + Nmax instance + MAX_MEMORY memory (ghost, history)
         tokens through the transformer."""
         batch, length, _ = tokens.shape
-        n_max = length - 4 - MAX_GHOSTS
+        n_max = length - 4 - MAX_MEMORY
         position = torch.arange(length, device=tokens.device)
         types = torch.full((length,), TYPE_INSTANCE, dtype=torch.long, device=tokens.device)
         types[0], types[1:4], types[4 + n_max:] = TYPE_GLOBAL, TYPE_REGION, TYPE_GHOST
@@ -377,13 +408,13 @@ class ObjectQNet(nn.Module):
 
 
 def collate(states, device):
-    """List of `build_state` results -> (tokens (B, 4 + Nmax + MAX_GHOSTS, F), counts (B, 2) = (instances, ghosts), valid (B, Nmax, S))."""
+    """List of `build_state` results -> (tokens (B, 4 + Nmax + MAX_MEMORY, F), counts (B, 2) = (instances, memory tokens), valid (B, Nmax, S))."""
     n_max = max(max(len(s['instances']) for s in states), 1)
     n_slots = max(np.shape(s['valid'])[1] if np.ndim(s['valid']) == 2 else 1 for s in states)  # (0, S) when no object is visible
-    tokens = np.zeros((len(states), 4 + n_max + MAX_GHOSTS, FEATURES), np.float32)
+    tokens = np.zeros((len(states), 4 + n_max + MAX_MEMORY, FEATURES), np.float32)
     valid = np.zeros((len(states), n_max, n_slots), bool)
     for b, s in enumerate(states):
-        n, g = len(s['instances']), len(s['ghost_tokens'])
+        n, g = len(s['instances']), len(s['ghost_tokens'])  # ghost_tokens: ghosts and history tokens (the memory segment)
         tokens[b, :4 + n] = s['tokens']
         tokens[b, 4 + n_max:4 + n_max + g] = s['ghost_tokens']
         valid[b, :n] = s['valid']

@@ -120,8 +120,13 @@ def attach_initial(trainer, obs):
     return obs
 
 
-def carry(trainer, next_obs, h_new, primitive, pix, place_pix):
-    """Attach the updated belief and the executed action to the observation that follows the action."""
+def carry(trainer, next_obs, h_new, primitive, pix, place_pix, prev_obs=None):
+    """Attach the updated belief and the executed action to the observation that follows the action; with history tokens
+    (`--history_tokens`) also the history of the last steps (newest first)."""
+    if prev_obs is not None and getattr(getattr(trainer, 'cfg', None), 'history_tokens', False):
+        from l2r.learning.object_centric import HISTORY, make_history_entry
+        old = list(prev_obs.get('history', []))
+        next_obs['history'] = np.stack(([make_history_entry(prev_obs, primitive, pix, next_obs)] + old)[:HISTORY])
     if trainer.belief == 'recurrent':
         next_obs['h_prev'] = h_new
         next_obs['prev_action'] = {'primitive': primitive, 'pix': pix, 'place_pix': place_pix}

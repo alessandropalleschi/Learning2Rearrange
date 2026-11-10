@@ -107,7 +107,7 @@ class TrainingLoop:
                     [{'primitive': c[0], 'pix': c[1]} for c in choices])
                 for i in range(n):
                     carry(self.trainer, next_obs[i], None if q.hidden is None else q.hidden[i], choices[i][0],
-                          choices[i][1], infos[i]['place_pix'])
+                          choices[i][1], infos[i]['place_pix'], obs[i])
                 if args.save_visualizations:
                     self._save_visualization(q, obs[0], choices[0], infos[0])
                 if not args.is_testing:

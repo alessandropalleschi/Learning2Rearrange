@@ -110,7 +110,8 @@ def test_the_network_attends_to_ghosts_but_only_outputs_instance_values():
     for p in net.parameters():
         p.requires_grad_(True)
     tokens, counts, _ = collate([plain, ghosty], 'cpu')
-    assert tokens.shape[1] == 4 + 2 + 8 and counts.tolist() == [[2, 0], [2, 1]]
+    from l2r.learning.object_centric import MAX_MEMORY
+    assert tokens.shape[1] == 4 + 2 + MAX_MEMORY and counts.tolist() == [[2, 0], [2, 1]]
     q = net(tokens, counts)
     assert q.shape == (2, 2, 3)  # instance values only
     assert not torch.allclose(q[0], q[1], atol=1e-5)  # the ghost changes what the instances are worth
@@ -325,3 +326,45 @@ def test_iql_policy_prefers_the_better_actions_of_the_data_for_grasps_placements
     assert abs(q.lengths[0, 0, row, col] - 0.2) < 0.15  # the actor follows the better executed length
     assert -5.0 < value <= 0.5  # an expectile of the data's action values, no max over unseen actions
     assert q.pick[0, 0][blue[1], blue[2]] > q.pick[0, 0][green[1], green[2]]  # acting follows the policy
+
+
+def test_history_tokens_record_what_was_done_and_the_agent_learns_from_them():
+    from l2r.learning.object_centric import HISTORY, make_history_entry
+    obs = observation()
+    state = build_state(obs, [16])
+    blue = state['instances'][0]
+    pix = (0, int(blue.rows.mean()), int(blue.cols.max()) - 2)
+    after = dict(obs, last_action=np.array([0, 1, 0, 0, 0, 0.0, 0], np.float32))  # a grasp that did not execute
+    entry = make_history_entry(obs, 'grasp', pix, after)
+    assert entry[0] == 1 and entry[6] == 1 and entry[9] == 0 and entry[22] == 1  # blue object, grasp, not executed, history token
+    remembered = dict(obs, history=np.stack([entry]))
+    tokens = build_state(remembered, [16])['ghost_tokens']
+    assert len(tokens) == 1 and np.isclose(tokens[0, 23], 1 / HISTORY)
+    # without the last-action record, the history alone tells the agent that grasping the blue object just failed
+    torch.manual_seed(0)
+    trainer = ObjectTrainer(Config(placement='heuristic', batch_size=8, learning_rate=3e-3, prioritized=False, reward_mode='sparse'))
+    s = trainer.info(obs)
+    blue_grasp, green_grasp = tuple(s['actions'][0, 0]), tuple(s['actions'][1, 0])
+    batch = [Transition(obs, blue_grasp, obs, 0.0, 'grasp', True), Transition(obs, green_grasp, obs, -3.0, 'grasp', True),
+             Transition(remembered, blue_grasp, remembered, -6.0, 'grasp', True),
+             Transition(remembered, green_grasp, remembered, -3.0, 'grasp', True)] * 2
+    for _ in range(300):
+        trainer.train_step(batch)
+    fresh, again = trainer.forward_batch([obs]).pick[0, 0], trainer.forward_batch([remembered]).pick[0, 0]
+    assert fresh[blue_grasp[1], blue_grasp[2]] > fresh[green_grasp[1], green_grasp[2]] + 1
+    assert again[green_grasp[1], green_grasp[2]] > again[blue_grasp[1], blue_grasp[2]] + 1
+
+
+def test_carry_builds_the_history_newest_first_and_only_when_enabled():
+    from types import SimpleNamespace
+
+    from l2r.learning.object_centric import HISTORY
+    from l2r.learning.policy import carry
+    obs = observation()
+    on, off = SimpleNamespace(cfg=Config(history_tokens=True), belief='none'), SimpleNamespace(cfg=Config(), belief='none')
+    current = obs
+    for k in range(HISTORY + 2):
+        nxt = carry(on, dict(obs), None, 'push' if k % 2 else 'grasp', (0, 40, 40), None, current)
+        current = nxt
+    assert current['history'].shape == (HISTORY, 24) and current['history'][0, 5] == 1  # newest (a push) first
+    assert 'history' not in carry(off, dict(obs), None, 'grasp', (0, 40, 40), None, obs)
