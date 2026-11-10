@@ -25,6 +25,11 @@ GRASP_HEIGHT = PICK_HEIGHT  # jaw centre above bounds[2][0] (the cabinet floor):
 PUSH_QUATERNION = (np.sqrt(0.5), 0, -np.sqrt(0.5), 0)  # blade pointing into the cabinet
 PLACE_QUATERNION = (0.7088025212287903, 0.0003121407644357532, -0.7054068446159363, 0.0003104391216766089)
 WALL_MARGIN = 0.008  # m: a push stops this far from the side walls
+# paddle pusher (`--pusher paddle`): a T-shaped plate fixed to the tool during pushes (a tool change / retractable paddle), aligned
+# with the cabinet: a side plate (8 cm along the depth, 4 cm tall) pushes along the width, a front plate (6 cm wide) towards the back.
+PADDLE_PLATES = (((0.04, 0.005, 0.02), (0.03, 0.0, 0.0)),      # (half extents, centre offset from the tool tip), world axes
+                 ((0.005, 0.03, 0.02), (-0.005, 0.0, 0.0)))
+PADDLE_MASS = 0.05
 OPENING_MARGIN = 0.03  # m: an approach line must enter the cabinet at least this far from the side walls
 MAX_APPROACH = np.deg2rad(60)  # rad: steeper approaches are refused (the arm would have to reach around the side walls)
 
@@ -60,6 +65,31 @@ class Manipulator:
             return None
         return direction, tuple(start)
 
+    def _attach_paddle(self):
+        """Fix the paddle to the tool where it is now (the tool must already have its push orientation); returns (body, constraint)."""
+        p, arm = self.arm.p, self.arm
+        tip, _ = arm.tool_pose()
+        shapes = dict(shapeTypes=[p.GEOM_BOX] * len(PADDLE_PLATES), halfExtents=[h for h, _ in PADDLE_PLATES],
+                      collisionFramePositions=[o for _, o in PADDLE_PLATES])
+        collision = p.createCollisionShapeArray(**shapes)
+        visual = p.createVisualShapeArray(shapeTypes=shapes['shapeTypes'], halfExtents=shapes['halfExtents'],
+                                          visualFramePositions=shapes['collisionFramePositions'], rgbaColors=[[0.3, 0.3, 0.35, 1]] * 2)
+        body = p.createMultiBody(PADDLE_MASS, collision, visual, basePosition=tip, baseOrientation=(0, 0, 0, 1))
+        for link in range(-1, p.getNumJoints(arm.body)):
+            p.setCollisionFilterPair(arm.body, body, link, -1, 0)
+        frame_pos, frame_orn = arm.tool_frame()
+        inv_pos, inv_orn = p.invertTransform(frame_pos, frame_orn)
+        rel_pos, rel_orn = p.multiplyTransforms(inv_pos, inv_orn, tip, (0, 0, 0, 1))
+        constraint = p.createConstraint(arm.body, arm.ee_link, body, -1, p.JOINT_FIXED, (0, 0, 0), rel_pos, (0, 0, 0),
+                                        parentFrameOrientation=rel_orn)
+        p.changeConstraint(constraint, maxForce=1000)
+        return body, constraint
+
+    def _detach_paddle(self, paddle):
+        if paddle is not None:
+            self.arm.p.removeConstraint(paddle[1])
+            self.arm.p.removeBody(paddle[0])
+
     def _retreat_from(self, pos, front, quat, speed):
         """Leave towards the staging point on a straight line from `pos`, then go home."""
         self.arm.move_straight(pos, front, quat, speed)
@@ -80,6 +110,14 @@ class Manipulator:
         front = self._front(start[1], start[2])
 
         success = arm.move_to_pose((front, quat), speed)
+        paddle = self._attach_paddle() if (success and getattr(self.params, 'pusher', 'tip') == 'paddle') else None
+        try:
+            return self._push_axis(start, end, front, quat, speed, success)
+        finally:
+            self._detach_paddle(paddle)
+
+    def _push_axis(self, start, end, front, quat, speed, success):
+        arm = self.arm
         if success:
             success = arm.move_straight(front, start, quat, speed, detect_force=True)  # approach
         else:
@@ -109,16 +147,21 @@ class Manipulator:
         end = start + push_length * direction
         end[0] = max(end[0], b[0][0] + WALL_MARGIN)
         end[1] = max(min(end[1], b[1, 1] - WALL_MARGIN), b[1, 0] + WALL_MARGIN)
-        front, quat = self._front(start[1], start[2]), PUSH_QUATERNION  # the tip is round: the stick stays straight in
-        success = arm.move_to_pose((front, quat), speed) and arm.move_straight(front, start, quat, speed, detect_force=True)
-        if not success:
+        front, quat = self._front(start[1], start[2]), PUSH_QUATERNION  # the stick stays straight in
+        reached = arm.move_to_pose((front, quat), speed)
+        paddle = self._attach_paddle() if (reached and getattr(self.params, 'pusher', 'tip') == 'paddle') else None
+        try:
+            success = reached and arm.move_straight(front, start, quat, speed, detect_force=True)
+            if not success:
+                pos = np.asarray(arm.tool_pose()[0])
+                self._retreat_from(pos, self._front(pos[1], pos[2]), quat, speed)
+                return False
+            success = arm.move_straight(start, end, quat, 0.1 * speed, detect_force=True)
             pos = np.asarray(arm.tool_pose()[0])
             self._retreat_from(pos, self._front(pos[1], pos[2]), quat, speed)
-            return False
-        success = arm.move_straight(start, end, quat, 0.1 * speed, detect_force=True)
-        pos = np.asarray(arm.tool_pose()[0])
-        self._retreat_from(pos, self._front(pos[1], pos[2]), quat, speed)
-        return success & self.scene.is_valid()
+            return success & self.scene.is_valid()
+        finally:
+            self._detach_paddle(paddle)
 
     # ------------------------------------------------------------------ pick
     def pick(self, xy, speed=0.01, yaw=0.0, approach=0.0, height=None):

@@ -330,6 +330,7 @@ class SimParams:
 
     # end effector: the suction cup (default) or a parallel-jaw gripper (`--end_effector gripper`)
     end_effector: str = 'suction'
+    pusher: str = 'tip'                     # 'tip' (the tool's own 2.6 cm tip, original) | 'paddle' (T-shaped plate during pushes)
 
     # domain randomisation (applied at every reset)
     randomize: bool = False
@@ -369,6 +370,7 @@ class SimParams:
         params.joint_tolerance = getattr(args, 'joint_tolerance', params.joint_tolerance)
         params.perception = getattr(args, 'perception', 'gt')
         params.end_effector = getattr(args, 'end_effector', 'suction')
+        params.pusher = getattr(args, 'pusher', 'tip')
         params.perception_weights = getattr(args, 'perception_weights', params.perception_weights)
         params.object_types = tuple(getattr(args, 'object_types', None) or ()) or None
         return params
@@ -387,6 +389,8 @@ class SimParams:
                             help="object masks: PyBullet ground truth, or a trained segmentation network (train_perception.py)")
         parser.add_argument('--object_types', nargs='+', default=None, help='YCB types of the episodes (>= 3), e.g. to hold one out')
         parser.add_argument('--perception_weights', default='assets/perception/segnet.pth', help='weights of the network')
+        parser.add_argument('--pusher', choices=['tip', 'paddle'], default='tip',
+                            help='pushing geometry: the tool tip (original) or a T-shaped paddle fixed to the tool during pushes')
         parser.add_argument('--end_effector', choices=['suction', 'gripper'], default='suction',
                             help='suction cup, or a parallel-jaw gripper (the pick Q-map gets one channel per jaw yaw, --jaw_yaws)')
         parser.add_argument('--joint_tolerance', type=float, default=1e-3,
