@@ -87,6 +87,7 @@ class Config:
     #     'learned' = pick and place are two decisions, the place pixel comes from a third Q-head
     #     (conditioned on the class of the held object, restricted to free cells) ---
     placement: str = 'heuristic'
+    grasp_approach: str = 'straight'  # 'straight' (original) | 'clear': the env picks the approach line with the fewest obstacles
     placement_space: str = 'depth'  # with footprint_placement: 'depth' = keep the back wall clear (original); 'region' = fit the whole
                                      # footprint and offer only cells inside the object's own target region
     footprint_placement: bool = False  # keep the placement target clear of the back wall by the object's depth
@@ -136,7 +137,7 @@ class Config:
                    max_actions=get('max_actions', defaults.max_actions), batch_size=get('batch_size', defaults.batch_size), belief=get('belief', 'none'),
                    placement=get('placement', 'heuristic'), eps_decay=get('eps_decay', defaults.eps_decay),
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
-                   footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), backbone=get('backbone', 'conv'),
+                   footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), grasp_approach=get('grasp_approach', 'straight'), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
                    hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), arch_decoder=get('arch_decoder', 'plain'), arch_encoder=get('arch_encoder', 'resnet'), policy_topk=get('policy_topk', 10), arch_skips=get('arch_skips', False), arch_stride4=get('arch_stride4', False),
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
@@ -201,6 +202,8 @@ class Config:
         parser.add_argument('--demo_anneal_steps', type=int, default=0,
                             help='fade the demonstration share linearly to 0 over this many RL gradient steps (0 = constant)')
         parser.add_argument('--eps_end', type=float, default=0.01, help='floor of the epsilon-greedy exploration')
+        parser.add_argument('--grasp_approach', choices=['straight', 'clear'], default='straight',
+                            help="grasp approach line: straight in (original) or the clearest of several angles in the height map")
         parser.add_argument('--placement_space', choices=['depth', 'region'], default='depth',
                             help="with --footprint_placement: 'region' fits the held object's whole footprint and offers only cells "
                                  "inside its target region (see SIMULATION_NOTES.md)")

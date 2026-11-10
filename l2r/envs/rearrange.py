@@ -157,7 +157,12 @@ class RearrangeEnv:
         return self.compact(self.obs)
 
     def step(self, action):
-        """action: {'primitive': 'push'|'grasp'|'place', 'pix': (rotation_index, row, col)} in Q-map coordinates.
+        """action: {'primitive': 'push'|'grasp'|'place'|'pull', 'pix': (rotation_index, row, col)} in Q-map coordinates.
+
+        Parameterised primitives (optional keys, see `l2r.sim.primitives`): 'push' with 'heading' (rad, any floor direction
+        away from the robot) and 'length' (m) instead of the encoded direction / length; 'grasp' with 'approach' (rad, the
+        approach line rotated about the vertical); 'pull' (attach at the pixel, drag 'length' m along 'heading', default
+        towards the robot, release) with an optional 'approach'.
 
         placement='heuristic': 'grasp' picks and places in one action (placement by rule).
         placement='learned':   'grasp' only picks. While the object is held, the observation (taken after the
@@ -176,7 +181,14 @@ class RearrangeEnv:
         if self.holding and prim != 'place':
             raise ValueError("an object is held: the next action must be 'place'")
 
-        if prim == 'push':
+        if prim == 'push' and 'heading' in action:  # parameterised push: any floor direction (rad), length in m
+            attempted = True
+            executed = sim.push(position, push_length=float(action.get('length', max(cfg.push_lengths))), heading=float(action['heading']))
+        elif prim == 'pull':  # attach (cup / jaws), drag along the floor, release
+            attempted = True
+            executed = sim.pull(position, approach=float(action.get('approach', 0.0)), heading=float(action.get('heading', 0.0)),
+                                distance=float(action.get('length', max(cfg.push_lengths))))
+        elif prim == 'push':
             angle, length = decode_push(pix[0], cfg.push_lengths)
             if cfg.hierarchy:  # continuous length: pix[3] in 0..1 of the range
                 length = cfg.push_length_range[0] + pix[3] * (cfg.push_length_range[1] - cfg.push_length_range[0])
@@ -193,7 +205,9 @@ class RearrangeEnv:
             held_class, held_id = obs['classmap'][px_y, px_x], obs['idmap'][px_y, px_x]
             held_extent = object_extent_px(obs, held_id) if cfg.footprint_placement else (0, 0)
             held_object = obs.get('instance_to_object', {}).get(int(held_id), held_id)  # ground-truth id (relabelling)
-            executed = sim.pick(position, yaw=cfg.jaw_angle(pix[0]) if cfg.end_effector == 'gripper' else 0.0)
+            executed = sim.pick(position, yaw=cfg.jaw_angle(pix[0]) if cfg.end_effector == 'gripper' else 0.0,
+                                approach=float(action['approach']) if 'approach' in action else self._approach_for(pix),
+                                height=None if action.get('height') is None else float(action['height']))
             if executed and learned and sim.is_valid():  # hold the object, ask for the placement
                 self.holding = True
                 mid = self._full_obs(action)
@@ -244,6 +258,14 @@ class RearrangeEnv:
         self.obs = next_obs
         self._record_last(prim, pix, executed, obs, next_obs)
         return self.compact(next_obs), reward, terminated, truncated, info
+
+    def _approach_for(self, pix):
+        """Approach angle of a grasp without an explicit one: straight in, or (cfg.grasp_approach == 'clear') the clearest line in
+        the height map (`l2r.envs.approach`)."""
+        if self.cfg.grasp_approach != 'clear':
+            return 0.0
+        from l2r.envs.approach import choose_approach
+        return choose_approach(self.obs, (int(pix[1]), int(pix[2])))[0]
 
     def _placement_space(self, held_class, freespace, extent):
         if self.cfg.placement_space == 'region':

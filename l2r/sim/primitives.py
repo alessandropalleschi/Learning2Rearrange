@@ -1,5 +1,15 @@
-"""The three motion primitives: push with the blade, pick with the end effector (suction cup or parallel jaws), place the
-held object."""
+"""The motion primitives: push with the blade, pick with the end effector (suction cup or parallel jaws), place the held
+object, and pull (attach with the end effector, drag along the floor, release).
+
+Frames: x is the cabinet depth (the robot stands at +x, outside the opening), y the cabinet width, z up. Parameterised variants
+(all opt-in; the defaults are the original single-axis motions):
+* push `heading` phi: the pusher's tip (a small round head on a stick that enters straight through the opening) moves along
+  (cos phi, sin phi) in the floor plane (pi/2: +y, -pi/2: -y, pi: towards the back); headings with a component towards the robot
+  are not pushes (use `pull`). Reach limits the depth of pushes towards the back near the side walls.
+* pick `approach` psi: the tool comes in along (-cos psi, -sin psi), i.e. the default straight-in approach rotated by psi about the
+  vertical, starting from the cabinet front on that line (infeasible if that start is outside the opening).
+* `pull`: approach like a pick, attach (vacuum on / jaws closed), drag by `distance` along `heading` (default 0: towards the
+  robot), release and leave along the approach line."""
 import logging
 
 import numpy as np
@@ -15,6 +25,8 @@ GRASP_HEIGHT = PICK_HEIGHT  # jaw centre above bounds[2][0] (the cabinet floor):
 PUSH_QUATERNION = (np.sqrt(0.5), 0, -np.sqrt(0.5), 0)  # blade pointing into the cabinet
 PLACE_QUATERNION = (0.7088025212287903, 0.0003121407644357532, -0.7054068446159363, 0.0003104391216766089)
 WALL_MARGIN = 0.008  # m: a push stops this far from the side walls
+OPENING_MARGIN = 0.03  # m: an approach line must enter the cabinet at least this far from the side walls
+MAX_APPROACH = np.deg2rad(60)  # rad: steeper approaches are refused (the arm would have to reach around the side walls)
 
 
 class Manipulator:
@@ -29,15 +41,36 @@ class Manipulator:
         """Staging point in front of the cabinet (outside it, at the given y / z)."""
         return (self.ws.bounds[0][1] + margin, y, z)
 
+    def _yawed(self, quat, angle):
+        """`quat` rotated by `angle` (rad) about the world vertical."""
+        p = self.arm.p
+        return p.multiplyTransforms([0, 0, 0], p.getQuaternionFromEuler([0, 0, angle]), [0, 0, 0], quat)[1]
+
+    def approach_line(self, target, approach):
+        """(unit direction into the cabinet, staging point in front of the cabinet on the line through `target`), or None if the
+        line does not enter through the opening (or is steeper than MAX_APPROACH)."""
+        if abs(approach) > MAX_APPROACH:
+            return None
+        direction = np.array([-np.cos(approach), -np.sin(approach), 0.0])
+        b = self.ws.bounds
+        distance = (b[0][1] + FRONT_MARGIN - target[0]) / np.cos(approach)
+        start = np.asarray(target, float) - direction * distance
+        entry = np.asarray(target, float) - direction * (b[0][1] - target[0]) / np.cos(approach)  # where it crosses the front
+        if not (b[1][0] + OPENING_MARGIN <= entry[1] <= b[1][1] - OPENING_MARGIN):
+            return None
+        return direction, tuple(start)
+
     def _retreat_from(self, pos, front, quat, speed):
         """Leave towards the staging point on a straight line from `pos`, then go home."""
         self.arm.move_straight(pos, front, quat, speed)
         self.arm.go_home()
 
     # ------------------------------------------------------------------ push
-    def push(self, start_xy, angle=0.0, speed=0.01, push_length=0.08):
-        """Push along y from `start_xy` by `push_length` m (direction sin(angle) = -1 / +1). True if the motion
-        completed and the scene is still valid."""
+    def push(self, start_xy, angle=0.0, speed=0.01, push_length=0.08, heading=None):
+        """Push along y from `start_xy` by `push_length` m (direction sin(angle) = -1 / +1), or along any floor direction
+        `heading` (see the module doc). True if the motion completed and the scene is still valid."""
+        if heading is not None:
+            return self._push_heading(start_xy, heading, speed, push_length)
         arm, b = self.arm, self.ws.bounds
         arm.move_joints(HOME_JOINTS)
         start = np.array([start_xy[0], start_xy[1], b[2][0] + PUSH_HEIGHT])
@@ -66,13 +99,107 @@ class Manipulator:
         self._retreat_from(start if success else pos, self._front(start[1], start[2]), quat, speed)
         return success & self.scene.is_valid()
 
+    def _push_heading(self, start_xy, heading, speed, push_length):
+        arm, b = self.arm, self.ws.bounds
+        direction = np.array([np.cos(heading), np.sin(heading), 0.0])
+        if direction[0] > 1e-6:
+            raise ValueError('a push cannot move towards the robot (heading %.2f rad): use pull' % heading)
+        arm.move_joints(HOME_JOINTS)
+        start = np.array([start_xy[0], start_xy[1], b[2][0] + PUSH_HEIGHT])
+        end = start + push_length * direction
+        end[0] = max(end[0], b[0][0] + WALL_MARGIN)
+        end[1] = max(min(end[1], b[1, 1] - WALL_MARGIN), b[1, 0] + WALL_MARGIN)
+        front, quat = self._front(start[1], start[2]), PUSH_QUATERNION  # the tip is round: the stick stays straight in
+        success = arm.move_to_pose((front, quat), speed) and arm.move_straight(front, start, quat, speed, detect_force=True)
+        if not success:
+            pos = np.asarray(arm.tool_pose()[0])
+            self._retreat_from(pos, self._front(pos[1], pos[2]), quat, speed)
+            return False
+        success = arm.move_straight(start, end, quat, 0.1 * speed, detect_force=True)
+        pos = np.asarray(arm.tool_pose()[0])
+        self._retreat_from(pos, self._front(pos[1], pos[2]), quat, speed)
+        return success & self.scene.is_valid()
+
     # ------------------------------------------------------------------ pick
-    def pick(self, xy, speed=0.01, yaw=0.0):
+    def pick(self, xy, speed=0.01, yaw=0.0, approach=0.0, height=None):
         """Pick the object at `xy` with the end effector: `_pick_with_cup`, or with the jaws (rotated by `yaw` about the
-        vertical) `_pick_with_jaws`."""
+        vertical) `_pick_with_jaws`. `approach` (rad) rotates the approach line about the vertical (see the module doc);
+        `height` (m above the cabinet floor) replaces the fixed contact height (PICK_HEIGHT / GRASP_HEIGHT)."""
+        if approach or height is not None:
+            return self._pick_along(xy, speed, approach, lift=True, height=height)
         if getattr(self.suction, 'is_gripper', False):
             return self._pick_with_jaws(xy, speed, yaw)
         return self._pick_with_cup(xy, speed)
+
+    def pull(self, xy, approach=0.0, heading=0.0, distance=0.08, speed=0.01, height=None):
+        """Attach to the object at `xy` along the approach line, drag it by `distance` m along `heading` on the floor, release, leave.
+        True if the object was attached, the drag completed and the scene is still valid."""
+        return self._pick_along(xy, speed, approach, lift=False, drag=(heading, distance), height=height)
+
+    def _attach_along(self, xy, speed, approach, height=None):
+        """Go in along the approach line to the object at `xy` and attach (cup: contact + vacuum; jaws: close around it).
+        Returns (attached, tool position, orientation, staging point), or None if the approach line is infeasible."""
+        arm, tool, b = self.arm, self.suction, self.ws.bounds
+        gripper = getattr(tool, 'is_gripper', False)
+        arm.move_joints(HOME_JOINTS)
+        home_quat = arm.tool_pose()[1]
+        height = b[2][0] + (height if height is not None else (GRASP_HEIGHT if gripper else PICK_HEIGHT))
+        target = np.array([xy[0], xy[1], height])
+        line = self.approach_line(target, approach)
+        if line is None:
+            return None
+        direction, front = line
+        if gripper:
+            target = target - direction * tool.grip_depth  # the middle of the pads goes to the object centre
+        quat = self._yawed(home_quat, approach)
+        tool.release()
+        if hasattr(tool, 'axis'):
+            tool.axis = direction  # the cup seals on surfaces facing it along this axis
+        reached = arm.move_to_pose((front, quat), speed)
+        if not reached:
+            return False, np.asarray(arm.tool_pose()[0]), quat, front
+        if gripper:
+            arm.move_straight(front, tuple(target), quat, 0.5 * speed, detect_force=True)
+            attached = tool.close()
+        else:
+            arm.move_straight(front, tuple(target), quat, 0.5 * speed, detect_contact=True, detect_force=True)
+            pos = np.asarray(arm.tool_pose()[0])
+            if np.linalg.norm(target - pos) < 0.05:
+                tool.activate()
+            attached = tool.activated
+        return attached, np.asarray(arm.tool_pose()[0]), quat, front
+
+    def _pick_along(self, xy, speed, approach, lift=True, drag=None, height=None):
+        arm, tool, b = self.arm, self.suction, self.ws.bounds
+        result = self._attach_along(xy, speed, approach, height)
+        if result is None:
+            return False  # infeasible approach line: nothing moved
+        attached, pos, quat, front = result
+        success = bool(attached)
+        if success and drag is not None:  # pull: slide the object on the floor, then let go
+            heading, distance = drag
+            end = pos + distance * np.array([np.cos(heading), np.sin(heading), 0.0])
+            end[0] = min(end[0], b[0][1] - WALL_MARGIN)
+            end[1] = max(min(end[1], b[1, 1] - WALL_MARGIN), b[1, 0] + WALL_MARGIN)
+            success = arm.move_straight(tuple(pos), tuple(end), quat, 0.3 * speed, detect_force=True)
+            tool.release()
+            pos = np.asarray(arm.tool_pose()[0])
+        elif success:  # pick: carry it out along the approach line
+            leave = np.asarray(front) + (np.asarray(front) - pos) / max(np.linalg.norm(np.asarray(front) - pos), 1e-6) * 0.2
+            arm.move_straight(tuple(pos), tuple(leave), quat, speed)
+            arm.go_home()
+            if self.params.suction_verify and not tool.holds():
+                tool.release()
+                success = False
+            if hasattr(tool, 'axis'):
+                tool.axis = None
+            held = (tool.held,) if getattr(tool, 'is_gripper', False) and success else ()
+            return success & self.scene.is_valid(ignore=held)
+        arm.move_straight(tuple(pos), tuple(front), quat, speed)
+        arm.go_home()
+        if hasattr(tool, 'axis'):
+            tool.axis = None
+        return success & self.scene.is_valid()
 
     def _pick_with_cup(self, xy, speed=0.01):
         """Touch the object at `xy` from the front with the cup, switch the vacuum on and lift it out of the

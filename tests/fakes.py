@@ -50,7 +50,7 @@ class FakeSim:
     def push(self, *args, **kwargs):
         return True
 
-    pick = place = push
+    pick = place = pull = push
 
     def is_valid(self):
         return True
