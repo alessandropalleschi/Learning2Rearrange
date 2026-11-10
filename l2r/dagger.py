@@ -45,7 +45,8 @@ def collect_round(variant, env, episodes, num_objects, beta, rng, seed, max_step
     return labelled, {'success': solved / episodes, 'actions': actions / episodes, 'new': len(labelled)}
 
 
-def dagger(variant, env, demos, rounds, episodes, train_steps, batch, num_objects=(1, 4), beta0=0.5, seed=0, max_steps=20, log=print):
+def dagger(variant, env, demos, rounds, episodes, train_steps, batch, num_objects=(1, 4), beta0=0.5, seed=0, max_steps=20, log=print,
+           after_pretrain=None):
     """Pretrain on `demos`, then `rounds` x (collect `episodes` with a decaying expert mixture, aggregate, train `train_steps`).
     Returns the history, one dict per round (round 0 = behaviour cloning only; its success is measured by the first learner rollout)."""
     rng = np.random.default_rng(seed)
@@ -56,6 +57,8 @@ def dagger(variant, env, demos, rounds, episodes, train_steps, batch, num_object
         return float(np.mean(losses[-100:]))
 
     loss = fit(train_steps)
+    if after_pretrain is not None:  # e.g. evaluate the behaviour-cloning-only policy (the reference DAgger has to beat)
+        after_pretrain()
     for r in range(1, rounds + 1):
         beta = beta0 * 0.5 ** (r - 1) if r < rounds else 0.0  # the last round is pure learner: the cleanest estimate of its success
         new, stats = collect_round(variant, env, episodes, num_objects, beta, rng, seed * 1000 + r, max_steps, log)
