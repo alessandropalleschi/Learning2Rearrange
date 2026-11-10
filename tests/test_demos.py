@@ -158,3 +158,13 @@ def test_continuous_length_demonstrations_are_mapped_to_the_nearest_selectable_l
     adapted = adapt_demos(demos, cfg)
     assert adapted[0].action == (1 * 3 + 1, 10, 20) and adapted[1].action == (0, 5, 6)
     assert adapt_demos(demos, Config(hierarchy=True))[0].action == demos[0].action
+
+
+def test_the_recorded_belief_is_removed_for_an_agent_without_belief():
+    from l2r.config import Config
+    from l2r.demos import adapt_demos
+    from l2r.learning.memory import Transition
+    demos = [Transition({'belief': 1, 'depthmap': 2}, (0, 5, 6), {'belief': 3, 'depthmap': 4}, 0.0, 'grasp', False)]
+    plain = adapt_demos(demos, Config())[0]
+    assert plain.state == {'depthmap': 2} and plain.next_state == {'depthmap': 4} and plain.action == (0, 5, 6)
+    assert adapt_demos(demos, Config(belief='spatial'))[0].state == demos[0].state

@@ -233,11 +233,17 @@ def save_demos(path, transitions, stats):
 def adapt_demos(transitions, cfg):
     """Make demonstrations recorded with a continuous push length (pix = (direction, row, col, fraction)) usable by an agent with
     selectable lengths (`cfg.push_lengths`): the length becomes the nearest selectable one (pix = (direction * L + index, row, col)).
-    Demonstrations with selectable lengths are returned unchanged; they cannot be used with a continuous length (unknown lengths)."""
+    Demonstrations with selectable lengths are returned unchanged; they cannot be used with a continuous length (unknown lengths).
+    Without a belief (`cfg.belief == 'none'`) the recorded spatial belief is removed from the observations: the agent must not see a
+    memory its environment does not give it (the object agent turns any belief it finds into ghost tokens)."""
     from l2r.learning.memory import Transition
     lengths, (low, high) = np.asarray(cfg.push_lengths), cfg.push_length_range
     out = []
+    strip = cfg.belief == 'none'
     for t in transitions:
+        if strip and ('belief' in t.state or 'belief' in t.next_state):
+            t = Transition({k: v for k, v in t.state.items() if k != 'belief'}, t.action,
+                           {k: v for k, v in t.next_state.items() if k != 'belief'}, *t[3:])
         if t.primitive_action == 'push' and len(t.action) == 4 and not cfg.hierarchy:
             direction, row, col, fraction = t.action
             index = int(np.argmin(np.abs(lengths - (low + fraction * (high - low)))))
