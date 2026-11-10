@@ -39,6 +39,7 @@ class Kinematics:
         self.names = names = list(joint_names(model))
         self.v_max = np.array(([SLIDE_V_MAX] if names[0] == 'slide' else []) + list(info['v_max']))
         self.rest_gain = rest_gain
+        self.null_mode = 'limits'  # null-space objective: 'limits' (away from the joint limits; reach 0.94 vs 0.90, mount_study) or 'home'
         self.rest_weights = np.array([0.0 if (n == 'slide' or n == names[-1]) else 1.0 for n in names])
         self.site = model.site(site).id
         self.joints = [model.joint(n).id for n in names]
@@ -72,9 +73,15 @@ class Kinematics:
         J[3:] *= rot_weight
         JJt = J @ J.T + damping * np.eye(6)
         dq = J.T @ np.linalg.solve(JJt, error)
-        if self.rest_gain:  # towards the home posture without moving the tip
+        if self.rest_gain:  # a secondary objective in the null space (the tip does not move)
             null = np.eye(len(q)) - J.T @ np.linalg.solve(JJt, J)
-            dq += null @ (self.rest_gain * self.rest_weights * (self.home - q))
+            if self.null_mode == 'limits':  # away from the joint limits (redundant arms: use the extra freedom for that)
+                span = np.minimum(self.high - self.low, 2 * np.pi)
+                middle = 0.5 * (self.low + self.high)
+                secondary = self.rest_gain * self.rest_weights * (middle - q) / (span / 2) ** 2 * 0.25
+            else:  # towards the home posture
+                secondary = self.rest_gain * self.rest_weights * (self.home - q)
+            dq += null @ secondary
         scale = max(1.0, np.abs(dq).max() / max_step)
         return np.clip(q + dq / scale, self.low, self.high), float(np.linalg.norm(error))
 

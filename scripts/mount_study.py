@@ -98,30 +98,38 @@ def candidate_homes(kin, probe, stage, rot, rng=None, facing=False):
     return found
 
 
-def reach(kin, probe, home, lines):
-    """Share of the approach lines solved in order from `home` without collisions; also the dexterity and stray samples."""
-    kin.home = home
+def reach(kin, probe, home, lines, homes=None):
+    """Share of the approach lines solved in order from `home` without collisions (from any of `homes`, if given: the arm
+    may change posture outside the cabinet between primitives); also the dexterity and stray samples."""
     reached, dexterity, stray = 0, [], []
     first = 1 if kin.names[0] == 'slide' else 0
     for start, target, rot in lines:
-        q, ok = kin.solve(home, start, rot)
-        if not ok or not probe.free(q):
-            continue
-        fine = True
-        for s in range(1, 6):
-            q, ok = kin.solve(q, start + (target - start) * s / 5, rot)
+        for h in (homes or [home]):
+            kin.home = h
+            q, ok = kin.solve(h, start, rot)
             if not ok or not probe.free(q):
-                fine = False
+                continue
+            fine, samples = True, []
+            for s in range(1, 6):
+                q, ok = kin.solve(q, start + (target - start) * s / 5, rot)
+                if not ok or not probe.free(q):
+                    fine = False
+                    break
+                samples.append((probe.dexterity(q), float(np.abs(q[first:] - h[first:]).max())))
+            if fine:
+                reached += 1
+                dexterity += [a for a, _ in samples]
+                stray += [b for _, b in samples]
                 break
-            dexterity.append(probe.dexterity(q))
-            stray.append(float(np.abs(q[first:] - home[first:]).max()))
-        reached += fine
+    kin.home = home
     return reached / max(len(lines), 1), dexterity, stray
 
 
-def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L', facing=False, stage_margin=0.1, arm='ur5e'):
+def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L', facing=False, stage_margin=0.1, arm='ur5e', null='home',
+             postures=1):
     model = world_spec(ws, tool=ToolGeometry(shape=shape, blade=blade), base=base, slide=slide, arm=arm).compile()
     kin = Kinematics(model)
+    kin.null_mode = null
     probe = Probe(model, kin)
     b, floor = ws.bounds, ws.bounds[2][0]
     front = b[0][1] + stage_margin
@@ -139,8 +147,9 @@ def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L', facing=False, sta
     if not homes:
         return None
     coarse = lines[::7]  # pick the home that reaches the most of a subset, then evaluate it on all lines
-    home = max(homes, key=lambda h: reach(kin, probe, h, coarse)[0])
-    share, dexterity, stray = reach(kin, probe, home, lines)
+    ranked = sorted(homes, key=lambda h: -reach(kin, probe, h, coarse)[0])
+    home = ranked[0]
+    share, dexterity, stray = reach(kin, probe, home, lines, ranked[:postures] if postures > 1 else None)
     return {'home': np.round(home, 2).tolist(), 'reachable': share, 'homes tried': len(homes),
             'dexterity p10': float(np.percentile(dexterity, 10)) if dexterity else None,
             'dexterity median': float(np.median(dexterity)) if dexterity else None,
@@ -151,6 +160,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--x', type=float, nargs='+', default=[0.6, 0.9, 1.1, 1.3, 1.5])
     parser.add_argument('--arm', choices=sorted(ARMS), default='ur5e')
+    parser.add_argument('--null', choices=['home', 'limits'], default='limits', help='null-space objective of the IK')
+    parser.add_argument('--postures', type=int, default=1, help='postures the arm may switch between (outside the cabinet)')
     parser.add_argument('--facing', action='store_true', help='only homes with the arm facing the cabinet (elbow up, in front)')
     parser.add_argument('--elbow_high', action='store_true', help='with --facing: the elbow above the wrist')
     parser.add_argument('--stage_margin', type=float, default=0.1, help='staging: the tip this far in front of the cabinet (m)')
@@ -164,11 +175,11 @@ def main():
     Probe.elbow_high = args.elbow_high
     for blade, x, y, z in itertools.product(args.blade, args.x, args.y, args.z):
         out = evaluate((x, y, z), ws, np.random.default_rng(0), blade, not args.no_slide, args.shape, args.facing, args.stage_margin,
-                       args.arm)
+                       args.arm, args.null, args.postures)
         if out is None:
-            print(args.arm + ' ' + args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: no home posture' % (blade, x, y, z), flush=True)
+            print(args.arm + ' ' + args.null + ' x%d ' % args.postures + args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: no home posture' % (blade, x, y, z), flush=True)
             continue
-        print(args.arm + ' ' + args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: reachable %.2f  dexterity p10 %s median %s  joint stray %s  home %s' % (
+        print(args.arm + ' ' + args.null + ' x%d ' % args.postures + args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: reachable %.2f  dexterity p10 %s median %s  joint stray %s  home %s' % (
             blade, x, y, z, out['reachable'], *(None if out[k] is None else round(out[k], 3) for k in
                                       ('dexterity p10', 'dexterity median', 'max joint stray from home (rad, median)')),
             out['home']), flush=True)

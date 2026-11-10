@@ -19,7 +19,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 MENAGERIE = os.path.join(ROOT, 'assets', 'menagerie')
 UR5E = os.path.join(MENAGERIE, 'universal_robots_ur5e')
-BASE_POSITION = (0.85, 0.0, 0.0)  # 0.6 m in front of the cabinet, on the ground (scripts/mount_study.py)
+BASE_POSITION = (0.85, 0.0, 0.50)  # 0.6 m in front of the cabinet, on a 0.5 m pedestal (scripts/mount_study.py)
 SLIDE_RANGE = 0.5  # m either side
 PEDESTAL_RADIUS = 0.1  # m: the pedestal under the robot base (a cylinder) and its mounting plate
 ARM_JOINTS = ('slide', 'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint',
@@ -28,7 +28,7 @@ STAGE_MARGIN = 0.02  # m: staging puts the tip this far in front of the cabinet 
 # Home (slide, 6 joints): the tip at the staging point in front of the cabinet (x = front + STAGE_MARGIN, centre, 5 cm above the
 # cabinet floor), blade pointing in, flange down, the arm facing the cabinet with the elbow up. Every IK solve starts from it and is pulled towards it in the null
 # space, so the arm keeps this posture at every heading and depth (no flips between solutions).
-HOME = (-0.03, 0.56, -2.57, 1.85, 2.29, 1.5708, -1.01)  # arm facing the cabinet, elbow up (mount_study.py --facing)
+HOME = (0.0, 0.7, -2.34, -3.01, 0.63, 1.5708, -0.87)  # arm facing the cabinet, elbow above the wrist (mount_study.py --facing --elbow_high)
 # Arms of the Menagerie: model file, the opening tag of the base body and its replacement (orientation in the world), the arm
 # joints in order, the flange body / site, landmark bodies (shoulder, elbow, wrist) for posture tests, joint speed limits.
 ARMS = {
