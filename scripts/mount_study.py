@@ -65,8 +65,8 @@ class Probe:
 def seed_grid(n_joints):
     """Deterministic seed postures (6 arm joints, slide prepended if present): shoulder pan around facing the cabinet and its
     mirror, several shoulder / elbow / wrist combinations, flange up or down."""
-    grid = itertools.product([0.0, 0.3, 0.6, 0.9, 2.4, 2.8], [-2.6, -2.0, -1.4], [-2.4, -1.6, 1.6, 2.4], [-2.0, 0.0, 2.0],
-                             [-1.5708, 1.5708], [0.0])
+    grid = itertools.product([0.0, 0.3, 0.6, 0.9, 2.4, 2.8], [-2.6, -2.0, -1.4, -0.8], [-2.4, -1.6, 1.6, 2.4],
+                             [-2.0, -1.0, 0.0, 1.0, 2.0], [-1.5708, 1.5708], [0.0])
     arm = [np.array(g) for g in grid]
     return [np.concatenate([[0.0], a]) if n_joints == 7 else a for a in arm]
 
