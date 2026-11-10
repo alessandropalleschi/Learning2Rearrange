@@ -168,3 +168,21 @@ def test_the_recorded_belief_is_removed_for_an_agent_without_belief():
     plain = adapt_demos(demos, Config())[0]
     assert plain.state == {'depthmap': 2} and plain.next_state == {'depthmap': 4} and plain.action == (0, 5, 6)
     assert adapt_demos(demos, Config(belief='spatial'))[0].state == demos[0].state
+
+
+def test_demonstration_share_fades_out_and_the_exploration_floor_is_configurable():
+    import argparse
+
+    from l2r.config import Config
+    from l2r.learning.trainer import Trainer
+    parser = argparse.ArgumentParser()
+    Config.add_arguments(parser)
+    cfg = Config.from_args(parser.parse_args(['--demo_anneal_steps', '100', '--eps_end', '0.15']))
+    assert cfg.demo_anneal_steps == 100 and cfg.eps_end == 0.15
+    trainer = Trainer(cfg)
+    assert trainer.demo_scale == 1.0
+    trainer.opt_steps = 50
+    assert abs(trainer.demo_scale - 0.5) < 1e-9
+    trainer.opt_steps = 500
+    assert trainer.demo_scale == 0.0
+    assert Trainer(Config()).demo_scale == 1.0  # no annealing by default

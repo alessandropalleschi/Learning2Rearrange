@@ -463,11 +463,17 @@ class Trainer(object):
                 log('pretrain step %d/%d loss %.4f' % (step + 1, steps, loss))
         self.model_target.load_state_dict(self.model.state_dict())
 
+    @property
+    def demo_scale(self):
+        """1 -> 0 over `cfg.demo_anneal_steps` RL gradient steps (always 1 without annealing)."""
+        steps = self.cfg.demo_anneal_steps
+        return 1.0 if steps <= 0 else max(0.0, 1.0 - self.opt_steps / steps)
+
     def optimize(self):
         """Sample a batch (partly from the demonstrations, if loaded), take a gradient step and Polyak-update the target."""
         if self.is_testing or len(self.buffer) < self.cfg.batch_size:
             return None
-        n_demo = int(round(self.cfg.demo_fraction * self.cfg.batch_size)) if getattr(self, 'demos', None) else 0
+        n_demo = int(round(self.cfg.demo_fraction * self.demo_scale * self.cfg.batch_size)) if getattr(self, 'demos', None) else 0
         n_agent = self.cfg.batch_size - n_demo
         demo_batch = [self.demos[i] for i in np.random.randint(len(self.demos), size=n_demo)] if n_demo else []
         flags = np.array([True] * n_demo + [False] * n_agent)

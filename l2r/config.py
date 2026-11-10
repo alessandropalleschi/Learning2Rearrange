@@ -79,6 +79,8 @@ class Config:
                                       # the full margin at Chebyshev distance r in the expert's own map (neighbouring cells of one
                                       # object are equally good, a smooth network can not separate them)
     demo_fraction: float = 0.25       # share of each batch drawn from the demonstrations (when loaded)
+    demo_anneal_steps: int = 0        # > 0: the demonstration share (and with it the margin loss) fades linearly to 0 over this many
+                                      #      gradient steps of RL, so the demonstrations bootstrap the agent without capping it
 
     # --- Placement (ablation): 'heuristic' = hand-written rule inside the pick-and-place action (paper);
     #     'learned' = pick and place are two decisions, the place pixel comes from a third Q-head
@@ -138,7 +140,8 @@ class Config:
                    hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), arch_decoder=get('arch_decoder', 'plain'), arch_encoder=get('arch_encoder', 'resnet'), policy_topk=get('policy_topk', 10), arch_skips=get('arch_skips', False), arch_stride4=get('arch_stride4', False),
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
                    equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
-                   grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), reward_mode=get('reward_mode', defaults.reward_mode),
+                   grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), demo_anneal_steps=get('demo_anneal_steps', defaults.demo_anneal_steps),
+                   eps_end=get('eps_end', defaults.eps_end), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
 
@@ -194,6 +197,9 @@ class Config:
                             help="'structured': mask the Q-maps to grasps at an object's front face and pushes with something in the "
                                  "blade's path")
         parser.add_argument('--demo_fraction', type=float, default=0.25, help='share of each batch from the demonstrations')
+        parser.add_argument('--demo_anneal_steps', type=int, default=0,
+                            help='fade the demonstration share linearly to 0 over this many RL gradient steps (0 = constant)')
+        parser.add_argument('--eps_end', type=float, default=0.01, help='floor of the epsilon-greedy exploration')
         parser.add_argument('--placement_space', choices=['depth', 'region'], default='depth',
                             help="with --footprint_placement: 'region' fits the held object's whole footprint and offers only cells "
                                  "inside its target region (see SIMULATION_NOTES.md)")
