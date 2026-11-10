@@ -66,7 +66,8 @@ def run_episode(env, seed, obs, act):
                                          for i in (env.sim.scene.invalid_objects() if info.get('invalid') else [])},
                       'target': target, 'held': held,
                       'placed_in_region': (bool(after[held][1]) if held in after else None) if primitive == 'place' else None,
-                      'q': q_value, 'reward': float(reward), 'terminal': bool(terminated)})
+                      'q': q_value, 'reward': float(reward), 'terminal': bool(terminated),
+                      'force_stops': int(info.get('force_stops', 0) or 0)})
     gamma = env.cfg.gamma
     future = 0.0  # realised return from each step (as the trainer discounts: the grasp -> place step is not discounted)
     for s in reversed(steps):
@@ -93,7 +94,62 @@ def run_episode(env, seed, obs, act):
             reason = 'no effect'
         else:
             reason = 'slow'
-    return {'seed': seed, 'outcome': outcome, 'reason': reason, 'actions': len(acts), 'steps': steps}
+    return {'seed': seed, 'outcome': outcome, 'reason': reason, 'actions': len(acts), 'steps': steps,
+            'max_tilt_deg': max_tilt_deg(env)}
+
+
+def max_tilt_deg(env):
+    """Largest tilt (degrees) of any object now: the angle between its own z axis and the world z axis (privileged, analysis only)."""
+    p, tilts = env.sim.p, [0.0]
+    for _, quaternion in env.sim.scene.poses().values():
+        R = p.getMatrixFromQuaternion(quaternion)
+        tilts.append(float(np.degrees(np.arccos(np.clip(R[8], -1.0, 1.0)))))
+    return max(tilts)
+
+
+def summarize(episodes):
+    """Summary of a list of episode records (see `run_episode`)."""
+    outcomes = Counter((e['outcome'], e['reason']) for e in episodes)
+    acts = [s for e in episodes for s in e['steps'] if s['primitive'] != 'place']
+    places = [s for e in episodes for s in e['steps'] if s['primitive'] == 'place']
+    every = [s for e in episodes for s in e['steps']]
+    summary = {
+        'episodes': len(episodes), 'success': float(np.mean([e['outcome'] == 'sorted' for e in episodes])),
+        'outcomes': {'%s%s' % (o, ' / ' + r if r else ''): n for (o, r), n in outcomes.most_common()},
+        'actions per episode': float(np.mean([e['actions'] for e in episodes])),
+        'primitive mix': dict(Counter(s['primitive'] for s in acts)),
+        'grasp executed': float(np.mean([s['executed'] for s in acts if s['primitive'] == 'grasp'] or [np.nan])),
+        'grasp on a misplaced object': float(np.mean([bool(s['target_misplaced']) for s in acts if s['primitive'] == 'grasp'] or [np.nan])),
+        'push moved something': float(np.mean([s['moved'] > 0 for s in acts if s['primitive'] == 'push'] or [np.nan])),
+        'actions that moved nothing': float(np.mean([s['moved'] == 0 for s in acts] or [np.nan])),
+        'steps that reduced the misplaced count': float(np.mean([s['misplaced_after'] < s['misplaced_before'] for s in every] or [np.nan])),
+        'steps that increased it': float(np.mean([s['misplaced_after'] > s['misplaced_before'] for s in every] or [np.nan])),
+        'invalid: the grasped/held object itself': sum(1 for s in every if s['invalid'] and s['held'] in s['invalid_objects']),
+        'invalid: another object': sum(1 for s in every if s['invalid'] and s['invalid_objects'] and s['held'] not in s['invalid_objects']),
+        'invalid: by primitive': dict(Counter(s['primitive'] for s in every if s['invalid'])),
+        'placements': len(places),
+        'placed in its own region': float(np.mean([s['placed_in_region'] for s in places if s['placed_in_region'] is not None] or [np.nan])),
+    }
+    valued = [s for s in every if s.get('q') is not None]
+    if valued:  # overestimation: predicted Q of the chosen action minus the return that followed
+        bias = lambda sel: float(np.mean([s['q'] - s['return'] for s in sel])) if sel else float('nan')
+        summary['Q - return (all)'] = bias(valued)
+        summary['Q - return (finished episodes only)'] = bias([s for e in episodes if e['outcome'] != 'out of actions'
+                                                               for s in e['steps'] if s.get('q') is not None])
+        for name in ('grasp', 'push', 'place'):
+            summary['Q - return (%s)' % name] = bias([s for s in valued if s['primitive'] == name])
+        summary['grasp on a placed object: Q - return'] = bias([s for s in valued if s['primitive'] == 'grasp'
+                                                                and s['target_misplaced'] is False])
+        summary['mean Q of the chosen actions'] = float(np.mean([s['q'] for s in valued]))
+        summary['mean realised return'] = float(np.mean([s['return'] for s in valued]))
+    grasps_per_episode = [[s['executed'] for s in e['steps'] if s['primitive'] == 'grasp'] for e in episodes]
+    rates = [float(np.mean(g)) for g in grasps_per_episode if g]
+    summary['grasp executed (median per episode)'] = float(np.median(rates)) if rates else float('nan')
+    grasp_steps = [s for s in acts if s['primitive'] == 'grasp']
+    summary['grasps stopped by the force limit'] = float(np.mean([s.get('force_stops', 0) > 0 for s in grasp_steps])) if grasp_steps else float('nan')
+    summary['sorted episodes with an object tilted > 20 deg'] = sum(1 for e in episodes if e['outcome'] == 'sorted'
+                                                                    and e.get('max_tilt_deg', 0.0) > 20.0)
+    return summary
 
 
 def main(argv=None):
@@ -149,39 +205,7 @@ def main(argv=None):
         e = episodes[-1]
         print('episode %d: %s %s (%d actions)' % (k, e['outcome'], e['reason'], e['actions']), flush=True)
 
-    outcomes = Counter((e['outcome'], e['reason']) for e in episodes)
-    acts = [s for e in episodes for s in e['steps'] if s['primitive'] != 'place']
-    places = [s for e in episodes for s in e['steps'] if s['primitive'] == 'place']
-    every = [s for e in episodes for s in e['steps']]
-    summary = {
-        'episodes': len(episodes), 'success': float(np.mean([e['outcome'] == 'sorted' for e in episodes])),
-        'outcomes': {'%s%s' % (o, ' / ' + r if r else ''): n for (o, r), n in outcomes.most_common()},
-        'actions per episode': float(np.mean([e['actions'] for e in episodes])),
-        'primitive mix': dict(Counter(s['primitive'] for s in acts)),
-        'grasp executed': float(np.mean([s['executed'] for s in acts if s['primitive'] == 'grasp'] or [np.nan])),
-        'grasp on a misplaced object': float(np.mean([bool(s['target_misplaced']) for s in acts if s['primitive'] == 'grasp'] or [np.nan])),
-        'push moved something': float(np.mean([s['moved'] > 0 for s in acts if s['primitive'] == 'push'] or [np.nan])),
-        'actions that moved nothing': float(np.mean([s['moved'] == 0 for s in acts] or [np.nan])),
-        'steps that reduced the misplaced count': float(np.mean([s['misplaced_after'] < s['misplaced_before'] for s in every] or [np.nan])),
-        'steps that increased it': float(np.mean([s['misplaced_after'] > s['misplaced_before'] for s in every] or [np.nan])),
-        'invalid: the grasped/held object itself': sum(1 for s in every if s['invalid'] and s['held'] in s['invalid_objects']),
-        'invalid: another object': sum(1 for s in every if s['invalid'] and s['invalid_objects'] and s['held'] not in s['invalid_objects']),
-        'invalid: by primitive': dict(Counter(s['primitive'] for s in every if s['invalid'])),
-        'placements': len(places),
-        'placed in its own region': float(np.mean([s['placed_in_region'] for s in places if s['placed_in_region'] is not None] or [np.nan])),
-    }
-    valued = [s for s in every if s.get('q') is not None]
-    if valued:  # overestimation: predicted Q of the chosen action minus the return that followed
-        bias = lambda sel: float(np.mean([s['q'] - s['return'] for s in sel])) if sel else float('nan')
-        summary['Q - return (all)'] = bias(valued)
-        summary['Q - return (finished episodes only)'] = bias([s for e in episodes if e['outcome'] != 'out of actions'
-                                                               for s in e['steps'] if s.get('q') is not None])
-        for name in ('grasp', 'push', 'place'):
-            summary['Q - return (%s)' % name] = bias([s for s in valued if s['primitive'] == name])
-        summary['grasp on a placed object: Q - return'] = bias([s for s in valued if s['primitive'] == 'grasp'
-                                                                and s['target_misplaced'] is False])
-        summary['mean Q of the chosen actions'] = float(np.mean([s['q'] for s in valued]))
-        summary['mean realised return'] = float(np.mean([s['return'] for s in valued]))
+    summary = summarize(episodes)
     print(json.dumps(summary, indent=1))
     if args.out:
         with open(args.out, 'w') as f:
