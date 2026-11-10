@@ -7,7 +7,7 @@ PyBullet simulation. Project page: <https://alessandropalleschi.github.io/Learni
 
 The repository started as the code of the paper and is now a research platform around it: every extension is an opt-in flag, so the
 paper's method is one configuration among several. **Nothing here has been trained to convergence; the numbers in the docs measure mechanics (speed, signals, expert
-success, mask effects), not final success rates.** See [Status](#status).
+success, mask effects, supervised and closed-loop imitation results), not final RL success rates.** See [Status](#status).
 
 | document | content |
 |---|---|
@@ -21,12 +21,12 @@ success, mask effects), not final success rates.** See [Status](#status).
 2. [The task and the pipeline](#the-task-and-the-pipeline)
 3. [Code layout](#code-layout)
 4. [Observation processing](#observation-processing)
-5. [The network](#the-network)
+5. [The agents and networks](#the-agents-and-networks)
 6. [Actions and primitives](#actions-and-primitives)
 7. [Training](#training)
 8. [Variants](#variants)
 9. [Tools and experiments](#tools-and-experiments)
-10. [Status](#status)
+10. [Status and results](#status-and-results)
 
 ---
 
@@ -60,6 +60,15 @@ Objects of three classes (blue / green / yellow) stand on the floor of a cabinet
 cabinet width). The episode ends when every object is inside the region of its class (goal), an object falls or topples (invalid), or
 the action budget is used up. The robot reaches in from the front only, so objects hide behind each other.
 
+![scene](docs/figures/scene.png)
+*The UR5e with the suction tool in front of the cabinet, the robot's own RGB-D camera, and a view into the cabinet. YCB objects (cracker
+boxes, chips cans, meat cans, mustard bottles) are assigned to the three classes per episode.*
+
+![episode](docs/figures/episode.png)
+*Robot state (top) and the observation the agent receives (bottom) along an episode of the scripted expert with learned placement:
+a grasp lifts the object (the observation then shows the scene without it), the place puts it into its region. In step 3 the grasp
+tips the chips can over: the episode ends as invalid, the most common failure with many objects.*
+
 ```mermaid
 flowchart LR
     subgraph SIM["Simulator (PyBullet) - l2r/sim"]
@@ -89,19 +98,27 @@ turned into a sorted state by reassigning the classes). The simulator behind it 
 
 ```
 train.py  evaluate.py  profile_sim.py  analyze_rewards.py  train_perception.py  demo_sim.py     thin entry points
-scripts/   run_experiments.py (suites, seeds, summaries)  collect_demos.py  speed_ablation.py
+scripts/   run_experiments.py (suites, seeds, summaries)  collect_demos.py  merge_demos.py  speed_ablation.py  grasp_profile.py
+           arch_benchmark.py (supervised architecture benchmark)  dagger.py (DAgger with the scripted expert)
 l2r/
   config.py          Config (learning, agent variants) and SimParams (physics, controller, camera, presets); all CLI flags
   training.py        TrainingLoop + Curriculum: parallel simulators, replay, relabelling, validation-based curriculum, snapshots
   evaluation.py      fixed-seed greedy evaluation per object count
-  demos.py           scripted expert and demonstration recording (DQfD data)
+  demos.py           scripted expert, demonstration recording, demo adaptation (push-length encoding, belief stripping)
+  arch_benchmark.py  network variants trained on demonstrations (cross-entropy), held-out metrics, closed-loop rollouts
+  dagger.py          DAgger: learner drives, expert labels the visited states, aggregate, retrain
   profiling.py  reward_analysis.py  logger.py  utils.py
   envs/
     rearrange.py     RearrangeEnv: action execution, reward variants, termination, relabelling, placement helpers
     vec.py           parallel simulators in worker processes
   learning/
-    models.py        QNet: encoder-decoder, bottleneck (global context | transformer | ConvGRU), push/pick/place heads, hierarchy
-    trainer.py       batched double DQN: prioritized replay, Huber loss on the taken pixel, DQfD margin loss, mixed precision
+    factory.py       make_trainer(cfg): the agent by --agent (dense | object | policy_critic)
+    models.py        dense QNet: encoders (residual | ConvNeXt | ResNet-18), decoders (plain | U-Net | FPN | attention | HRNet),
+                     bottleneck context (global | transformer | PPM | ASPP | ConvGRU), push/pick/place heads, hierarchy
+    trainer.py       batched double DQN: prioritized replay, Huber loss on the taken pixel, DQfD margin loss, demo annealing, AMP
+    object_centric.py  object-centric agent: instances / ghosts / place candidates from the observation, token transformer
+    object_trainer.py  double DQN over object-action slots and place candidates (same interface as the dense trainer)
+    policy_critic.py   policy heatmaps trained by behaviour cloning + Q critic over their top-K proposals
     policy.py        epsilon-greedy / hierarchical action selection, recurrent-belief bookkeeping
     masks.py         structural action masks (front-face grasps, blade-strip pushes)
     belief.py        spatial belief tracker (memory map)
@@ -143,6 +160,10 @@ flowchart TB
     CM --> PAD
 ```
 
+![observation](docs/figures/observation.png)
+*The observation: colour map (class colours, grey = occluded cells, target regions as coloured bands), height map, the age channel
+of the spatial belief, and, while an object is held, the free cells it fits in (the learned placement's candidates).*
+
 * The network input has **4 channels** (RGB colour map + height map), or 11 with the spatial belief.
 * Occluded cells are marked grey inside the colour channels (the camera sees the cabinet from the front, so everything behind an
   object is unobserved).
@@ -153,37 +174,95 @@ flowchart TB
 
 ---
 
-## The network
+## The agents and networks
+
+Three agents share the environment, the replay, the curriculum and the trainer interface (`--agent`, built by
+`l2r/learning/factory.py`): every agent returns the same dense Q-maps, so action selection, masks and evaluation are common code.
+
+| `--agent` | decides over | network |
+|---|---|---|
+| `dense` (default, paper) | every pixel of the push / pick / place maps | fully convolutional encoder-decoder |
+| `object` | (visible object, skill) slots + place candidates | transformer over object tokens |
+| `policy_critic` | top-K cells of learned policy heatmaps, ranked by the Q critic | dense network with policy heads |
+
+### Dense Q-network (`--agent dense`)
 
 One shared fully convolutional backbone with a dense head per primitive. The second push direction is the same head applied to the
-input rotated by 180 degrees (an exact flip), so the network needs no learned rotation.
+input rotated by 180 degrees (an exact flip), so the network needs no learned rotation. Encoder, bottleneck context and decoder are
+interchangeable:
 
 ```mermaid
 flowchart LR
-    X(("input<br/>4 x 128 x 104")) --> ENC["Encoder<br/>stem + 3 x (max-pool, residual block)<br/>GroupNorm"]
-    FX["180 deg flip of the input"] --> ENC
-    ENC --> BN{{"Bottleneck 512 x 16 x 13"}}
-    BN -->|conv backbone| GC["pooled global context<br/>(avg + max -> MLP -> add)"]
-    BN -->|hybrid backbone| TR["transformer encoder<br/>208 tokens, global attention"]
-    BN -->|recurrent belief| GRU["ConvGRU latent<br/>(last observation + last action)"]
-    GC --> DEC
-    TR --> DEC
-    GRU --> DEC["Decoder<br/>3 x (upsample, residual block)"]
-    HELD["held-object class<br/>(learned placement)"] -.-> BN
-    DEC --> PH["Push head<br/>2 directions x L lengths"]
-    DEC --> KH["Pick head<br/>1 channel (suction) or 1 per jaw yaw (gripper)"]
-    DEC --> LH["Place head (learned placement)"]
-    DEC -.hierarchy.-> AH["Length actor + primitive-value head"]
+    X(("input<br/>4 x 128 x 104<br/>(+7 belief, +5 geometry)")) --> STEM["stem 3x3, 64"]
+    FX["180 deg flip<br/>(2nd push direction)"] -.-> STEM
+    STEM --> E1["stage 1 / 2<br/>128"] --> E2["stage 2 / 4<br/>256"] --> E3["stage 3 / 8<br/>512"]
+    E3 --> CTX{{"bottleneck context<br/>512 x 16 x 13"}}
+    HELD["held class<br/>(learned placement)"] -.-> CTX
+    CTX --> D3["up + block<br/>256"] --> D2["up + block<br/>128"] --> D1["up + block<br/>64"]
+    E2 -. "skip (U-Net)" .-> D3
+    E1 -. "skip" .-> D2
+    STEM -. "skip" .-> D1
+    D1 --> PH["push head<br/>2 directions x L lengths"]
+    D1 --> KH["pick head<br/>suction: 1 / gripper: 1 per jaw yaw"]
+    D1 --> LH["place head"]
+    D1 -.-> AH["hierarchy: length actor,<br/>primitive values"]
 ```
 
-| variant | change |
-|---|---|
-| `--backbone conv` (default) | global context by pooling at the bottleneck |
-| `--backbone hybrid` | transformer encoder on the 1/8-resolution bottleneck; zero-initialised output, so it starts as the conv network (+0.75 M parameters, +3 ms) |
-| `--belief recurrent` | ConvGRU at the bottleneck |
+| part | flag | options |
+|---|---|---|
+| encoder blocks | `--arch_encoder` | `resnet` (residual 3x3, GroupNorm), `convnext` (7x7 depthwise ConvNeXt blocks), `resnet18_imagenet` / `resnet18_scratch` (torchvision stages) |
+| decoder | `--arch_decoder`, `--arch_skips` | `plain` (paper: no skips), `unet` (skips), `fpn`, `attn_unet` (attention-gated skips), `unet_attn4` (+ global attention at 1/4), `hrnet` (parallel resolutions) |
+| bottleneck context | `--backbone` | `conv` (pooled global context), `hybrid` (transformer, 208 tokens), `ppm` (pyramid pooling 1/2/4), `aspp` (dilations 1/2/4 + global pool), `ppm_aspp` |
+| bottleneck size | `--arch_stride4` | bottleneck at 1/4 instead of 1/8 resolution (U-Net decoders) |
+| memory | `--belief recurrent` | ConvGRU at the bottleneck, from the encoded observation and the last action |
 
-Why a hybrid and not Swin or a plain ViT: see [`ABLATIONS.md`](ABLATIONS.md). The network runs at the maps' native 128 x 104 size
-(no padding to a square canvas); the place head is only built when placement is learned.
+![dense Q-maps](docs/figures/qmaps_dense.png)
+*Q-maps of the dense U-Net + ConvNeXt agent (RL with the curriculum, 5,000 steps, still training) on one scene: pick values on the
+front-face cells, push values for both directions (best of the three lengths), and place values while an object is held. Grey cells are
+masked out.*
+
+The context modules start as the identity (zero-initialised residual output). Which combination works best is measured in
+[Status and results](#status-and-results): the U-Net decoder with the ConvNeXt encoder (`--arch_skips --arch_encoder convnext`).
+
+### Object-centric agent (`--agent object`)
+
+The scene is described by tokens extracted from the observation alone (no privileged ids): one per visible object (a connected piece
+of one class colour on raised cells), one per remembered but hidden object (from the spatial belief), one per target region and one
+global token. A transformer contextualises them; each object token gets a value per skill. Candidate pixels are geometric: a grasp just
+inside the object's front face, a push with the blade beside the object.
+
+```mermaid
+flowchart LR
+    OBS(("observation<br/>colour + height<br/>(+ belief)")) --> EXT["extract tokens<br/>(object_centric.py)"]
+    EXT --> G["global token<br/>objects, misplaced share"]
+    EXT --> RG["3 region tokens<br/>class, rows"]
+    EXT --> OB["N object tokens<br/>class, position, size, height,<br/>in region, occluded behind, clutter ahead"]
+    EXT --> GH["up to 8 ghost tokens<br/>remembered hidden objects + age<br/>(--belief spatial)"]
+    G & RG & OB & GH --> TF["transformer encoder<br/>2 layers, 64-d, type embeddings"]
+    TF --> PICK["per object: pick value"]
+    TF --> PUSH["per object and direction:<br/>push value (+ length actor)"]
+    TF --> XA
+    PC["place candidates<br/>free cells the held object fits in<br/>(grid, at most 512)"] --> XA["cross-attention<br/>candidates -> scene tokens"]
+    XA --> PLACE["place value per candidate"]
+    PICK & PUSH & PLACE --> RAS["rasterise into the dense<br/>Q-map interface"]
+```
+
+![object-centric agent](docs/figures/qmaps_object.png)
+*The object-centric agent (RL, 8,000 steps, still training) on the same scene: extracted object tokens and a ghost token from the
+belief, the value of each object's skills, and the values of the place candidates while an object is held.*
+
+* **Fixed or continuous push length.** Without `--hierarchy` every (direction, length) is a slot. With `--hierarchy` an actor proposes
+  a length per object and direction, and a length-conditioned critic (Fourier features of the length) scores it. RL trains the actor
+  DDPG-style at a tenth of the critic's learning rate; imitation regresses it to the expert's length.
+* **Learned placement** (`--placement learned`): while an object is held, the free cells it fits in (footprint-aware) become candidate
+  tokens on an adaptive grid; each attends to the scene and gets a value. RL backs the grasp up from the best placement without discount.
+* **Ghost tokens** carry the spatial belief: objects that were seen and are now hidden take part in the attention but are not actionable.
+* Ghost, actions and placement are tested by bandits in `tests/test_object_centric.py`; the agent is about 0.1 M parameters
+  (the dense ConvNeXt network has 9.8 M).
+
+### Policy-critic agent (`--agent policy_critic`)
+The dense network gets policy heads (logits per cell) trained by behaviour cloning on the demonstrations; the action is chosen among the
+top-K cells of the policy by the Q critic (`--policy_topk`). It keeps the dense maps but restricts the argmax to plausible cells.
 
 ---
 
@@ -241,7 +320,8 @@ flowchart TB
 ```
 
 * **Reward** (paper): -1 per action, 0 on the goal, -10 for an invalid state; variants below.
-* **Exploration**: epsilon-greedy, 0.8 annealed to 0.01 per curriculum stage, over the *masked* maps.
+* **Exploration**: epsilon-greedy, 0.8 annealed to `--eps_end` (default 0.01) per curriculum stage, over the *masked* maps. A
+  demonstration-initialised agent is nearly greedy after a few thousand steps; `--eps_end 0.15` keeps exploring.
 * **Curriculum**: the object count grows when the recent success rate is high. The default rule uses the epsilon-greedy training window
   (as in the paper); `--curriculum_eval 20` instead advances only after a **greedy validation** on 20 fresh random configurations.
   `--stage_mix p` draws earlier stages with probability p to keep easy states in the buffer.
@@ -262,7 +342,7 @@ Every variant is a flag; they combine. The baseline of the experiment runner is 
 | `--placement heuristic\|learned` | placement | rule from the paper / a place head over free cells, conditioned on the held class |
 | `--push_lengths 0.04 0.08 0.12` | learned push length | one Q-map per (direction, length) |
 | `--hierarchy` | hierarchical agent | level 1 picks the primitive from pooled features; level 2 the pixel and, for pushes, a **continuous length** (DDPG-style actor on a length-conditioned critic) |
-| `--backbone hybrid` | transformer | see [The network](#the-network) |
+| `--backbone hybrid` | transformer | see [The agents and networks](#the-agents-and-networks) |
 | `--end_effector suction\|gripper` | tool | suction cup (constraint model) / wide-stroke parallel-jaw gripper (friction, one Q channel per jaw yaw, `--jaw_yaws`) |
 
 ```mermaid
@@ -298,14 +378,24 @@ Train and evaluate: `python train_perception.py collect|train|evaluate [--task a
 | `--footprint_placement` | keep the placement target clear of the back wall by the held object's depth |
 | `--placement_space region` | additionally fit the object's whole footprint and offer only cells inside its own target region |
 
-### Demonstrations (imitation initialisation, then RL)
+### Demonstrations, DAgger and RL
 ```mermaid
 flowchart LR
-    X["Scripted expert<br/>(privileged ground truth)"] --> D[("Demonstrations<br/>pick, place, push")]
-    D --> PT["DQfD pre-training<br/>TD loss + large-margin loss<br/>on the expert action"]
-    PT --> RL["RL fine-tuning<br/>25% of each batch from the demonstrations"]
+    X["Scripted expert<br/>(privileged ground truth)"] --> D[("Demonstrations<br/>pick, place, push<br/>1-5 objects")]
+    D --> PT["DQfD pre-training<br/>TD + large-margin loss"]
+    PT --> RL["RL with the curriculum<br/>demo share 25% -> 0<br/>(--demo_anneal_steps)"]
     D --> RL
+    D --> BC["behaviour cloning<br/>(arch_benchmark)"]
+    BC --> DAG["DAgger rounds:<br/>learner drives,<br/>expert labels"]
+    DAG -->|aggregate| BC
 ```
+* **DQfD**: `--demos <file> --pretrain_steps 3000` pre-trains on the demonstrations, then 25% of each RL batch comes from them with the
+  margin loss on the expert action. That loss pins the policy to the expert; `--demo_anneal_steps N` fades the share to 0 over N RL
+  gradient steps so the demonstrations bootstrap the agent without capping it.
+* **DAgger** (`scripts/dagger.py --variant <name>`): the learner drives the simulator, the expert labels every visited state, the labels
+  are aggregated with the demonstrations and the learner is retrained; the held-out evaluation runs after behaviour cloning and after DAgger.
+* Demonstrations recorded with a continuous length (`--hierarchy`) are mapped to the nearest selectable length for agents with discrete
+  lengths; the recorded belief is stripped for agents without one (`demos.adapt_demos`).
 The expert picks the front-most misplaced object (aiming a few millimetres *inside* it: the cup stops on contact and a front-most
 aim often misses), places it by the footprint-aware heuristic, pushes objects that are one push from their region, and pushes a front
 object aside when every misplaced object is hidden. A margin loss keeps the network a **Q**-network (plain behaviour-cloning logits
@@ -331,22 +421,63 @@ would not be Q-values); a generative policy (diffusion / ACT) is not used: a den
 | `profile_sim.py` | where the simulation time goes, executed / attempted actions, force-limit stops |
 | `analyze_rewards.py` | the reward signal and scene volatility under random actions |
 | `scripts/speed_ablation.py` | physics steps per action and executed fraction for the speed options |
-| `scripts/collect_demos.py` | record expert demonstrations |
+| `scripts/collect_demos.py`, `scripts/merge_demos.py` | record expert demonstrations (in parallel parts) and merge them |
+| `scripts/arch_benchmark.py --variants ... --seeds 3 [--rollouts N]` | supervised benchmark of network variants on the demonstrations: held-out primitive / in-class / sensible / exact accuracy, optional closed-loop rollouts |
+| `scripts/dagger.py --variant ... --objects 2 5 --eval_objects 4 5` | DAgger with the scripted expert; held-out success after behaviour cloning and after DAgger |
+| `scripts/make_figures.py --dense_snapshot ... --object_snapshot ...` | the figures of this README (scene, episode, observation, Q-maps) |
 | `tests/sim_scenario.py record\|check` | deterministic scripted scenario on the real simulator (golden results for refactoring) |
 
 Tests: `pytest -q` (the real-simulator regression runs with `L2R_GOLDEN=1`); lint: `ruff check .`.
 
 ---
 
-## Status
+## Status and results
 
-* **Established (measured in simulation):** simulator and observation pipeline work and are tested; observation 358 -> 252 ms and network
-  inference/training 1.8-2.7x faster than the first version; perception networks work on unseen scenes; the scripted expert sorts 93 / 87 / 87 / 73 % of
-  scenes with 2 / 3 / 4 / 5 objects with the default placement (93 / 93 / 93 / 53 % with `--placement_space region`; 15 episodes each, about +-10 points of noise); structured masks raise the share of random pushes that move an object from 62 % to 88 %.
-* **Not yet established:** whether any learned variant reaches a high success rate at 3-5 objects. From scratch, the baseline reached 3 objects only after about
-  4,800 steps under the greedy-validation curriculum (it started at 1). The demonstration-initialised runs (with and without structured masks) are the first comparison.
-* **Known limits:** the expert is pick-and-place first and pushes only in the situations listed above; the footprint-aware region placement
-  helps at 3-4 objects but not (yet) at 5; the suction fallback path is effectively dead for front-face grasps; PyBullet is slow (a move to Isaac
-  is kept open in [`ISAAC_MIGRATION.md`](ISAAC_MIGRATION.md)).
+All numbers are from simulation, on the `legacy` physics with the speed options. **The RL agents are still training**: the tables
+below measure the networks by imitation (supervised on expert demonstrations, then closed loop), not RL success.
+
+**Scripted expert** (privileged): 93 / 87 / 87 / 73 % of scenes sorted with 2 / 3 / 4 / 5 objects (15 episodes each, about +-10
+points); 0.81-0.87 over 1-5 objects in the recorded demonstration sets. It is the ceiling of everything trained by imitation.
+
+**Architecture benchmark** (`scripts/arch_benchmark.py`): dense networks trained by cross-entropy over the masked action space on about
+1,400 expert transitions, evaluated on 340 held-out ones; in-class = the chosen cell lies on the same object/equivalence class as the
+expert's; 1,500 steps, 3 seeds, mean +- std.
+
+| network | held-out in-class | exact | train in-class |
+|---|---|---|---|
+| plain hourglass (paper) | 0.35 +- 0.04 (0.70 at 4,500 steps) | 0.10 | 0.52 |
+| U-Net skips | 0.75 +- 0.06 (0.83 at 4,500 steps) | 0.48 | |
+| U-Net + PPM | 0.80 +- 0.00 | 0.55 | 0.97 |
+| **U-Net + ConvNeXt encoder** | **0.83 +- 0.02** | **0.60** | 0.97 |
+| U-Net + ResNet-18 ImageNet / scratch | 0.79 +- 0.01 / 0.55 +- 0.01 | 0.53 / 0.30 | 0.99 / 0.95 |
+| U-Net + ConvNeXt + PPM / + ASPP | 0.82 +- 0.04 / 0.79 +- 0.03 | 0.58 / 0.55 | 0.97 |
+| U-Net + transformer / ASPP / PPM+ASPP | 0.64 / 0.73 / 0.73 (+- 0.07-0.14) | | |
+| FPN / attention U-Net / HRNet | 0.53 / 0.62 / 0.50 | | 0.87 |
+
+The plain network learns slowly but is not capacity-limited; skips mainly buy sample efficiency; most variants split into good
+(~0.8) and bad (~0.5) seeds at this budget, ConvNeXt and PPM do not; pretraining matters for ResNet-18, not for the rest.
+
+**Closed loop** (`scripts/dagger.py`, 6 rounds x 20 episodes on 2-5 objects; success on 50 held-out scenes each, +-0.07):
+
+| agent | BC only, 4 / 5 objects | after DAgger, 4 / 5 objects |
+|---|---|---|
+| dense U-Net skips (3 seeds) | 0.60 / 0.10 / 0.40 ; 0.46 / 0.10 / 0.30 | 0.79 ; 0.62 |
+| dense U-Net + ConvNeXt (3 seeds) | 0.77 ; 0.58 | 0.73 ; 0.62 |
+| object, heuristic placement | 0.74 ; 0.62 | 0.80 ; 0.62 |
+| object + learned placement | 0.76 ; 0.66 | 0.76 ; 0.64 |
+| object + continuous push length | 0.76 ; 0.60 | 0.72 ; 0.64 |
+| object + both (learned) | 0.80 ; 0.70 | 0.72 ; 0.60 |
+
+DAgger rescues unstable policies (skips: 0.10 -> 0.78 for the worst seed) but does not lift stable ones: every agent ends near the
+expert's own success, which is what imitation can reach. The object agent matches the dense ConvNeXt network with about 1 % of its
+parameters.
+
+**RL (running):** curriculum 1 -> 10 objects with DQfD initialisation (expert demonstrations with 1-5 objects); object agent with and
+without belief, ConvNeXt with belief, and the object agent with `--eps_end 0.15 --demo_anneal_steps 10000`. The object agents passed 4
+objects after about 8,000 steps (the earlier from-scratch baseline needed 4,800 steps for 3).
+
+**Known limits:** the expert is pick-and-place first and pushes only in the situations above; above 5 objects scenes often become
+invalid within a few actions (objects pushed or dropped out of place), which the RL curriculum will meet; PyBullet is slow (about 1 action/s
+per process; a move to Isaac is kept open in [`ISAAC_MIGRATION.md`](ISAAC_MIGRATION.md)).
 
 Snapshots saved by older versions of this code are not compatible with the current networks.
