@@ -275,7 +275,7 @@ with its own continuous length.*
 * **Learning algorithms** (`--object_algo`): double DQN (default) with optional clipped double Q (`--twin_q`) and n-step returns
   (`--n_step`); or **IQL** (`--object_algo iql`): V(s) regresses an upper expectile of the target Q of the actions actually taken, Q
   regresses r + g V(s'), and the policy (logits over the object-skill slots and the place candidates) is fitted by advantage-weighted
-  cross-entropy. No max over unseen actions anywhere, which is where the DQN agent overestimated (see the results).
+  cross-entropy, with no max over unseen actions (more stable than DQN for this agent).
 * **Parameterised skills** (`--skill_params`, with IQL): grasp with a continuous approach angle, push with a continuous heading and
   length (the start cell follows from the heading). A parameter-conditioned twin critic scores them; the parameters are modelled by
   advantage-weighted **conditional flow matching**; acting takes the best of 16 flow samples under the critic (IDQL-style).
@@ -299,16 +299,13 @@ top-K cells of the policy by the Q critic (`--policy_topk`). It keeps the dense 
 
 Primitive options (all opt-in; the defaults are the original motions):
 
-| flag | what it changes | measured |
-|---|---|---|
-| `--pusher paddle` | a T-shaped plate fixed to the tool during pushes: an 8 cm side plate for pushes along the width, a 6 cm front plate only for pushes towards the back | an 8 cm push moves objects 4.8 cm on average instead of 2.5 cm; 70 % instead of 38 % of pushes move the object by >= 3 cm |
-| `--grasp_approach clear` | the env picks the grasp's approach line (0, +-15, +-30, +-45 deg) with the fewest other objects in the corridor the tool and the held object sweep (height map only) | grasps whose straight corridor is blocked: held 0.78 -> 0.97, scene invalid 0.14 -> 0.03 |
-| `--place_corridor` | the heuristic placement prefers cells whose carry-in corridor is free; the learned placement gets the corridor as a candidate feature | helps the expert under `modern` physics, not under `legacy` (see the results) |
+| flag | what it changes |
+|---|---|
+| `--pusher paddle` | a T-shaped plate fixed to the tool during pushes (side plate for pushes along the width, front plate towards the back); moves objects about twice as far as the tool tip |
+| `--grasp_approach clear` | the grasp's approach line (0, +-15, +-30, +-45 deg) with the fewest other objects in its corridor, from the height map |
+| `--place_corridor` | placements prefer cells whose carry-in corridor is free (heuristic); a corridor feature for the learned placement |
 
 ![paddle](docs/figures/paddle.png)
-![primitives](docs/figures/primitives.png)
-*Left: displacement of an 8 cm push at 5 cm height, tool tip vs paddle (`scripts/physics_sanity.py`). Right: grasps whose straight
-corridor is blocked by other objects, straight in vs the clearest approach line (`scripts/approach_profile.py`).*
 
 ```mermaid
 sequenceDiagram
@@ -357,8 +354,7 @@ flowchart TB
 
 * **Reward** (paper): -1 per action, 0 on the goal, -10 for an invalid state; variants below.
 * **Exploration**: epsilon-greedy, `--eps_start` (default 0.8) annealed to `--eps_end` (default 0.01) **at every curriculum stage**,
-  over the *masked* maps. For demonstration-initialised agents use `--eps_start 0.2 --eps_end 0.05`: restarting at 0.8 floods the
-  replay with random actions exactly when a new stage begins, and that made the IQL agent collapse (see the results).
+  over the *masked* maps. Demonstration-initialised agents should start low (`--eps_start 0.2 --eps_end 0.05`).
 * **Targets**: one-step double DQN by default; `--n_step N` stores N-step returns (the grasp -> place step stays undiscounted),
   `--twin_q` (object agent) takes the minimum of two value heads.
 * **Validation noise**: `--curriculum_window K --success_threshold 0.85` advances on the success pooled over the last K validations;
@@ -478,85 +474,29 @@ Tests: `pytest -q` (the real-simulator regression runs with `L2R_GOLDEN=1`); lin
 
 ## Status and results
 
-All numbers are from simulation, on the `legacy` physics with the speed options unless stated otherwise. The first tables measure the
-networks by imitation (supervised on expert demonstrations, then closed loop); the RL results follow.
+Simulation results (PyBullet). The numbers measure where the system stands; none of the agents is trained to convergence.
 
-**Scripted expert** (privileged): 93 / 87 / 87 / 73 % of scenes sorted with 2 / 3 / 4 / 5 objects (15 episodes each, about +-10
-points); 0.81-0.87 over 1-5 objects in the recorded demonstration sets. It is the ceiling of everything trained by imitation.
+**Architecture (supervised on expert demonstrations, held-out accuracy of the chosen cell, 3 seeds).** The U-Net decoder with a
+ConvNeXt encoder is the best dense network (0.83 in-class against 0.35 for the original hourglass, 0.75 with plain skips); pyramid
+pooling is as good with the residual encoder (0.80); FPN, attention-gated skips and HRNet do worse. The object-centric agent matches
+the dense ConvNeXt network in closed loop with about 1 % of its parameters.
 
-**Architecture benchmark** (`scripts/arch_benchmark.py`): dense networks trained by cross-entropy over the masked action space on about
-1,400 expert transitions, evaluated on 340 held-out ones; in-class = the chosen cell lies on the same object/equivalence class as the
-expert's; 1,500 steps, 3 seeds, mean +- std.
-
-| network | held-out in-class | exact | train in-class |
-|---|---|---|---|
-| plain hourglass (paper) | 0.35 +- 0.04 (0.70 at 4,500 steps) | 0.10 | 0.52 |
-| U-Net skips | 0.75 +- 0.06 (0.83 at 4,500 steps) | 0.48 | |
-| U-Net + PPM | 0.80 +- 0.00 | 0.55 | 0.97 |
-| **U-Net + ConvNeXt encoder** | **0.83 +- 0.02** | **0.60** | 0.97 |
-| U-Net + ResNet-18 ImageNet / scratch | 0.79 +- 0.01 / 0.55 +- 0.01 | 0.53 / 0.30 | 0.99 / 0.95 |
-| U-Net + ConvNeXt + PPM / + ASPP | 0.82 +- 0.04 / 0.79 +- 0.03 | 0.58 / 0.55 | 0.97 |
-| U-Net + transformer / ASPP / PPM+ASPP | 0.64 / 0.73 / 0.73 (+- 0.07-0.14) | | |
-| FPN / attention U-Net / HRNet | 0.53 / 0.62 / 0.50 | | 0.87 |
-
-The plain network learns slowly but is not capacity-limited; skips mainly buy sample efficiency; most variants split into good
-(~0.8) and bad (~0.5) seeds at this budget, ConvNeXt and PPM do not; pretraining matters for ResNet-18, not for the rest.
-
-**Closed loop** (`scripts/dagger.py`, 6 rounds x 20 episodes on 2-5 objects; success on 50 held-out scenes each, +-0.07):
-
-| agent | BC only, 4 / 5 objects | after DAgger, 4 / 5 objects |
-|---|---|---|
-| dense U-Net skips (3 seeds) | 0.60 / 0.10 / 0.40 ; 0.46 / 0.10 / 0.30 | 0.79 ; 0.62 |
-| dense U-Net + ConvNeXt (3 seeds) | 0.77 ; 0.58 | 0.73 ; 0.62 |
-| object, heuristic placement | 0.74 ; 0.62 | 0.80 ; 0.62 |
-| object + learned placement | 0.76 ; 0.66 | 0.76 ; 0.64 |
-| object + continuous push length | 0.76 ; 0.60 | 0.72 ; 0.64 |
-| object + both (learned) | 0.80 ; 0.70 | 0.72 ; 0.60 |
-
-DAgger rescues unstable policies (skips: 0.10 -> 0.78 for the worst seed) but does not lift stable ones: every agent ends near the
-expert's own success, which is what imitation can reach. The object agent matches the dense ConvNeXt network with about 1 % of its
-parameters.
-
-### RL with the curriculum (1 -> 10 objects, DQfD initialisation from 1-5 object demonstrations)
+**Closed loop.** Behaviour cloning and DAgger with the scripted expert reach about the expert's own level (0.7-0.8 of 4-object scenes,
+0.6-0.7 of 5-object scenes). RL with the curriculum (1 -> 10 objects, initialised from the demonstrations) holds that level and the
+dense agent reaches 6 objects, but no configuration improves clearly beyond the expert yet.
 
 ![learning curves](docs/figures/learning_curves.png)
 
-![failure breakdown](docs/figures/failure_breakdown.png)
-*50 greedy episodes on the same fresh 5-object scenes (`scripts/failure_analysis.py`): how episodes end, and how often the agent grasps
-an object that is already in its region (the "re-grasp loop").*
+**Current configurations**
 
-What the runs and diagnostics showed (one seed per configuration; 50-episode diagnostics have about +-0.07 standard error):
+| | recommended flags |
+|---|---|
+| dense agent | `--arch_skips --arch_encoder convnext --push_lengths 0.04 0.08 0.12 --belief spatial --placement learned --footprint_placement` |
+| object agent | `--agent object --hierarchy --object_algo iql --twin_q --n_step 3 --belief spatial --placement learned --footprint_placement` |
+| training | `--demos <file> --pretrain_steps 3000 --curriculum_eval 20 --curriculum_window 3 --success_threshold 0.85 --eps_start 0.2 --eps_end 0.05 --reward_mode combined --reward_scale 3` |
+| primitives | `--grasp_approach clear --place_corridor --pusher paddle`, with `--sim_quality modern` (being validated) |
 
-* **Every agent reaches about the expert's level and stops there.** The scripted expert sorts 0.66 of 5-object scenes; the RL agents
-  measure 0.58-0.70 on the same 5-object scenes, and the dense ConvNeXt agent reached 6 objects at about 0.68 validation success. No configuration has improved clearly
-  beyond imitation yet.
-* **The object agent's double DQN overestimates.** Its predicted Q of the chosen actions is 4.5-4.8 above the return that followed
-  (the dense agent: 0.6). The optimism concentrates on grasps of objects already in their region (+6.4), and with a stronger shaped
-  reward the agent loops on them: re-grasp, place, re-grasp.
-* **3-step returns stop the loop** (H, I: 86-99 % of grasps on misplaced objects), clipped double Q alone does not change much.
-  **IQL** starts strong (its offline phase is advantage-weighted cloning) but drifted into the same loop after the epsilon reset at
-  5 objects; **with `--eps_start 0.2`** it no longer collapses: J' (IQL + twin) averages 0.67 over its last 8 validations at 6,600
-  steps, where J without it fell to 0.25-0.40 by 3,000. J'' (+ 3-step) averages 0.66, but its latest validation dropped to 0.35, so
-  its stability is still open.
-* **Where episodes fail**: about a quarter end in an invalid scene, almost always because a **neighbour** is knocked over during a
-  grasp or the **placed** object tips; the rest run out of actions (loops, pushes that move nothing).
-
-![overestimation](docs/figures/overestimation.png)
-
-### Physics and primitives
-
-* **The physics is plausible** (`scripts/physics_sanity.py`): resting scenes do not drift (< 0.1 mm in 10 s), contact forces during
-  pushes are tens of newtons, tall objects tip under high pushes about as the rigid-body condition predicts. The suction is
-  idealised (a 1000 N constraint sealing up to 60 deg off the cup axis in `legacy`); objects do not slip from the cup (about 1 deg tilt
-  and 1 mm drift at release in clean placements).
-* **The tool tip was a weak pusher** (objects moved a third of the push); the paddle doubles the transfer.
-* **Primitive fixes depend on the physics and on the scene density**: for the scripted expert (50 episodes per cell) the clear
-  approach helps at 5 objects (0.66 -> 0.80) but not at 6 (0.74 -> 0.60) under `legacy`; clear approach + corridor placement helps
-  under `modern` (0.66 -> 0.78). A 100-episode comparison under `modern` (straight / clear + corridor / + paddle, 5 and 6 objects) is
-  running and will decide the configuration of the next demonstrations.
-
-**Known limits:** the expert is pick-and-place first and pushes only in the situations above; above 5 objects scenes often become
-invalid within a few actions (objects pushed or dropped out of place), which the RL curriculum will meet; PyBullet is slow (about 1 action/s
-per process; a move to Isaac is kept open in [`ISAAC_MIGRATION.md`](ISAAC_MIGRATION.md)).
+**In progress:** choosing the primitive set under `modern` physics with the scripted expert, then new demonstrations and retraining
+from them; goal masks and goal tokens for arbitrary target areas; the task library (UR and Franka, parallel and vacuum grippers).
 
 Snapshots saved by older versions of this code are not compatible with the current networks.
