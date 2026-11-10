@@ -216,3 +216,20 @@ def test_placement_space_offers_only_cells_inside_the_target_region(fake_simulat
     none = np.zeros((120, 100), np.uint8)
     none[60:110, 30:90] = 1  # no free cell in the region at all: everything else is offered (nothing else to do)
     assert placement_space(FakeSim(), 1, none, (4, 4))[60:].any()
+
+
+def test_parameterised_actions_reach_the_simulator(fake_simulator):
+    from unittest import mock
+
+    from l2r.config import Config
+    from l2r.envs.rearrange import RearrangeEnv
+    env = RearrangeEnv(Config(placement='heuristic'), num_obj=1)
+    env.reset()
+    with mock.patch.object(env.sim, 'push', return_value=True) as push, mock.patch.object(env.sim, 'pull', return_value=True) as pull, \
+            mock.patch.object(env.sim, 'pick', return_value=False) as pick:
+        env.step({'primitive': 'push', 'pix': (0, 50, 60), 'heading': 3.0, 'length': 0.05})
+        assert push.call_args.kwargs == {'push_length': 0.05, 'heading': 3.0}
+        env.step({'primitive': 'pull', 'pix': (0, 50, 60), 'heading': 0.2, 'length': 0.07, 'approach': 0.1})
+        assert pull.call_args.kwargs == {'approach': 0.1, 'heading': 0.2, 'distance': 0.07}
+        env.step({'primitive': 'grasp', 'pix': (0, 50, 60), 'approach': -0.4})
+        assert pick.called and pick.call_args.kwargs['approach'] == -0.4

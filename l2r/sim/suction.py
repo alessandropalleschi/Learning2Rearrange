@@ -27,6 +27,7 @@ class SuctionCup:
         self.constraint = None
         self.offset_x = self.offset_y = 0.0  # where the grasped object sits relative to the cup (used by `place`)
         self.grip_body = self.grip_distance = None
+        self.axis = None  # cup axis of an angled approach (None: the original -x)
 
     # ------------------------------------------------------------------ queries
     def in_contact(self):
@@ -95,22 +96,27 @@ class SuctionCup:
 
     def _attach_to_contact(self, contacts):
         """Constraint to the nearest contacting object whose contact is on the cup axis, in front of the tool and
-        facing it (surface normal aligned with the cup axis within params.suction_min_alignment)."""
+        facing it (surface normal aligned with the cup axis within params.suction_min_alignment). The cup axis is
+        `self.axis` (unit vector into the cabinet, set by an angled approach), or -x (the original straight-in approach)."""
         tool_pos, _ = self.arm.tool_frame()
+        axis = np.asarray(self.axis if getattr(self, 'axis', None) is not None else (-1.0, 0.0, 0.0), float)
+        side = np.array([-axis[1], axis[0], 0.0])  # horizontal, perpendicular to the axis
         best, best_distance = None, 1000.0
         for point in contacts:
             object_id, link, contact_pos, normal = point[2], point[4], point[5], point[7]
             if object_id not in self.scene.object_ids:
                 continue
             distance = np.linalg.norm(np.asarray(self._object_in_tool_frame(object_id)[0]))
-            if (distance < best_distance and np.abs(contact_pos[1] - tool_pos[1]) < self.MAX_LATERAL_OFFSET
-                    and contact_pos[0] < tool_pos[0] and normal[0] > self.params.suction_min_alignment):
+            offset_vec = np.asarray(contact_pos) - np.asarray(tool_pos)
+            if (distance < best_distance and abs(offset_vec @ side) < self.MAX_LATERAL_OFFSET
+                    and offset_vec @ axis > 0 and -(np.asarray(normal) @ axis) > self.params.suction_min_alignment):
                 best, best_distance = (object_id, link, contact_pos), distance
         if best is None:
             return
         object_id, link, contact_pos = best
         obj_to_tool = self._object_in_tool_frame(object_id)
-        offset = contact_pos[0] - tool_pos[0] if tool_pos[0] > contact_pos[0] else 0  # object-side contact
+        ahead = (np.asarray(contact_pos) - np.asarray(tool_pos)) @ axis
+        offset = -ahead if ahead > 0 else 0  # object-side contact (along the cup axis)
         anchor = (obj_to_tool[0][0] + offset, obj_to_tool[0][1], obj_to_tool[0][2])
         self._create_constraint(object_id, link, anchor, obj_to_tool)
 
