@@ -25,8 +25,20 @@ class ScriptedExpert:
     NEAR_MARGIN = 0.02  # m: a misplaced object closer to its region than the longest push minus this is pushed into it
     MAX_EXPOSE_PUSHES = 2  # pushes of one object to uncover hidden ones
 
-    def __init__(self, env):
+    CONTINUOUS_LENGTHS = (0.04, 0.08, 0.12)  # m: the lengths the expert chooses from when the environment's push length is continuous
+
+    def __init__(self, env, push_lengths=None):
+        """push_lengths: the selectable lengths (default: the environment's; with a continuous length (`cfg.hierarchy`)
+        CONTINUOUS_LENGTHS, and the chosen one is returned as a fraction of `cfg.push_length_range` in pix[3])."""
         self.env = env
+        base = env.cfg
+        self.continuous = bool(getattr(base, 'hierarchy', False))
+        if push_lengths is None and self.continuous:
+            push_lengths = self.CONTINUOUS_LENGTHS
+        if push_lengths is not None:
+            import dataclasses
+            base = dataclasses.replace(base, push_lengths=tuple(push_lengths), hierarchy=False)
+        self.cfg = base
         self.failures = {}  # object id -> failed grasps
         self.pushes = {}  # object id -> pushes made on it
 
@@ -65,8 +77,18 @@ class ScriptedExpert:
         return row, int(col if (cols == col).any() else cols.min())
 
     def act(self):
-        """(primitive, pix) or None if the expert has nothing sensible to do."""
-        env, cfg = self.env, self.env.cfg
+        """(primitive, pix) or None if the expert has nothing sensible to do. A push is (index, row, col) with index = direction * L +
+        length index, or (direction, row, col, fraction of the length range) if the environment's push length is continuous."""
+        choice = self._act()
+        if choice is None or choice[0] != 'push' or not self.continuous:
+            return choice
+        index, row, col = choice[1]
+        lengths, (low, high) = self.cfg.push_lengths, self.env.cfg.push_length_range
+        fraction = (lengths[index % len(lengths)] - low) / (high - low)
+        return 'push', (index // len(lengths), row, col, float(np.clip(fraction, 0.0, 1.0)))
+
+    def _act(self):
+        env, cfg = self.env, self.cfg
         if env.holding:
             col, row = env.obs['heuristic_place']
             return 'place', (0, int(row), int(col))
@@ -96,7 +118,7 @@ class ScriptedExpert:
         low, high = scene.regions[scene.class_name(object_id)]
         y = scene.poses()[object_id][0][1]
         distance = max(low - y, y - high, 0.0)
-        reach = max(self.env.cfg.push_lengths) - self.NEAR_MARGIN  # 0.06 m for the single 8 cm push of the paper
+        reach = max(self.cfg.push_lengths) - self.NEAR_MARGIN  # 0.06 m for the single 8 cm push of the paper
         return 0.0 < distance <= reach and self.pushes.get(object_id, 0) < 1
 
     def _expose_hidden(self, cfg):

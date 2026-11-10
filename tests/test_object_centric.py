@@ -141,3 +141,46 @@ def test_a_sliver_narrower_than_the_grasp_depth_still_gets_a_grasp_candidate():
     state = build_state(obs, [16])
     sliver = [i for i, inst in enumerate(state['instances']) if inst.cls == 2]
     assert sliver and state['valid'][sliver[0], 0] and state['actions'][sliver[0], 0][2] == 90
+
+
+def held_observation():
+    """`observation()` while holding a blue object (class label 1), with free space on the right half of the map."""
+    obs = observation()
+    obs['held_class'] = 1
+    free = np.zeros((H - 8, W - 4), np.uint8)
+    free[:, 50:] = 1
+    obs['freespace'] = free
+    return obs
+
+
+def test_place_candidates_cover_the_free_cells_and_know_the_held_class_region():
+    from l2r.learning.object_centric import PLACE_FEATURES, place_candidates, place_index_of
+    actions, tokens = place_candidates(held_observation())
+    assert tokens.shape == (len(actions), PLACE_FEATURES) and len(actions) > 100
+    assert (actions[:, 2] >= 50).all()  # only free cells
+    assert tokens[:, 0].all() and not tokens[:, 1:3].any()  # blue held
+    inside = (actions[:, 1] >= 10) & (actions[:, 1] <= 30)  # the blue region rows
+    assert (tokens[:, 5] == inside).all()
+    assert place_candidates(observation())[0].shape == (0, 3)  # nothing held: no candidates
+    assert place_index_of({'place_actions': actions}, (0, 21, 61)) is not None
+
+
+def test_learned_object_variant_imitates_placement_and_push_length():
+    from l2r.arch_benchmark import ObjectVariant
+    torch.manual_seed(0)
+    variant = ObjectVariant('object+learned', 300, 0, lr=3e-3)
+    t = variant.trainer
+    assert t.continuous and t.learned_place
+    obs, held = observation(), held_observation()
+    state = t.info(obs)
+    row, col = state['actions'][0, 1][1:]
+    push = Transition(obs, (0, row, col, 0.7), obs, 0.0, 'push', False)  # push the blue object, 70% of the length range
+    place = Transition(held, (0, 20, 70), held, 0.0, 'place', False)  # inside the blue region, at column 70
+    for _ in range(300):
+        variant.train_step([push, place] * 4)
+    primitive, pix = variant.predict(obs)
+    assert primitive == 'push' and (pix[1], pix[2]) == (row, col) and abs(pix[3] - 0.7) < 0.1
+    primitive, pix = variant.predict(held)
+    assert primitive == 'place' and abs(pix[1] - 20) <= 2 and abs(pix[2] - 70) <= 2
+    q = t.forward_batch([held])
+    assert q.place.max() > -1000 and q.prim.shape == (1, 3)

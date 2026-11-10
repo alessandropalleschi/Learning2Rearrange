@@ -19,7 +19,7 @@ import torch.nn as nn
 from scipy import ndimage
 
 from l2r.learning.masks import BLADE_HALF_WIDTH_CELLS, GRASP_EDGE_MARGIN, PUSH_OBJECT_HEIGHT, push_path_cells
-from l2r.sim.constants import CLASSES, COLORS
+from l2r.sim.constants import CLASSES, COLORS, LABELS
 
 MAX_OBJECTS = 16
 MAX_GHOSTS = 8  # remembered-but-hidden objects kept as tokens
@@ -30,6 +30,9 @@ OCCLUDED_RGB = 105
 GRASP_DEPTH_CELLS = 2  # aim this many cells behind the front-most cell (see demos.GRASP_DEPTH_CELLS)
 PUSH_GAP = 3  # cells between the blade start and the object
 TYPE_INSTANCE, TYPE_REGION, TYPE_GLOBAL, TYPE_GHOST = 0, 1, 2, 3
+PLACE_STRIDE = 2  # cells between place candidates (a grid over the free cells the held object fits in)
+MAX_PLACE = 384  # place candidates kept (evenly subsampled beyond)
+PLACE_FEATURES = 12
 CLASS_RGB = np.array([np.multiply(COLORS[name][:3], 255) for name in CLASSES]).round().astype(int)
 
 
@@ -174,13 +177,64 @@ def candidate_actions(instances, obs, push_lengths_px, edge_margin=GRASP_EDGE_MA
     return actions, valid
 
 
+def place_candidates(obs):
+    """Learned placement: (P, 3) int place actions (0, row, col) and (P, PLACE_FEATURES) float32 tokens for the free cells the held
+    object fits in (`obs['freespace']`, action coordinates), on a PLACE_STRIDE grid. Empty unless an object is held.
+
+    Token: held class one-hot, row / column (normalised), inside the held class's region, signed and absolute row distance to the region
+    centre, distance from the back of the cabinet (column), free fraction of the 7x7 neighbourhood, distance to the nearest raised cell."""
+    if not obs.get('held_class') or 'freespace' not in obs:
+        return np.zeros((0, 3), np.int64), np.zeros((0, PLACE_FEATURES), np.float32)
+    free = np.asarray(obs['freespace']) > 0
+    h, w = free.shape
+    grid = np.zeros_like(free)
+    grid[::PLACE_STRIDE, ::PLACE_STRIDE] = True
+    rows, cols = np.nonzero(free & grid)
+    if rows.size == 0:
+        rows, cols = np.nonzero(free)
+    if rows.size > MAX_PLACE:
+        keep = np.linspace(0, rows.size - 1, MAX_PLACE).astype(int)
+        rows, cols = rows[keep], cols[keep]
+    cls = CLASSES.index({v: k for k, v in LABELS.items()}[int(obs['held_class'])])  # class-map label (1 / 3 / 5) -> CLASSES index
+    low, high = np.asarray(obs['regions'], np.float32)[cls]
+    raised = crop(obs['depthmap']) > 0.008
+    distance = ndimage.distance_transform_edt(~raised) if raised.any() else np.full(raised.shape, float(h))
+    density = ndimage.uniform_filter(free.astype(np.float32), size=7)
+    out = np.zeros((rows.size, PLACE_FEATURES), np.float32)
+    out[:, cls] = 1.0
+    out[:, 3] = 2 * rows / (h - 1) - 1
+    out[:, 4] = 2 * cols / (w - 1) - 1
+    out[:, 5] = (rows >= low) & (rows <= high)
+    centre = (low + high) / 2
+    out[:, 6] = (rows - centre) / h * 4
+    out[:, 7] = np.maximum(np.maximum(low - rows, rows - high), 0) / h * 4
+    out[:, 8] = cols / w
+    out[:, 9] = density[rows, cols]
+    out[:, 10] = np.minimum(distance[rows, cols], 20) / 20.0
+    out[:, 11] = 1.0
+    actions = np.stack([np.zeros_like(rows), rows, cols], axis=1).astype(np.int64)
+    return actions, out
+
+
+def place_index_of(state, action, tolerance=3):
+    """Index of the place candidate nearest to a taken place action (within `tolerance` cells), or None."""
+    actions = state.get('place_actions')
+    if actions is None or len(actions) == 0:
+        return None
+    distance = np.maximum(np.abs(actions[:, 1] - int(action[1])), np.abs(actions[:, 2] - int(action[2])))
+    best = int(np.argmin(distance))
+    return best if distance[best] <= tolerance else None
+
+
 def build_state(obs, push_lengths_px):
     """Everything the network and the action mapping need for one observation."""
     instances = extract_instances(obs)
     actions, valid = candidate_actions(instances, obs, push_lengths_px)
     ghosts, remembered, ages = extract_ghosts(obs)
     ghost_tokens = instance_features(ghosts, obs, remembered, ages) if ghosts else np.zeros((0, FEATURES), np.float32)
+    place_actions, place_tokens = place_candidates(obs)
     return {'instances': instances, 'actions': actions, 'valid': valid, 'ghosts': ghosts, 'ghost_tokens': ghost_tokens,
+            'place_actions': place_actions, 'place_tokens': place_tokens,
             'tokens': np.concatenate([global_features(instances, obs, ghosts)[None], region_features(obs),
                                       instance_features(instances, obs)], axis=0)}
 
@@ -206,19 +260,37 @@ def slot_of(state, primitive, action, tolerance=3):
 class ObjectQNet(nn.Module):
     """Transformer over [global, 3 region, N instance] tokens -> Q for every (instance, slot)."""
 
-    def __init__(self, n_slots, dim=64, layers=2, heads=4):
+    def __init__(self, n_slots, dim=64, layers=2, heads=4, placement=False):
         super().__init__()
-        self.n_slots = n_slots
+        self.n_slots, self.placement = n_slots, placement
         self.embed = nn.Linear(FEATURES, dim)
         self.type_embed = nn.Embedding(4, dim)
         layer = nn.TransformerEncoderLayer(dim, heads, 2 * dim, dropout=0.0, activation='gelu', batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, n_slots))
+        if placement:  # learned placement: each place candidate cross-attends to the (contextualised) scene tokens, then a value
+            self.place_embed = nn.Linear(PLACE_FEATURES, dim)
+            self.place_attention = nn.MultiheadAttention(dim, heads, batch_first=True)
+            self.place_norm = nn.LayerNorm(dim)
+            self.place_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
+
+    def place_values(self, tokens, counts, place_tokens):
+        """place_tokens (B, P, PLACE_FEATURES) -> (B, P) values of placing the held object at each candidate."""
+        scene, pad = self.encode(tokens, counts)
+        query = self.place_embed(place_tokens)
+        attended, _ = self.place_attention(query, scene, scene, key_padding_mask=pad)
+        return self.place_head(self.place_norm(query + attended))[..., 0]
 
     def embed_tokens(self, tokens, counts):
+        """Contextualised instance tokens (B, Nmax, dim), see `encode`."""
+        n_max = tokens.shape[1] - 4 - MAX_GHOSTS
+        return self.encode(tokens, counts)[0][:, 4:4 + n_max]
+
+    def encode(self, tokens, counts):
         """tokens (B, 4 + Nmax + MAX_GHOSTS, FEATURES), counts (B, 2) long (instances, ghosts) -> contextualised tokens of the
-        instances (B, Nmax, dim): global + 3 region + Nmax instance + MAX_GHOSTS ghost tokens through the transformer."""
+        whole sequence (B, 4 + Nmax + MAX_GHOSTS, dim) and its padding mask: global + 3 region + Nmax instance + MAX_GHOSTS ghost
+        tokens through the transformer."""
         batch, length, _ = tokens.shape
         n_max = length - 4 - MAX_GHOSTS
         position = torch.arange(length, device=tokens.device)
@@ -228,7 +300,7 @@ class ObjectQNet(nn.Module):
                           torch.where(position[None] < 4 + n_max, (position[None] - 4) >= counts[:, :1],
                                       (position[None] - 4 - n_max) >= counts[:, 1:2]))
         x = self.embed(tokens) + self.type_embed(types)[None]
-        return self.norm(self.encoder(x, src_key_padding_mask=pad))[:, 4:4 + n_max]
+        return self.norm(self.encoder(x, src_key_padding_mask=pad)), pad
 
     def forward(self, tokens, counts):
         """-> Q (B, Nmax, n_slots) for every instance and slot."""
@@ -238,7 +310,7 @@ class ObjectQNet(nn.Module):
 def collate(states, device):
     """List of `build_state` results -> (tokens (B, 4 + Nmax + MAX_GHOSTS, F), counts (B, 2) = (instances, ghosts), valid (B, Nmax, S))."""
     n_max = max(max(len(s['instances']) for s in states), 1)
-    n_slots = states[0]['valid'].shape[1] if len(states[0]['valid']) else 1
+    n_slots = max(np.shape(s['valid'])[1] if np.ndim(s['valid']) == 2 else 1 for s in states)  # (0, S) when no object is visible
     tokens = np.zeros((len(states), 4 + n_max + MAX_GHOSTS, FEATURES), np.float32)
     valid = np.zeros((len(states), n_max, n_slots), bool)
     for b, s in enumerate(states):
@@ -248,6 +320,17 @@ def collate(states, device):
         valid[b, :n] = s['valid']
     counts = torch.tensor([[len(s['instances']), len(s['ghost_tokens'])] for s in states], device=device)
     return torch.from_numpy(tokens).to(device), counts, torch.from_numpy(valid).to(device)
+
+
+def collate_place(states, device):
+    """-> (place tokens (B, Pmax, PLACE_FEATURES), valid (B, Pmax))."""
+    p_max = max(max(len(s['place_tokens']) for s in states), 1)
+    tokens = np.zeros((len(states), p_max, PLACE_FEATURES), np.float32)
+    valid = np.zeros((len(states), p_max), bool)
+    for b, s in enumerate(states):
+        n = len(s['place_tokens'])
+        tokens[b, :n], valid[b, :n] = s['place_tokens'], True
+    return torch.from_numpy(tokens).to(device), torch.from_numpy(valid).to(device)
 
 
 def rasterize(state, q, shape, n_push, fill=-1000.0):
@@ -270,8 +353,8 @@ class ObjectQNetContinuous(ObjectQNet):
     the length). Per instance token: a pick value, an actor that proposes a push length per direction (0..1 of the length range), and a
     push critic Q(token, direction, length). Slots: 0 pick, 1 / 2 push in direction 0 / 1."""
 
-    def __init__(self, dim=64, layers=2, heads=4):
-        super().__init__(n_slots=3, dim=dim, layers=layers, heads=heads)
+    def __init__(self, dim=64, layers=2, heads=4, placement=False):
+        super().__init__(n_slots=3, dim=dim, layers=layers, heads=heads, placement=placement)
         del self.head
         self.pick_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
         self.actor = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 2))

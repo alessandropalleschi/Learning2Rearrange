@@ -38,6 +38,9 @@ VARIANTS = {
     'unet_attn4': dict(arch_decoder='unet_attn4'),
     'unet+hybrid': dict(arch_skips=True, backbone='hybrid'),
     'unet+ppm': dict(arch_skips=True, backbone='ppm'),
+    'object+continuous': dict(agent='object', placement='heuristic', hierarchy=True),
+    'object+place': dict(agent='object', placement='learned'),
+    'object+learned': dict(agent='object', placement='learned', hierarchy=True),  # learned placement and continuous push length
     'unet+convnext+ppm': dict(arch_skips=True, arch_encoder='convnext', backbone='ppm'),
     'unet+convnext+aspp': dict(arch_skips=True, arch_encoder='convnext', backbone='aspp'),
     'unet+aspp': dict(arch_skips=True, backbone='aspp'),
@@ -175,35 +178,78 @@ class PolicyVariant(DenseVariant):
 
 
 class ObjectVariant:
-    """The object-centric Q-function trained with a cross-entropy over its object-action slots on the demonstrations. Placement is the
-    heuristic one in this agent, so the demonstrated placements are neither trained on nor evaluated."""
-
-    skips_place = True
+    """The object-centric Q-function trained with a cross-entropy over its object-action slots on the demonstrations.
+    * heuristic placement (default): the demonstrated placements are neither trained on nor evaluated;
+    * `placement='learned'`: also a cross-entropy over the place candidates (free cells the held object fits in);
+    * `hierarchy=True`: continuous push length; the actor regresses the demonstrated length (fraction of `push_length_range`)."""
 
     def __init__(self, name, steps, seed, batch=8, lr=1e-3):
         from l2r.learning.object_trainer import ObjectTrainer
         torch.manual_seed(seed)
         self.cfg = Config(**{**BASE, **VARIANTS[name]})
-        self.trainer = ObjectTrainer(self.cfg)
+        self.trainer = ObjectTrainer(self.cfg, imitation=True)
+        self.skips_place = not self.trainer.learned_place
         self.reference = Trainer(Config(**BASE, equiv_targets=True))
         self.optimizer = torch.optim.AdamW(self.trainer.model.parameters(), lr=lr, weight_decay=1e-4)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, steps)
 
+    def _push_label(self, action):
+        """Demonstrated push -> (direction, length fraction). A 4-tuple is already (direction, row, col, fraction); a 3-tuple's first
+        entry is direction * L + length index over the expert's selectable lengths (`ScriptedExpert.CONTINUOUS_LENGTHS`)."""
+        from l2r.demos import ScriptedExpert
+        if len(action) == 4:
+            return int(action[0]), float(action[3])
+        lengths, (low, high) = ScriptedExpert.CONTINUOUS_LENGTHS, self.cfg.push_length_range
+        if not self.trainer.continuous:
+            return int(action[0]), None
+        direction, index = divmod(int(action[0]), len(lengths))
+        return direction, float(np.clip((lengths[index] - low) / (high - low), 0, 1))
+
     def train_step(self, transitions):
-        from l2r.learning.object_centric import collate, slot_of
+        from l2r.learning.object_centric import collate, collate_place, place_index_of, slot_of
         t = self.trainer
-        pairs = [(t.info(tr.state), tr) for tr in transitions if tr.primitive_action != 'place']
-        labelled = [(s, slot_of(s, tr.primitive_action, tr.action)) for s, tr in pairs]
-        labelled = [(s, slot) for s, slot in labelled if slot is not None]
-        if not labelled:
+        losses = []
+        acts, places = [], []
+        for tr in transitions:
+            state = t.info(tr.state)
+            if tr.primitive_action == 'place':
+                index = place_index_of(state, tr.action) if t.learned_place else None
+                if index is not None:
+                    places.append((state, index))
+                continue
+            action, fraction = tr.action, None
+            if tr.primitive_action == 'push':
+                direction, fraction = self._push_label(tr.action)
+                action = (direction, tr.action[1], tr.action[2])
+            slot = slot_of(state, tr.primitive_action, action)
+            if slot is not None:
+                acts.append((state, slot, fraction))
+        if acts:
+            tokens, n_objects, valid = collate([s for s, _, _ in acts], DEVICE)
+            if t.continuous:
+                q, actor, _ = t.model.forward_full(tokens, n_objects)
+            else:
+                q = t.model(tokens, n_objects)
+            index = torch.tensor([slot for _, slot, _ in acts], device=DEVICE)
+            arange = torch.arange(len(acts), device=DEVICE)
+            flat = index[:, 0] * q.shape[2] + index[:, 1]
+            valid = valid.clone()
+            valid[arange, index[:, 0], index[:, 1]] = True
+            losses.append(torch.nn.functional.cross_entropy(q.masked_fill(~valid, -1e9).flatten(1), flat))
+            pushes = [k for k, (_, slot, fraction) in enumerate(acts) if slot[1] > 0 and fraction is not None]
+            if t.continuous and pushes:
+                k = torch.tensor(pushes, device=DEVICE)
+                predicted = actor[k, index[k, 0], index[k, 1] - 1]
+                target = torch.tensor([acts[j][2] for j in pushes], device=DEVICE)
+                losses.append(10.0 * torch.nn.functional.mse_loss(predicted, target))
+        if places:
+            tokens, n_objects, _ = collate([s for s, _ in places], DEVICE)
+            place_tokens, place_valid = collate_place([s for s, _ in places], DEVICE)
+            values = t.model.place_values(tokens, n_objects, place_tokens).masked_fill(~place_valid, -1e9)
+            losses.append(torch.nn.functional.cross_entropy(values, torch.tensor([i for _, i in places], device=DEVICE)))
+        if not losses:
             return 0.0
-        tokens, n_objects, valid = collate([s for s, _ in labelled], DEVICE)
-        q = t.model(tokens, n_objects)
-        index = torch.tensor([slot for _, slot in labelled], device=DEVICE)
-        flat = index[:, 0] * q.shape[2] + index[:, 1]
-        valid = valid.clone()
-        valid[torch.arange(len(labelled), device=DEVICE), index[:, 0], index[:, 1]] = True
-        loss = torch.nn.functional.cross_entropy(q.masked_fill(~valid, -1e9).flatten(1), flat)
+        loss = sum(losses)
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(t.model.parameters(), 5.0)
@@ -213,15 +259,31 @@ class ObjectVariant:
 
     @torch.no_grad()
     def predict(self, state):
-        from l2r.learning.object_centric import collate
-        info = self.trainer.info(state)
+        from l2r.learning.object_centric import collate, collate_place
+        t = self.trainer
+        info = t.info(state)
+        if t.learned_place and state.get('held_class'):
+            if len(info['place_actions']) == 0:
+                col, row = state['heuristic_place']  # no free cell the object fits in: fall back to the rule
+                return 'place', (0, int(row), int(col))
+            tokens, n_objects, _ = collate([info], DEVICE)
+            values = t.model.place_values(tokens, n_objects, collate_place([info], DEVICE)[0])[0]
+            return 'place', tuple(int(v) for v in info['place_actions'][int(values.argmax())])
         if len(info['instances']) == 0:
             return 'grasp', (0, 0, 0)
         tokens, n_objects, valid = collate([info], DEVICE)
-        q = self.trainer.model(tokens, n_objects).masked_fill(~valid, -1e9)[0]
+        if t.continuous:
+            q, actor, _ = t.model.forward_full(tokens, n_objects)
+            q, actor = q[0].masked_fill(~valid[0], -1e9), actor[0]
+        else:
+            q = t.model(tokens, n_objects).masked_fill(~valid, -1e9)[0]
         i, slot = divmod(int(q.flatten().argmax()), q.shape[1])
         rot, row, col = (int(v) for v in info['actions'][i, slot])
-        return ('grasp' if slot == 0 else 'push'), (rot, row, col)
+        if slot == 0:
+            return 'grasp', (rot, row, col)
+        if t.continuous:
+            return 'push', (slot - 1, row, col, float(actor[i, slot - 1]))
+        return 'push', (rot, row, col)
 
 
 def make_env(cfg, num_obj, max_actions=20):

@@ -130,3 +130,20 @@ def test_expert_chooses_the_push_length_that_lands_the_object_closest_to_the_mid
     assert ScriptedExpert._length_index(0.25, 0.0, 0.10, 0, lengths) == 2  # towards -y: 0.25 - 0.12 = 0.13 is the closest to 0.05
     assert ScriptedExpert._length_index(0.02, 0.0, 0.10, 1, lengths) == 0  # near: a short push (the long ones overshoot)
     assert ScriptedExpert._length_index(0.25, 0.0, 0.10, 0, (0.08,)) == 0  # a single length: always index 0 (the paper's 8 cm)
+
+
+def test_expert_emits_a_length_fraction_when_the_environment_push_length_is_continuous():
+    from types import SimpleNamespace
+
+    from l2r.config import Config
+    from l2r.demos import ScriptedExpert
+    expert = ScriptedExpert(SimpleNamespace(cfg=Config(hierarchy=True)))
+    assert expert.cfg.push_lengths == ScriptedExpert.CONTINUOUS_LENGTHS and not expert.cfg.hierarchy
+    expert._act = lambda: ('push', (4, 10, 20))  # direction 1, length index 1 (8 cm)
+    primitive, pix = expert.act()
+    assert primitive == 'push' and pix[:3] == (1, 10, 20) and abs(pix[3] - (0.08 - 0.03) / 0.12) < 1e-6
+    expert._act = lambda: ('grasp', (0, 5, 6))
+    assert expert.act() == ('grasp', (0, 5, 6))
+    plain = ScriptedExpert(SimpleNamespace(cfg=Config()))
+    plain._act = lambda: ('push', (1, 10, 20))
+    assert plain.act() == ('push', (1, 10, 20))

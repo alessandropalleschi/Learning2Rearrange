@@ -7,24 +7,28 @@ import torch
 import torch.nn.functional as F
 
 from l2r.learning.models import DEVICE
-from l2r.learning.object_centric import ObjectQNet, ObjectQNetContinuous, build_state, collate, rasterize, slot_of
+from l2r.learning.object_centric import ObjectQNet, ObjectQNetContinuous, build_state, collate, collate_place, rasterize, slot_of
 from l2r.learning.trainer import QMaps, Trainer
 
 CACHE_SIZE = 2048  # extracted states kept (the replay buffer re-uses observations many times)
 
 
 class ObjectTrainer(Trainer):
-    def __init__(self, cfg=None, is_testing=False, load_snapshot=False, snapshot=None, snapshot_target=None):
+    def __init__(self, cfg=None, is_testing=False, load_snapshot=False, snapshot=None, snapshot_target=None, imitation=False):
+        """imitation: the network is trained by a supervised loss (`arch_benchmark.ObjectVariant`, DAgger), which supports learned
+        placement; the TD update of `train_step` does not train the place head yet."""
         super().__init__(cfg, is_testing, False, None, None)  # builds the dense network we replace below: cheap
-        if self.cfg.placement != 'heuristic':
-            raise ValueError("the object-centric agent uses the heuristic placement (--placement heuristic)")
+        self.learned_place = self.cfg.placement == 'learned'
+        if self.learned_place and not imitation:
+            raise ValueError("RL with the object-centric agent uses the heuristic placement (--placement heuristic); learned placement is "
+                             "trained by imitation only for now")
         self.n_slots = 1 + 2 * len(self.cfg.push_lengths)
         self.continuous = bool(self.cfg.hierarchy)  # --agent object --hierarchy: a continuous push length (actor + length-conditioned critic)
         if self.continuous:
             self.n_slots = 3
-            make = lambda: ObjectQNetContinuous(self.cfg.object_dim, self.cfg.object_layers).to(DEVICE)
+            make = lambda: ObjectQNetContinuous(self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place).to(DEVICE)
         else:
-            make = lambda: ObjectQNet(self.n_slots, self.cfg.object_dim, self.cfg.object_layers).to(DEVICE)
+            make = lambda: ObjectQNet(self.n_slots, self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place).to(DEVICE)
         self.model, self.model_target = make(), make()
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
@@ -72,8 +76,15 @@ class ObjectTrainer(Trainer):
         shape = (h - 2 * self.offset_px, w - self.offset_px)
         push, pick = zip(*[rasterize(s, q[b], shape, 2 * len(self.cfg.push_lengths)) for b, s in enumerate(states)])
         push, pick = np.stack(push), np.stack(pick)
+        place = np.full_like(pick, -1000.0)
+        if self.learned_place and any(len(s['place_tokens']) for s in states):
+            with torch.no_grad():
+                values = net.place_values(tokens, n_objects, collate_place(states, DEVICE)[0]).float().cpu().numpy()
+            for b, s in enumerate(states):
+                for p, (_, row, col) in enumerate(s['place_actions']):
+                    place[b, 0, row, col] = values[b, p]
         if not self.continuous:
-            return QMaps(push, pick, np.zeros_like(pick), None)
+            return QMaps(push, pick, place, None)
         lengths = np.full(push.shape, 0.5, np.float32)  # the actor's length at every candidate push pixel (0.5 elsewhere)
         for b, state in enumerate(states):
             for i in range(len(state['instances'])):
@@ -82,7 +93,8 @@ class ObjectTrainer(Trainer):
                         _, row, col = state['actions'][i, slot]
                         lengths[b, slot - 1, row, col] = actor[b, i, slot - 1]
         prim = np.stack([push.reshape(len(states), -1).max(1), pick.reshape(len(states), -1).max(1), np.full(len(states), -1000.0)], axis=1)
-        return QMaps(push, pick, np.zeros_like(pick), None, lengths, prim.astype(np.float32))
+        prim[:, 2] = place.reshape(len(states), -1).max(1)
+        return QMaps(push, pick, place, None, lengths, prim.astype(np.float32))
 
     # ------------------------------------------------------------------ learning
     def train_step(self, transitions, weights=None, demo=None):
