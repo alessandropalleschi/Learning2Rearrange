@@ -79,6 +79,7 @@ class TrainingLoop:
                 self.trainer.pretrain(demos, args.pretrain_steps)
         self.curriculum = Curriculum(self.cfg, frozen=args.is_testing, validated=bool(args.curriculum_eval))
         self.validations = 0
+        self.stage_validations = []  # (successes, episodes) of the validations at the current object count
         self.episode_objects = [self.curriculum.num_obj] * args.num_envs  # objects of each simulator's running episode
         self.stage_iteration = 0  # steps since the last curriculum change (epsilon is annealed per stage)
         self.episode = 0
@@ -196,18 +197,25 @@ class TrainingLoop:
         curriculum if the success rate reaches the threshold. All simulators are reset afterwards."""
         from l2r.evaluation import evaluate
         c, a = self.curriculum, self.args
-        seed = 10 ** 6 + self.validations * 1000
+        # fixed seeds: the same scenes at every validation of a stage, so successive validations measure the policy, not the scenes
+        seed = 10 ** 6 + (c.num_obj * 1000 if a.fixed_validation_seeds else self.validations * 1000)
         result = evaluate(self.trainer, self.venv, self.cfg, self.ws, c.num_obj, a.curriculum_eval, seed)
         self.validations += 1
         rate = result['success_rate']
-        passed = rate >= self.cfg.success_threshold
-        print('Validation %d (%d objects, %d greedy episodes): success %.2f, mean actions %s -> %s'
+        self.stage_validations.append((rate * result['episodes'], result['episodes']))
+        window = self.stage_validations[-a.curriculum_window:]
+        pooled = sum(s for s, _ in window) / max(sum(n for _, n in window), 1)
+        # pooled over the last `curriculum_window` validations of this stage (1 = the original single-validation rule)
+        passed = len(window) >= a.curriculum_window and pooled >= self.cfg.success_threshold
+        print('Validation %d (%d objects, %d greedy episodes): success %.2f, mean actions %s%s -> %s'
               % (self.validations, c.num_obj, result['episodes'], rate, result['mean_actions_success'],
+                 ', pooled over %d: %.2f' % (len(window), pooled) if a.curriculum_window > 1 else '',
                  'advance' if passed else 'stay'))
         self.logger.scalar('curriculum/val_success', rate, self.trainer.iteration)
         with open(os.path.join(self.log_dir, 'validation.csv'), 'a') as f:
             f.write('%d,%d,%d,%.3f\n' % (self.validations, self.trainer.iteration, c.num_obj, rate))
         if passed and c.advance():
+            self.stage_validations = []
             self.stage_iteration = 0
             self.logger.scalar('curriculum/num_obj', c.num_obj, self.trainer.iteration)
             print('Curriculum: now using %d objects' % c.num_obj)
@@ -252,6 +260,12 @@ def add_arguments(parser):
                         help='advance the curriculum after a greedy validation on this many fresh random configurations '
                              '(success >= threshold) instead of the epsilon-greedy training window (0 = training window)')
     parser.add_argument('--curriculum_eval_every', type=int, default=25, help='training episodes between validations')
+    parser.add_argument('--curriculum_window', type=int, default=1,
+                        help='advance when the success pooled over the last K validations of the stage reaches the threshold '
+                             '(1 = a single validation, as before)')
+    parser.add_argument('--fixed_validation_seeds', action='store_true', default=False,
+                        help='validate on the same scenes at every validation of a stage (seeds depend on the object count only)')
+    parser.add_argument('--success_threshold', type=float, default=0.9, help='validation success needed to advance the curriculum')
     parser.add_argument('--demos', default='', help='recorded expert demonstrations (scripts/collect_demos.py; same model flags)')
     parser.add_argument('--pretrain_steps', type=int, default=0, help='gradient steps on the demonstrations before training (DQfD)')
     parser.add_argument('--max_episodes', type=int, default=0, help='stop after this many finished episodes (0 = no cap)')

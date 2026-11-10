@@ -172,6 +172,30 @@ def test_curriculum_advances_after_a_greedy_validation(fake_simulator, tmp_path,
     assert rows[0].split(',')[2:] == ['1', '1.000']
 
 
+def test_pooled_validation_waits_for_the_window_and_fixed_seeds_repeat_the_scenes(fake_simulator, tmp_path, monkeypatch, capsys):
+    from l2r import evaluation
+    monkeypatch.chdir(tmp_path)
+    seeds = []
+    real = evaluation.evaluate
+
+    def spy(trainer, venv, cfg, ws, num_obj, episodes, base_seed):
+        seeds.append((num_obj, base_seed))
+        return real(trainer, venv, cfg, ws, num_obj, episodes, base_seed)
+    monkeypatch.setattr(evaluation, 'evaluate', spy)
+    parser = argparse.ArgumentParser()
+    add_arguments(parser)
+    args = parser.parse_args(['--num_envs', '2', '--max_obj', '3', '--max_actions', '5', '--max_iterations', '80',
+                              '--start_method', 'fork', '--batch_size', '4', '--logging_directory', 'w',
+                              '--curriculum_eval', '3', '--curriculum_eval_every', '4', '--curriculum_window', '2',
+                              '--fixed_validation_seeds', '--success_threshold', '0.85'])
+    run(args)
+    out = capsys.readouterr().out
+    assert 'Validation 1 (1 objects, 3 greedy episodes): success 1.00, mean actions 3.0, pooled over 1: 1.00 -> stay' in out
+    assert 'pooled over 2: 1.00 -> advance' in out  # the fake scene is always sorted: advances once the window is full
+    first_stage = [seed for n, seed in seeds if n == 1]
+    assert len(first_stage) == 2 and len(set(first_stage)) == 1  # the same scenes at both validations of the stage
+
+
 def test_stage_mixing_draws_earlier_stages_and_logs_the_actual_object_count(fake_simulator, tmp_path, monkeypatch):
     from l2r.training import TrainingLoop
     monkeypatch.chdir(tmp_path)

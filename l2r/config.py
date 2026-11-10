@@ -136,6 +136,7 @@ class Config:
         get = lambda name, default: getattr(args, name, default)
         defaults = cls()
         return cls(start_objects=get('num_obj', defaults.start_objects), max_objects=get('max_obj', defaults.max_objects),
+                   success_threshold=get('success_threshold', defaults.success_threshold),
                    max_actions=get('max_actions', defaults.max_actions), batch_size=get('batch_size', defaults.batch_size), belief=get('belief', 'none'),
                    placement=get('placement', 'heuristic'), eps_decay=get('eps_decay', defaults.eps_decay),
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
