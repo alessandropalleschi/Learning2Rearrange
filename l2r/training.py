@@ -69,8 +69,9 @@ class TrainingLoop:
                                snapshot=args.snapshot, snapshot_target=args.snapshot_target)
         self.logger = Logger(self.log_dir)
         if args.demos:
-            from l2r.demos import load_demos
+            from l2r.demos import adapt_demos, load_demos
             demos, stats = load_demos(args.demos)
+            demos = adapt_demos(demos, self.cfg)
             print('Demonstrations: %d transitions (expert success %.2f over %d episodes)'
                   % (len(demos), stats['success_rate'], stats['episodes']))
             self.trainer.demos = demos

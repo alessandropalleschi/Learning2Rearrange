@@ -230,6 +230,25 @@ def save_demos(path, transitions, stats):
         pickle.dump({'transitions': [tuple(t) for t in transitions], 'stats': stats}, f, protocol=4)
 
 
+def adapt_demos(transitions, cfg):
+    """Make demonstrations recorded with a continuous push length (pix = (direction, row, col, fraction)) usable by an agent with
+    selectable lengths (`cfg.push_lengths`): the length becomes the nearest selectable one (pix = (direction * L + index, row, col)).
+    Demonstrations with selectable lengths are returned unchanged; they cannot be used with a continuous length (unknown lengths)."""
+    from l2r.learning.memory import Transition
+    lengths, (low, high) = np.asarray(cfg.push_lengths), cfg.push_length_range
+    out = []
+    for t in transitions:
+        if t.primitive_action == 'push' and len(t.action) == 4 and not cfg.hierarchy:
+            direction, row, col, fraction = t.action
+            index = int(np.argmin(np.abs(lengths - (low + fraction * (high - low)))))
+            t = Transition(t.state, (int(direction) * len(lengths) + index, int(row), int(col)), *t[2:])
+        elif t.primitive_action == 'push' and len(t.action) == 3 and cfg.hierarchy:
+            raise ValueError('demonstrations with selectable push lengths cannot train a continuous push length: record them with '
+                             '--hierarchy')
+        out.append(t)
+    return out
+
+
 def load_demos(path):
     from l2r.learning.memory import Transition
     with open(path, 'rb') as f:

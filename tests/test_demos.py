@@ -147,3 +147,14 @@ def test_expert_emits_a_length_fraction_when_the_environment_push_length_is_cont
     plain = ScriptedExpert(SimpleNamespace(cfg=Config()))
     plain._act = lambda: ('push', (1, 10, 20))
     assert plain.act() == ('push', (1, 10, 20))
+
+
+def test_continuous_length_demonstrations_are_mapped_to_the_nearest_selectable_length():
+    from l2r.config import Config
+    from l2r.demos import adapt_demos
+    from l2r.learning.memory import Transition
+    cfg = Config(push_lengths=(0.04, 0.08, 0.12))  # range 0.03 .. 0.15
+    demos = [Transition({}, (1, 10, 20, (0.08 - 0.03) / 0.12), {}, 0.0, 'push', False), Transition({}, (0, 5, 6), {}, 0.0, 'grasp', False)]
+    adapted = adapt_demos(demos, cfg)
+    assert adapted[0].action == (1 * 3 + 1, 10, 20) and adapted[1].action == (0, 5, 6)
+    assert adapt_demos(demos, Config(hierarchy=True))[0].action == demos[0].action
