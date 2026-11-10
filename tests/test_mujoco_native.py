@@ -9,6 +9,7 @@ mujoco = pytest.importorskip('mujoco')
 
 from l2r.config import SimParams  # noqa: E402
 from l2r.sim.mj import robot  # noqa: E402
+from l2r.sim.mj.robot import STAGE_MARGIN  # noqa: E402
 
 if not os.path.exists(os.path.join(robot.UR5E, 'ur5e.xml')):
     pytest.skip('the Menagerie UR5e is not fetched (scripts/fetch_menagerie.sh)', allow_module_level=True)
@@ -52,7 +53,7 @@ def test_blade_push_moves_the_block_along_the_heading(heading_deg):
     rot = horizontal(np.radians(heading_deg))
     direction = rot[:, 2]
     face = np.array([0.025, 0.0, FLOOR + 0.05])
-    start = face - direction * ((WS.bounds[0][1] + 0.1 - face[0]) / -direction[0])
+    start = face - direction * ((WS.bounds[0][1] + STAGE_MARGIN - face[0]) / -direction[0])
     m, d, c = setup(start, rot)
     block = m.body('block').id
     before = d.xpos[block].copy()
@@ -66,13 +67,13 @@ def test_blade_push_moves_the_block_along_the_heading(heading_deg):
 def test_suction_carries_the_block_out_of_the_cabinet():
     rot = horizontal(0.0)
     face = np.array([0.025, 0.0, FLOOR + 0.04])
-    start = face + np.array([WS.bounds[0][1] + 0.1 - face[0], 0, 0])
+    start = face + np.array([WS.bounds[0][1] + STAGE_MARGIN - face[0], 0, 0])
     m, d, c = setup(start, rot)
     assert c.move_line(face - np.array([0.01, 0, 0]), rot, speed=0.05).reached
     d.ctrl[m.actuator('suction').id] = 1.0
     c.hold(20)
     c.move_line(c.tip()[0] + np.array([0, 0, 0.02]), rot, speed=0.05)
-    c.move_line(start + np.array([0, 0, 0.02]), rot, speed=0.15)
+    c.move_line(start + np.array([0.10, 0, 0.02]), rot, speed=0.15)  # a grasp retreats until the object is clear
     assert d.xpos[m.body('block').id][0] > WS.bounds[0][1]
     d.ctrl[m.actuator('suction').id] = 0.0
     c.hold(100)

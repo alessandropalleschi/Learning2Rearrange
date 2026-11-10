@@ -6,7 +6,9 @@ a thin vertical plate (pushes with its end or sideways with its face); the cup i
 actuator) acts through the cup only. A force / torque sensor sits at the flange (the force between the tool and the wrist, as the
 UR5e's built-in sensor measures it).
 
-The geometry follows `scripts/flange_study.py` (L 0.10 + 0.75 m reaches 98% of the approach lines that pass the cabinet opening).
+Geometry and mount from `scripts/mount_study.py` (one posture for the whole cabinet, the tool colliding with the arm): a 0.35 m
+blade with the base 0.6 m in front of the cabinet reaches 0.90 of the approach lines through the opening with the arm facing the
+cabinet (longer blades need the base further back and reach less: 0.75 m blade 0.57).
 `scripts/fetch_menagerie.sh` downloads the arm model (BSD-3)."""
 import os
 from dataclasses import dataclass
@@ -16,14 +18,15 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 UR5E = os.path.join(ROOT, 'assets', 'menagerie', 'universal_robots_ur5e')
-BASE_POSITION = (0.6, 0.0, 0.0)  # as the PyBullet URDF
+BASE_POSITION = (0.85, 0.0, 0.0)  # 0.6 m in front of the cabinet, on the ground (scripts/mount_study.py)
 SLIDE_RANGE = 0.5  # m either side
 ARM_JOINTS = ('slide', 'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint',
               'wrist_3_joint')
-# Home (slide, 6 joints): the tip at the staging point in front of the cabinet (x = front + 0.1 m, centre, 5 cm above the
-# cabinet floor), blade pointing in, flange down, elbow up. Every IK solve starts from it and is pulled towards it in the null
+STAGE_MARGIN = 0.02  # m: staging puts the tip this far in front of the cabinet opening
+# Home (slide, 6 joints): the tip at the staging point in front of the cabinet (x = front + STAGE_MARGIN, centre, 5 cm above the
+# cabinet floor), blade pointing in, flange down, the arm facing the cabinet with the elbow up. Every IK solve starts from it and is pulled towards it in the null
 # space, so the arm keeps this posture at every heading and depth (no flips between solutions).
-HOME = (0.0, -2.94, -2.78, 0.65, 0.55, -1.5708, -1.37)  # chosen by scripts/mount_study.py (most lines reached)
+HOME = (-0.03, 0.56, -2.57, 1.85, 2.29, 1.5708, -1.01)  # arm facing the cabinet, elbow up (mount_study.py --facing)
 ROBOT, SCENE = 2, 1  # collision bits: robot geoms contype ROBOT / conaffinity 0, scene geoms SCENE / SCENE | ROBOT:
 # the robot touches the scene, not itself; scene geoms touch each other
 
@@ -32,7 +35,7 @@ ROBOT, SCENE = 2, 1  # collision bits: robot geoms contype ROBOT / conaffinity 0
 class ToolGeometry:
     shape: str = 'L'  # 'L': bracket down then a horizontal blade; 'straight': the blade along the flange normal (no bracket)
     drop: float = 0.10  # m from the flange along its normal to the blade
-    blade: float = 0.75  # m, horizontal
+    blade: float = 0.35  # m, horizontal (with the base at BASE_POSITION: 0.90 of the approach lines, mount_study.py)
     blade_height: float = 0.04
     blade_thickness: float = 0.008
     cup_radius: float = 0.015

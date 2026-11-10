@@ -30,6 +30,8 @@ def horizontal(heading):
 
 
 class Probe:
+    elbow_high = False
+
     def __init__(self, model, kin):
         self.m, self.d, self.k = model, mujoco.MjData(model), kin
 
@@ -46,7 +48,11 @@ class Probe:
         self.d.qpos[self.k.qadr] = q
         mujoco.mj_kinematics(self.m, self.d)
         shoulder, elbow = (self.d.xpos[self.m.body(n).id] for n in ('upper_arm_link', 'forearm_link'))
-        return bool(elbow[0] < shoulder[0] - 0.05 and elbow[2] > shoulder[2] + 0.1)
+        if not (elbow[0] < shoulder[0] - 0.05 and elbow[2] > shoulder[2] + 0.1):
+            return False
+        if self.elbow_high:  # the classic pose: the elbow above the wrist, the forearm going down to it
+            return bool(elbow[2] > self.d.xpos[self.m.body('wrist_1_link').id][2] + 0.05)
+        return True
 
     def elbow_up(self, q):
         self.d.qpos[self.k.qadr] = q
@@ -56,18 +62,23 @@ class Probe:
         return float(el[2] - (sh + t * (wr - sh))[2])
 
 
-def candidate_homes(kin, probe, stage, rot, rng, starts=200, facing=False):
-    """Distinct collision-free solutions of the staging pose (slide centred), the PyBullet home posture among the seeds."""
-    seeds = [np.array([0, 1, -1, 0.5, 0.5, 0.5, 1]) * np.pi]
-    seeds = [s[-len(kin.low):] for s in seeds]
-    seeds += [rng.uniform(np.maximum(kin.low, -np.pi), np.minimum(kin.high, np.pi)) for _ in range(starts)]
+def seed_grid(n_joints):
+    """Deterministic seed postures (6 arm joints, slide prepended if present): shoulder pan around facing the cabinet and its
+    mirror, several shoulder / elbow / wrist combinations, flange up or down."""
+    grid = itertools.product([0.0, 0.3, 0.6, 0.9, 2.4, 2.8], [-2.6, -2.0, -1.4], [-2.4, -1.6, 1.6, 2.4], [-2.0, 0.0, 2.0],
+                             [-1.5708, 1.5708], [0.0])
+    arm = [np.array(g) for g in grid]
+    return [np.concatenate([[0.0], a]) if n_joints == 7 else a for a in arm]
+
+
+def candidate_homes(kin, probe, stage, rot, rng=None, facing=False):
+    """Distinct collision-free solutions of the staging pose (slide centred), from the seed grid and the PyBullet home
+    posture; with `facing`, only the arm facing the cabinet. Deterministic."""
     first = 1 if kin.names[0] == 'slide' else 0
+    seeds = [(np.array([0, 1, -1, 0.5, 0.5, 0.5, 1]) * np.pi)[-len(kin.low):]] + seed_grid(len(kin.low))
     kin.rest_gain, found = 0.0, []
     for q0 in seeds:
-        q0 = np.array(q0, float)
-        if first:
-            q0[0] = 0.0
-        q, ok = kin.solve(q0, stage, rot)
+        q, ok = kin.solve(np.array(q0, float), stage, rot)
         if not ok or not probe.free(q) or (first and abs(q[0]) > 0.05):
             continue
         if facing and not probe.facing(q):
@@ -132,6 +143,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--x', type=float, nargs='+', default=[0.6, 0.9, 1.1, 1.3, 1.5])
     parser.add_argument('--facing', action='store_true', help='only homes with the arm facing the cabinet (elbow up, in front)')
+    parser.add_argument('--elbow_high', action='store_true', help='with --facing: the elbow above the wrist')
     parser.add_argument('--stage_margin', type=float, default=0.1, help='staging: the tip this far in front of the cabinet (m)')
     parser.add_argument('--shape', choices=['L', 'straight'], default='L')
     parser.add_argument('--no_slide', action='store_true', help='a fixed base (no lateral slide)')
@@ -140,6 +152,7 @@ def main():
     parser.add_argument('--z', type=float, nargs='+', default=[0.0, 0.25, 0.45])
     args = parser.parse_args()
     ws = Workspace.from_params(SimParams())
+    Probe.elbow_high = args.elbow_high
     for blade, x, y, z in itertools.product(args.blade, args.x, args.y, args.z):
         out = evaluate((x, y, z), ws, np.random.default_rng(0), blade, not args.no_slide, args.shape, args.facing, args.stage_margin)
         if out is None:
