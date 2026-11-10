@@ -154,7 +154,7 @@ def candidate_actions(instances, obs, push_lengths_px, edge_margin=GRASP_EDGE_MA
              for d in (0, 1) for l in range(n_len)}
     for i, inst in enumerate(instances):
         rows, cols = inst.rows, inst.cols
-        col = int(cols.max()) - GRASP_DEPTH_CELLS
+        col = max(int(cols.max()) - GRASP_DEPTH_CELLS, int(cols.min()))  # a sliver narrower than the grasp depth: its back cell
         while not (cols == col).any() and col > cols.min():
             col -= 1
         at = rows[cols == col]

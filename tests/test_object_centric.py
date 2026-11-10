@@ -132,3 +132,12 @@ def test_continuous_trainer_learns_the_best_push_length_per_object():
     q = trainer.forward_batch([obs])
     assert q.lengths is not None and q.prim.shape == (1, 3)
     assert abs(q.lengths[0, 0, row, col] - 0.8) < 0.15  # the actor climbs the critic to the best length
+
+
+def test_a_sliver_narrower_than_the_grasp_depth_still_gets_a_grasp_candidate():
+    obs = observation()
+    obs['colormap'][4 + 100:4 + 110, 4 + 90:4 + 91] = CLASS_RGB[2]  # one column wide (e.g. an object mostly hidden behind another)
+    obs['depthmap'][4 + 100:4 + 110, 4 + 90:4 + 91] = 0.05
+    state = build_state(obs, [16])
+    sliver = [i for i, inst in enumerate(state['instances']) if inst.cls == 2]
+    assert sliver and state['valid'][sliver[0], 0] and state['actions'][sliver[0], 0][2] == 90
