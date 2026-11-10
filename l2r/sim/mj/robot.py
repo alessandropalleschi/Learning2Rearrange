@@ -21,6 +21,7 @@ MENAGERIE = os.path.join(ROOT, 'assets', 'menagerie')
 UR5E = os.path.join(MENAGERIE, 'universal_robots_ur5e')
 BASE_POSITION = (0.85, 0.0, 0.0)  # 0.6 m in front of the cabinet, on the ground (scripts/mount_study.py)
 SLIDE_RANGE = 0.5  # m either side
+PEDESTAL_RADIUS = 0.1  # m: the pedestal under the robot base (a cylinder) and its mounting plate
 ARM_JOINTS = ('slide', 'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint',
               'wrist_3_joint')
 STAGE_MARGIN = 0.02  # m: staging puts the tip this far in front of the cabinet opening
@@ -111,15 +112,18 @@ def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION, slide=True, ar
     tool = tool or ToolGeometry()
     spec = _menagerie_spec(base, slide, arm)
     info = ARMS[arm]
-    if base[2] > 0.02:
-        width = SLIDE_RANGE + 0.15 if slide else 0.12
-        spec.worldbody.add_geom(name='pedestal', type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.12, width, base[2] / 2 - 0.01],
-                                pos=[base[0], base[1], base[2] / 2 - 0.01], rgba=[0.35, 0.35, 0.38, 1], contype=0, conaffinity=0)
     for body in spec.bodies[1:]:
         body.gravcomp = 1.0  # the UR controller compensates gravity
     carriage = spec.body('slide_carriage')
-    carriage.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.08, 0.12, 0.01], pos=[0, 0, -0.01], contype=0, conaffinity=0,
-                      rgba=[0.3, 0.3, 0.3, 1], mass=10.0)
+    carriage.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[PEDESTAL_RADIUS, 0.01, 0], pos=[0, 0, -0.01],
+                      contype=0, conaffinity=0, rgba=[0.3, 0.3, 0.3, 1], mass=10.0)  # mounting plate
+    if base[2] > 0.02:  # a cylinder under the robot base only, riding with the slide (its rail on the ground)
+        carriage.add_geom(name='pedestal', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[PEDESTAL_RADIUS, base[2] / 2 - 0.01, 0],
+                          pos=[0, 0, -base[2] / 2 - 0.01], rgba=[0.35, 0.35, 0.38, 1], mass=0.0)
+    if slide:
+        for side in (-1, 1):
+            spec.worldbody.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.015, SLIDE_RANGE + PEDESTAL_RADIUS, 0.01],
+                                    pos=[base[0] + side * 0.06, base[1], 0.01], rgba=[0.5, 0.5, 0.52, 1], contype=0, conaffinity=0)
     if slide:
         act = spec.add_actuator(name='slide', target='slide')
         act.trntype = mujoco.mjtTrn.mjTRN_JOINT
@@ -173,5 +177,6 @@ def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION, slide=True, ar
             # arm links touch the scene; the tool also touches the arm (a blade through the robot's own base is a collision)
             g.contype, g.conaffinity = ROBOT, ROBOT if g.name in tool_geoms else 0
     if base[2] > 0.02:
-        spec.geom('pedestal').contype, spec.geom('pedestal').conaffinity = SCENE, SCENE | ROBOT
+        # solid for the arm, the tool and the objects (it is part of the robot's body tree: robot bits plus the scene's)
+        spec.geom('pedestal').contype, spec.geom('pedestal').conaffinity = SCENE | ROBOT, SCENE | ROBOT
     return spec
