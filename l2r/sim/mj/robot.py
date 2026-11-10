@@ -20,6 +20,10 @@ BASE_POSITION = (0.6, 0.0, 0.0)  # as the PyBullet URDF
 SLIDE_RANGE = 0.5  # m either side
 ARM_JOINTS = ('slide', 'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint',
               'wrist_3_joint')
+# Home (slide, 6 joints): the tip at the staging point in front of the cabinet (x = front + 0.1 m, centre, 5 cm above the
+# cabinet floor), blade pointing in, flange down, elbow up. Every IK solve starts from it and is pulled towards it in the null
+# space, so the arm keeps this posture at every heading and depth (no flips between solutions).
+HOME = (0.0, -0.29, -1.53, 1.37, -1.41, -1.5708, 1.28)
 ROBOT, SCENE = 2, 1  # collision bits: robot geoms contype ROBOT / conaffinity 0, scene geoms SCENE / SCENE | ROBOT:
 # the robot touches the scene, not itself; scene geoms touch each other
 
@@ -41,7 +45,7 @@ class ToolGeometry:
         return position, np.column_stack([x_tip, np.cross(z_tip, x_tip), z_tip])
 
 
-def _menagerie_spec():
+def _menagerie_spec(base=BASE_POSITION):
     path = os.path.join(UR5E, 'ur5e.xml')
     if not os.path.exists(path):
         raise FileNotFoundError('the Menagerie UR5e is missing: run scripts/fetch_menagerie.sh')
@@ -51,7 +55,7 @@ def _menagerie_spec():
     xml = xml.replace('<body name="base" quat="0 0 0 -1" childclass="ur5e">',
                       '<body name="slide_carriage" pos="%g %g %g"><joint name="slide" type="slide" axis="0 1 0" '
                       'range="%g %g" damping="50"/><body name="base" quat="1 0 0 0" childclass="ur5e">'
-                      % (*BASE_POSITION, -SLIDE_RANGE, SLIDE_RANGE), 1)
+                      % (*base, -SLIDE_RANGE, SLIDE_RANGE), 1)
     xml = xml.replace('</worldbody>', '</body></worldbody>', 1)
     spec = mujoco.MjSpec.from_string(xml)
     for key in list(spec.keys):
@@ -59,10 +63,14 @@ def _menagerie_spec():
     return spec
 
 
-def robot_spec(tool=None, suction_force=30.0):
-    """MjSpec with the arm, the slide actuator, gravity compensation, the tool, the flange sensor and the suction actuator."""
+def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION):
+    """MjSpec with the arm (its base at `base`, on a pedestal when raised), the slide actuator, gravity compensation, the
+    tool, the flange sensor and the suction actuator."""
     tool = tool or ToolGeometry()
-    spec = _menagerie_spec()
+    spec = _menagerie_spec(base)
+    if base[2] > 0.02:
+        spec.worldbody.add_geom(name='pedestal', type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.12, SLIDE_RANGE + 0.15, base[2] / 2 - 0.01],
+                                pos=[base[0], base[1], base[2] / 2 - 0.01], rgba=[0.35, 0.35, 0.38, 1], contype=0, conaffinity=0)
     for body in spec.bodies[1:]:
         body.gravcomp = 1.0  # the UR controller compensates gravity
     carriage = spec.body('slide_carriage')
@@ -103,7 +111,13 @@ def robot_spec(tool=None, suction_force=30.0):
     suction.gaintype, suction.biastype = mujoco.mjtGain.mjGAIN_FIXED, mujoco.mjtBias.mjBIAS_NONE
     suction.gainprm[0] = float(suction_force)  # N at full vacuum: the cup lets go above it
     suction.ctrlrange, suction.ctrllimited = [0.0, 1.0], 1
+    spec.body('base').add_geom(name='base_housing', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[0.076, 0.045, 0],
+                               pos=[0, 0, 0.045], rgba=[0, 0, 0, 0], group=3)  # the Menagerie base has no collision shape
+    tool_geoms = {'tool_bracket', 'tool_blade', 'cup'}
     for g in spec.geoms:
-        if g.contype or g.conaffinity:
-            g.contype, g.conaffinity = ROBOT, 0
+        if g.contype or g.conaffinity or g.name == 'base_housing':
+            # arm links touch the scene; the tool also touches the arm (a blade through the robot's own base is a collision)
+            g.contype, g.conaffinity = ROBOT, ROBOT if g.name in tool_geoms else 0
+    if base[2] > 0.02:
+        spec.geom('pedestal').contype, spec.geom('pedestal').conaffinity = SCENE, SCENE | ROBOT
     return spec

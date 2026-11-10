@@ -1,7 +1,8 @@
 """Inverse kinematics and the streaming Cartesian controller of the native MuJoCo robot.
 
 `Kinematics`: damped least squares on a private MjData (never disturbs the simulation), position + orientation of a site,
-joint limits, multi-start for a first solution.
+joint limits, and a pull towards the home posture in the null space (the arm is redundant with the slide: without it the
+solutions drift and flip between configurations).
 
 `Controller`: the way a real UR driver follows a Cartesian path (servoL-like): the tip target moves along a straight line at a
 constant speed (with a short ramp); every control tick (`substeps` physics steps) one damped-least-squares step from the
@@ -13,7 +14,7 @@ from dataclasses import dataclass
 import mujoco
 import numpy as np
 
-from l2r.sim.mj.robot import ARM_JOINTS
+from l2r.sim.mj.robot import ARM_JOINTS, HOME
 
 V_MAX = np.array([0.5, 3.14, 3.14, 3.14, 6.28, 6.28, 6.28])  # slide m/s, joints rad/s (UR5e limits)
 
@@ -28,8 +29,13 @@ def pose_error(target_pos, target_rot, pos, rot, rot_weight=1.0):
 
 
 class Kinematics:
-    def __init__(self, model, site='tip'):
+    # posture pull per joint: none on the slide (it follows the target sideways) and on joint 6 (it sets the heading)
+    REST_WEIGHTS = (0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0)
+
+    def __init__(self, model, site='tip', home=HOME, rest_gain=0.05):
         self.m, self.d = model, mujoco.MjData(model)
+        self.home, self.rest_gain = np.asarray(home, float), rest_gain
+        self.rest_weights = np.asarray(self.REST_WEIGHTS, float)
         self.site = model.site(site).id
         self.joints = [model.joint(n).id for n in ARM_JOINTS]
         self.qadr = np.array([model.jnt_qposadr[j] for j in self.joints])
@@ -56,11 +62,15 @@ class Kinematics:
         error = pose_error(target_pos, target_rot, pos, rot, rot_weight)
         J = self.jacobian(q)
         J[3:] *= rot_weight
-        dq = J.T @ np.linalg.solve(J @ J.T + damping * np.eye(6), error)
+        JJt = J @ J.T + damping * np.eye(6)
+        dq = J.T @ np.linalg.solve(JJt, error)
+        if self.rest_gain:  # towards the home posture without moving the tip
+            null = np.eye(len(q)) - J.T @ np.linalg.solve(JJt, J)
+            dq += null @ (self.rest_gain * self.rest_weights * (self.home - q))
         scale = max(1.0, np.abs(dq).max() / max_step)
         return np.clip(q + dq / scale, self.low, self.high), float(np.linalg.norm(error))
 
-    def solve(self, q0, target_pos, target_rot, iterations=300, tol_pos=1e-3, tol_rot=1e-2):
+    def solve(self, q0, target_pos, target_rot, iterations=500, tol_pos=1e-3, tol_rot=1e-2):
         q = np.array(q0, float)
         for _ in range(iterations):
             pos, rot = self.forward(q)
@@ -70,17 +80,22 @@ class Kinematics:
             q, _ = self.step(q, target_pos, target_rot)
         return q, False
 
-    def solve_multistart(self, target_pos, target_rot, seeds, rng, starts=16, accept=None):
-        """First solution (from `seeds`, then random starts) that passes `accept(q)` (e.g. collision free)."""
-        candidates = list(seeds) + [rng.uniform(np.maximum(self.low, -np.pi), np.minimum(self.high, np.pi))
-                                    for _ in range(starts)]
-        for q0 in candidates:
-            q0 = np.array(q0, float)
+    def solve_multistart(self, target_pos, target_rot, seeds=(), rng=None, starts=16, accept=None):
+        """A solution that passes `accept(q)` (e.g. collision free): from the home posture and `seeds` first; random starts
+        only if none of those works (then the one closest to home)."""
+        for q0 in [self.home] + list(seeds):
+            q, ok = self.solve(np.array(q0, float), target_pos, target_rot)
+            if ok and (accept is None or accept(q)):
+                return q
+        rng = rng or np.random.default_rng(0)
+        found = []
+        for _ in range(starts):
+            q0 = rng.uniform(np.maximum(self.low, -np.pi), np.minimum(self.high, np.pi))
             q0[0] = np.clip(target_pos[1], self.low[0], self.high[0])
             q, ok = self.solve(q0, target_pos, target_rot)
             if ok and (accept is None or accept(q)):
-                return q
-        return None
+                found.append(q)
+        return min(found, key=lambda q: np.abs(q - self.home).sum()) if found else None
 
 
 @dataclass
