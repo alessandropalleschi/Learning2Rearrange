@@ -100,6 +100,7 @@ def build(design, ws):
     for name, (half, centre) in walls.items():
         spec.worldbody.add_geom(name='scene_' + name, type=mujoco.mjtGeom.mjGEOM_BOX, size=half, pos=centre,
                                 contype=0, conaffinity=2, rgba=[0.7, 0.7, 0.7, 0.3])
+    spec.visual.global_.offwidth, spec.visual.global_.offheight = 1600, 1200  # pictures (render_tool_designs.py)
     model = spec.compile()
     return model
 
