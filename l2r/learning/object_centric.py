@@ -283,15 +283,19 @@ def slot_of(state, primitive, action, tolerance=3):
 class ObjectQNet(nn.Module):
     """Transformer over [global, 3 region, N instance] tokens -> Q for every (instance, slot)."""
 
-    def __init__(self, n_slots, dim=64, layers=2, heads=4, placement=False, outcome=False):
+    def __init__(self, n_slots, dim=64, layers=2, heads=4, placement=False, outcome=False, twin=False):
+        """twin: two independent value heads on the shared encoder (TD3-style clipped double Q: the trainer's targets take their
+        minimum; acting uses their mean)."""
         super().__init__()
-        self.n_slots, self.placement, self.outcome = n_slots, placement, outcome
+        self.n_slots, self.placement, self.outcome, self.twin = n_slots, placement, outcome, twin
         self.embed = nn.Linear(FEATURES, dim)
         self.type_embed = nn.Embedding(4, dim)
         layer = nn.TransformerEncoderLayer(dim, heads, 2 * dim, dropout=0.0, activation='gelu', batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, n_slots))
+        if twin:
+            self.head_twin = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, n_slots))
         if outcome:  # outcome model: per slot (executed, scene invalid, height map changed) logits, trained from free labels
             self.outcome_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, n_slots * OUTCOMES))
         if placement:  # learned placement: each place candidate cross-attends to the (contextualised) scene tokens, then a value
@@ -299,17 +303,20 @@ class ObjectQNet(nn.Module):
             self.place_attention = nn.MultiheadAttention(dim, heads, batch_first=True)
             self.place_norm = nn.LayerNorm(dim)
             self.place_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
+            if twin:
+                self.place_head_twin = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
             if outcome:
                 self.place_outcome_head = nn.Linear(dim, OUTCOMES)
 
-    def place_values(self, tokens, counts, place_tokens, with_outcome=False):
-        """place_tokens (B, P, PLACE_FEATURES) -> (B, P) values of placing the held object at each candidate (and, with_outcome,
-        the (B, P, OUTCOMES) outcome logits)."""
+    def place_values(self, tokens, counts, place_tokens, with_outcome=False, heads=False):
+        """place_tokens (B, P, PLACE_FEATURES) -> (B, P) values of placing the held object at each candidate (the mean of the twin
+        heads; heads=True: (H, B, P) per head), and with_outcome the (B, P, OUTCOMES) outcome logits."""
         scene, pad = self.encode(tokens, counts)
         query = self.place_embed(place_tokens)
         attended, _ = self.place_attention(query, scene, scene, key_padding_mask=pad)
         feature = self.place_norm(query + attended)
-        values = self.place_head(feature)[..., 0]
+        values = torch.stack([self.place_head(feature)[..., 0]] + ([self.place_head_twin(feature)[..., 0]] if self.twin else []))
+        values = values if heads else values.mean(0)
         return (values, self.place_outcome_head(feature)) if with_outcome else values
 
     def outcomes(self, tokens, counts):
@@ -337,9 +344,14 @@ class ObjectQNet(nn.Module):
         x = self.embed(tokens) + self.type_embed(types)[None]
         return self.norm(self.encoder(x, src_key_padding_mask=pad)), pad
 
+    def q_heads(self, tokens, counts):
+        """-> (H, B, Nmax, n_slots): Q of every instance and slot per value head (H = 2 with twin heads, else 1)."""
+        emb = self.embed_tokens(tokens, counts)
+        return torch.stack([self.head(emb)] + ([self.head_twin(emb)] if self.twin else []))
+
     def forward(self, tokens, counts):
-        """-> Q (B, Nmax, n_slots) for every instance and slot."""
-        return self.head(self.embed_tokens(tokens, counts))
+        """-> Q (B, Nmax, n_slots) for every instance and slot (the mean of the twin heads)."""
+        return self.q_heads(tokens, counts).mean(0)
 
 
 def collate(states, device):
@@ -388,14 +400,22 @@ class ObjectQNetContinuous(ObjectQNet):
     the length). Per instance token: a pick value, an actor that proposes a push length per direction (0..1 of the length range), and a
     push critic Q(token, direction, length). Slots: 0 pick, 1 / 2 push in direction 0 / 1."""
 
-    def __init__(self, dim=64, layers=2, heads=4, placement=False, outcome=False):
-        super().__init__(n_slots=3, dim=dim, layers=layers, heads=heads, placement=placement, outcome=outcome)
+    def __init__(self, dim=64, layers=2, heads=4, placement=False, outcome=False, twin=False):
+        super().__init__(n_slots=3, dim=dim, layers=layers, heads=heads, placement=placement, outcome=outcome, twin=twin)
         del self.head
+        if twin:
+            del self.head_twin
         self.pick_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
         self.actor = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 2))
         self.push_critic = nn.Sequential(nn.Linear(dim + 9, dim), nn.GELU(), nn.Linear(dim, 1))
+        if twin:
+            self.pick_head_twin = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
+            self.push_critic_twin = nn.Sequential(nn.Linear(dim + 9, dim), nn.GELU(), nn.Linear(dim, 1))
 
-    def _push_values(self, emb, lengths):
+    def q_heads(self, tokens, counts):
+        return self.forward_full(tokens, counts, heads=True)[0]
+
+    def _push_values(self, emb, lengths, critic=None):
         """emb (B,N,dim), lengths (B,N,2) -> (B,N,2) push values for the two directions at those lengths."""
         outs = []
         for direction in range(2):
@@ -404,17 +424,21 @@ class ObjectQNetContinuous(ObjectQNet):
             length = lengths[..., direction:direction + 1]
             freq = torch.arange(1, 4, device=emb.device) * 3.14159265  # Fourier features: a peaked value over the length is hard for a plain MLP
             feats = torch.cat([length, torch.sin(length * freq), torch.cos(length * freq)], dim=-1)
-            outs.append(self.push_critic(torch.cat([emb, feats, onehot], dim=-1))[..., 0])
+            outs.append((critic or self.push_critic)(torch.cat([emb, feats, onehot], dim=-1))[..., 0])
         return torch.stack(outs, dim=-1)
 
-    def forward_full(self, tokens, counts, lengths=None):
-        """-> (Q (B,N,3), actor lengths (B,N,2), push values at the actor's lengths computed from DETACHED features (B,N,2)).
-        `lengths` (B,N,2) overrides the lengths the critic is evaluated at (training: the executed ones)."""
+    def forward_full(self, tokens, counts, lengths=None, heads=False):
+        """-> (Q (B,N,3) (mean of the twin heads; heads=True: (H,B,N,3)), actor lengths (B,N,2), push values at the actor's lengths
+        from the first critic on DETACHED features (B,N,2)). `lengths` (B,N,2) overrides the lengths the critic is evaluated at
+        (training: the executed ones)."""
         emb = self.embed_tokens(tokens, counts)
         actor = torch.sigmoid(self.actor(emb.detach()))
         used = actor.detach() if lengths is None else lengths
-        q = torch.cat([self.pick_head(emb), self._push_values(emb, used)], dim=-1)
-        return q, actor, self._push_values(emb.detach(), actor)
+        q = [torch.cat([self.pick_head(emb), self._push_values(emb, used)], dim=-1)]
+        if self.twin:
+            q.append(torch.cat([self.pick_head_twin(emb), self._push_values(emb, used, self.push_critic_twin)], dim=-1))
+        q = torch.stack(q)
+        return (q if heads else q.mean(0)), actor, self._push_values(emb.detach(), actor)
 
     def forward(self, tokens, counts):
         return self.forward_full(tokens, counts)[0]

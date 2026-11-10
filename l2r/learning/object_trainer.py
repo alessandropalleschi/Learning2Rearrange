@@ -21,15 +21,16 @@ class ObjectTrainer(Trainer):
         super().__init__(cfg, is_testing, False, None, None)  # builds the dense network we replace below: cheap
         self.learned_place = self.cfg.placement == 'learned'
         self.outcome = self.cfg.outcome_weight > 0  # outcome heads (executed / invalid / changed), trained from free labels
+        self.twin = bool(self.cfg.twin_q)  # clipped double Q: two value heads, targets from their minimum
         self.n_slots = 1 + 2 * len(self.cfg.push_lengths)
         self.continuous = bool(self.cfg.hierarchy)  # --agent object --hierarchy: a continuous push length (actor + length-conditioned critic)
         if self.continuous:
             self.n_slots = 3
             make = lambda: ObjectQNetContinuous(self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place,
-                                                     outcome=self.outcome).to(DEVICE)
+                                                     outcome=self.outcome, twin=self.twin).to(DEVICE)
         else:
             make = lambda: ObjectQNet(self.n_slots, self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place,
-                                      outcome=self.outcome).to(DEVICE)
+                                      outcome=self.outcome, twin=self.twin).to(DEVICE)
         self.model, self.model_target = make(), make()
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
@@ -118,10 +119,11 @@ class ObjectTrainer(Trainer):
             if self.continuous:  # the target critic values the policy actor's lengths
                 pol_q, pol_actor, _ = self.model.forward_full(tokens_n, n_n)
                 pol = pol_q.masked_fill(~valid_n, neg).flatten(1)
-                tgt = self.model_target.forward_full(tokens_n, n_n, lengths=pol_actor)[0].flatten(1)
+                tgt = self.model_target.forward_full(tokens_n, n_n, lengths=pol_actor, heads=True)[0]
             else:
                 pol = self.model(tokens_n, n_n).masked_fill(~valid_n, neg).flatten(1)
-                tgt = self.model_target(tokens_n, n_n).flatten(1)
+                tgt = self.model_target.q_heads(tokens_n, n_n)
+            tgt = tgt.min(0).values.flatten(1)  # clipped double Q (a single head without --twin_q)
             value = tgt.gather(1, pol.argmax(1, keepdim=True))[:, 0]
             future[acting] = torch.where(pol.max(1).values < neg / 2, torch.zeros_like(value), value)
         if holding:
@@ -129,14 +131,15 @@ class ObjectTrainer(Trainer):
             tokens_n, n_n, _ = collate(group, DEVICE)
             place_n, place_valid = collate_place(group, DEVICE)
             pol = self.model.place_values(tokens_n, n_n, place_n).masked_fill(~place_valid, neg)
-            tgt = self.model_target.place_values(tokens_n, n_n, place_n)
+            tgt = self.model_target.place_values(tokens_n, n_n, place_n, heads=True).min(0).values
             future[holding] = tgt.gather(1, pol.argmax(1, keepdim=True))[:, 0]
         return future
 
     @staticmethod
     def outcome_labels(transition):
         """(executed, invalid, changed) of the action, from the outcome record in the next observation, or None (older data)."""
-        record = transition.next_state.get('last_action') if isinstance(transition.next_state, dict) else None
+        record = transition.state.get('_outcome') if isinstance(transition.state, dict) and '_outcome' in transition.state else (
+            transition.next_state.get('last_action') if isinstance(transition.next_state, dict) else None)
         if record is None or len(record) < 7:
             return None
         record = np.asarray(record, np.float32)
@@ -176,12 +179,15 @@ class ObjectTrainer(Trainer):
         nexts = [self.info(transitions[i].next_state) for i in keep]
         reward = torch.tensor([float(transitions[i].reward) for i in keep], device=DEVICE)
         done = torch.tensor([float(transitions[i].done) for i in keep], device=DEVICE)
-        gamma = torch.tensor([1.0 if (self.learned_place and len(n['place_tokens']) and kinds[i][0] == 'slot')
+        gamma = torch.tensor([float(transitions[i].state['_nstep_discount']) if '_nstep_discount' in transitions[i].state
+                              else 1.0 if (self.learned_place and len(n['place_tokens']) and kinds[i][0] == 'slot')
                               else self.future_reward_discount for i, n in zip(keep, nexts)], device=DEVICE)
         with torch.no_grad():
             label = (reward + gamma * self._future(nexts) * (1.0 - done)).clamp(self.q_min, self.q_max)
 
+        n_heads = 2 if self.twin else 1
         pred = torch.zeros(len(keep), device=DEVICE)
+        pred_heads = torch.zeros(n_heads, len(keep), device=DEVICE)  # every head regresses the same (clipped) target
         margins, outcome_pred = [], []
         flags = np.zeros(len(keep), bool) if demo is None else np.asarray(demo)[keep].astype(bool)
         neg = -1e9
@@ -198,12 +204,16 @@ class ObjectTrainer(Trainer):
                 for k, i in enumerate(items):
                     if transitions[i].primitive_action == 'push':
                         exec_len[k, kinds[i][1][0], kinds[i][1][1] - 1] = float(transitions[i].action[3])
-                q, actor, push_at_actor = self.model.forward_full(tokens, n_objects, lengths=exec_len)
+                qh, actor, push_at_actor = self.model.forward_full(tokens, n_objects, lengths=exec_len, heads=True)
                 push_valid = valid[..., 1:3]
                 actor_loss = -(push_at_actor * push_valid).sum() / push_valid.sum().clamp(min=1)
             else:
-                q = self.model(tokens, n_objects)
+                qh = self.model.q_heads(tokens, n_objects)
+            q = qh.mean(0)
             taken = q[arange, index[:, 0], index[:, 1]]
+            rows_t = torch.tensor(slot_rows, device=DEVICE)
+            for h in range(n_heads):
+                pred_heads[h] = pred_heads[h].index_put((rows_t,), qh[h, arange, index[:, 0], index[:, 1]])
             if self.outcome:
                 outcome_pred.append((slot_rows, self.model.outcomes(tokens, n_objects)[arange, index[:, 0], index[:, 1]]))
             pred = pred.index_put((torch.tensor(slot_rows, device=DEVICE),), taken)
@@ -221,11 +231,15 @@ class ObjectTrainer(Trainer):
             tokens, n_objects, _ = collate(group, DEVICE)
             place_tokens, place_valid = collate_place(group, DEVICE)
             if self.outcome:
-                values, place_outcome = self.model.place_values(tokens, n_objects, place_tokens, with_outcome=True)
+                values_h, place_outcome = self.model.place_values(tokens, n_objects, place_tokens, with_outcome=True, heads=True)
             else:
-                values = self.model.place_values(tokens, n_objects, place_tokens)
+                values_h = self.model.place_values(tokens, n_objects, place_tokens, heads=True)
+            values = values_h.mean(0)
             index = torch.tensor([kinds[i][1] for i in items], device=DEVICE)
             arange = torch.arange(len(items), device=DEVICE)
+            rows_t = torch.tensor(place_rows, device=DEVICE)
+            for h in range(n_heads):
+                pred_heads[h] = pred_heads[h].index_put((rows_t,), values_h[h, arange, index])
             if self.outcome:
                 outcome_pred.append((place_rows, place_outcome[arange, index]))
             taken = values[arange, index]
@@ -236,7 +250,7 @@ class ObjectTrainer(Trainer):
                 penalty[arange, index] = 0.0
                 best = torch.where(place_valid, values + penalty, torch.full_like(values, neg)).max(1).values
                 margins.append((best - taken)[flagged])
-        per_sample = F.smooth_l1_loss(pred, label, reduction='none')
+        per_sample = F.smooth_l1_loss(pred_heads, label[None].expand_as(pred_heads), reduction='none').sum(0)
         outcome_loss = self._outcome_loss(outcome_pred, [transitions[i] for i in keep]) if self.outcome else None
         if weights is not None:
             per_sample = per_sample * torch.as_tensor(np.asarray(weights)[keep], device=DEVICE, dtype=per_sample.dtype)

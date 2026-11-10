@@ -80,6 +80,8 @@ class Config:
                                       # the full margin at Chebyshev distance r in the expert's own map (neighbouring cells of one
                                       # object are equally good, a smooth network can not separate them)
     demo_fraction: float = 0.25       # share of each batch drawn from the demonstrations (when loaded)
+    n_step: int = 1                   # > 1: n-step returns in the replay (see l2r/learning/nstep.py)
+    twin_q: bool = False              # object agent: two value heads, TD targets from their minimum (TD3-style clipped double Q)
     outcome_weight: float = 0.0       # > 0: object agent outcome heads (executed / invalid / changed) trained with this weight
     outcome_penalty: float = 0.0      # > 0: action selection subtracts this x predicted P(invalid) x |reward_invalid| from Q
     demo_anneal_steps: int = 0        # > 0: the demonstration share (and with it the margin loss) fades linearly to 0 over this many
@@ -146,7 +148,7 @@ class Config:
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
                    equiv_sigma=get('equiv_sigma', 0.0), mask_level=get('mask_level', 'basic'),
                    grasp_edge_margin=get('grasp_edge_margin', 0.15), demo_fraction=get('demo_fraction', defaults.demo_fraction), demo_anneal_steps=get('demo_anneal_steps', defaults.demo_anneal_steps),
-                   outcome_weight=get('outcome_weight', 0.0), outcome_penalty=get('outcome_penalty', 0.0),
+                   twin_q=get('twin_q', False), n_step=get('n_step', 1), outcome_weight=get('outcome_weight', 0.0), outcome_penalty=get('outcome_penalty', 0.0),
                    eps_end=get('eps_end', defaults.eps_end), reward_mode=get('reward_mode', defaults.reward_mode),
                    reward_shaping_scale=get('reward_scale', defaults.reward_shaping_scale),
                    noop_penalty=get('noop_penalty', defaults.noop_penalty), push_length_range=tuple(get('push_length_range', defaults.push_length_range)))
@@ -203,6 +205,9 @@ class Config:
                             help="'structured': mask the Q-maps to grasps at an object's front face and pushes with something in the "
                                  "blade's path")
         parser.add_argument('--demo_fraction', type=float, default=0.25, help='share of each batch from the demonstrations')
+        parser.add_argument('--n_step', type=int, default=1, help='n-step returns in the replay (1 = one-step TD, as before)')
+        parser.add_argument('--twin_q', action='store_true', default=False,
+                            help='object agent: clipped double Q (two value heads, targets from their minimum)')
         parser.add_argument('--outcome_weight', type=float, default=0.0,
                             help='object agent: weight of the outcome heads (executed / invalid / changed, free labels; 0 = off)')
         parser.add_argument('--outcome_penalty', type=float, default=0.0,

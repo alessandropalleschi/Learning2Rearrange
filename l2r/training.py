@@ -79,6 +79,8 @@ class TrainingLoop:
                 self.trainer.pretrain(demos, args.pretrain_steps)
         self.curriculum = Curriculum(self.cfg, frozen=args.is_testing, validated=bool(args.curriculum_eval))
         self.validations = 0
+        from l2r.learning.nstep import NStepAccumulator
+        self.nstep = NStepAccumulator(self.cfg.n_step, self.cfg.gamma) if self.cfg.n_step > 1 else None
         self.stage_validations = []  # (successes, episodes) of the validations at the current object count
         self.episode_objects = [self.curriculum.num_obj] * args.num_envs  # objects of each simulator's running episode
         self.stage_iteration = 0  # steps since the last curriculum change (epsilon is annealed per stage)
@@ -109,7 +111,7 @@ class TrainingLoop:
                 if args.save_visualizations:
                     self._save_visualization(q, obs[0], choices[0], infos[0])
                 if not args.is_testing:
-                    self._learn(obs, next_obs, rewards, terminated, choices, infos, eps)
+                    self._learn(obs, next_obs, rewards, terminated, choices, infos, eps, truncated)
                 self.trainer.iteration += n
                 self.stage_iteration += n
                 finished = [i for i in range(n) if terminated[i] or truncated[i]]
@@ -132,14 +134,22 @@ class TrainingLoop:
             self.logger.close()
 
     # ------------------------------------------------------------------ learning
-    def _learn(self, obs, next_obs, rewards, terminated, choices, infos, eps):
-        """Store the transitions (and their hindsight relabelling), learn from them, snapshot periodically."""
+    def _learn(self, obs, next_obs, rewards, terminated, choices, infos, eps, truncated=None):
+        """Store the transitions (and their hindsight relabelling), learn from them, snapshot periodically. With --n_step > 1
+        the stored transitions are n-step aggregates (the relabelled copies stay one-step: they end at the goal)."""
         trainer, args, n = self.trainer, self.args, self.args.num_envs
         batch = []
         for i in range(n):
             primitive, pix, _ = choices[i]
             transition = Transition(obs[i], pix, next_obs[i], rewards[i], primitive, terminated[i])
-            trainer.buffer.push(*transition)
+            if self.nstep is None:
+                trainer.buffer.push(*transition)
+            else:
+                ready = self.nstep.add(i, transition)
+                if truncated is not None and truncated[i] and not terminated[i]:
+                    ready += self.nstep.flush(i)
+                for t in ready:
+                    trainer.buffer.push(*t)
             batch.append(transition)
             if infos[i]['relabel']:  # hindsight experience replay (paper Fig. 8)
                 obs_r, next_r = infos[i]['relabel_pair']
@@ -197,6 +207,10 @@ class TrainingLoop:
         curriculum if the success rate reaches the threshold. All simulators are reset afterwards."""
         from l2r.evaluation import evaluate
         c, a = self.curriculum, self.args
+        if self.nstep is not None:  # the validation resets every simulator: the pending n-step starts bootstrap from where they are
+            for i in range(a.num_envs):
+                for t in self.nstep.flush(i):
+                    self.trainer.buffer.push(*t)
         # fixed seeds: the same scenes at every validation of a stage, so successive validations measure the policy, not the scenes
         seed = 10 ** 6 + (c.num_obj * 1000 if a.fixed_validation_seeds else self.validations * 1000)
         result = evaluate(self.trainer, self.venv, self.cfg, self.ws, c.num_obj, a.curriculum_eval, seed)

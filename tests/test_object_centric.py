@@ -5,6 +5,7 @@ import torch
 from l2r.config import Config
 from l2r.learning.memory import Transition
 from l2r.learning.object_centric import CLASS_RGB, FEATURES, ObjectQNet, build_state, collate, rasterize, slot_of
+from l2r.learning.models import DEVICE
 from l2r.learning.object_trainer import ObjectTrainer
 
 H, W = 128, 104
@@ -263,3 +264,30 @@ def test_outcome_heads_learn_from_free_labels_and_the_risk_penalty_avoids_toppli
     trainer.cfg.outcome_penalty = 0.5  # 0.5 x P(invalid) x 10
     careful = trainer.forward_batch([obs]).pick[0, 0]
     assert careful[green[1], green[2]] < plain[green[1], green[2]] - 3 and abs(careful[blue[1], blue[2]] - plain[blue[1], blue[2]]) < 1
+
+
+def test_twin_heads_are_independent_and_the_target_takes_their_minimum():
+    """Clipped double Q: two value heads (initialised differently); the TD target of a next state is the minimum of the two target
+    heads at the action the policy (their mean) prefers. Without --twin_q there is one head and the target is its value."""
+    torch.manual_seed(0)
+    obs, held = observation(), held_observation()
+    for placement, nxt in (('heuristic', obs), ('learned', held)):
+        trainer = ObjectTrainer(Config(placement=placement, twin_q=True, reward_mode='sparse'))
+        state = trainer.info(nxt)
+        tokens, counts, _ = collate([state], DEVICE)
+        with torch.no_grad():
+            if placement == 'learned':
+                from l2r.learning.object_centric import collate_place
+                place, _ = collate_place([state], DEVICE)
+                heads = trainer.model_target.place_values(tokens, counts, place, heads=True)[:, 0]
+                choice = trainer.model.place_values(tokens, counts, place)[0].argmax()
+                expected = heads[:, choice].min()
+            else:
+                heads = trainer.model_target.q_heads(tokens, counts)[:, 0]
+                valid = torch.as_tensor(state['valid'], device=DEVICE)
+                pol = trainer.model(tokens, counts)[0].masked_fill(~valid, -1e9).flatten()
+                expected = heads.flatten(1)[:, pol.argmax()].min()
+            assert heads.shape[0] == 2 and not torch.allclose(heads[0], heads[1])
+            assert torch.isclose(trainer._future([state])[0], expected)
+    single = ObjectTrainer(Config(placement='heuristic', reward_mode='sparse'))
+    assert single.model.q_heads(*collate([single.info(obs)], DEVICE)[:2]).shape[0] == 1

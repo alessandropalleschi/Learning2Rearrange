@@ -309,7 +309,8 @@ class Trainer(object):
         rows = torch.tensor([int(t.action[1]) + self.offset_px + top for t in transitions], device=DEVICE)
         cols = torch.tensor([int(t.action[2]) + self.offset_px + left for t in transitions], device=DEVICE)
         # pick -> place is one pick-and-place action: no discount between its two decisions
-        gamma = torch.tensor([1.0 if (n.get('held_class') and not s.get('held_class')) else self.future_reward_discount
+        gamma = torch.tensor([float(s['_nstep_discount']) if '_nstep_discount' in s  # n-step transition: its stored discount
+                              else 1.0 if (n.get('held_class') and not s.get('held_class')) else self.future_reward_discount
                               for s, n in zip(states, nexts)], device=DEVICE)
 
         # ---- TD target (double DQN: policy net selects, target net evaluates, over all feasible actions)
