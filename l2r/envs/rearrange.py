@@ -171,7 +171,14 @@ class RearrangeEnv:
         """
         obs, sim, cfg = self.obs, self.sim, self.cfg
         prim, pix = action['primitive'], action['pix']
-        px_x, px_y = pix[2], pix[1]
+        # parameters carried in the action tuple (object agent with parameterised skills, `--skill_params`):
+        # push (0, row, col, length fraction, heading rad), grasp (0, row, col, approach rad)
+        if prim == 'push' and len(pix) >= 5 and 'heading' not in action:
+            low, high = cfg.push_length_range
+            action = dict(action, heading=float(pix[4]), length=low + float(pix[3]) * (high - low))
+        elif prim == 'grasp' and len(pix) >= 4 and 'approach' not in action:
+            action = dict(action, approach=float(pix[3]))
+        px_x, px_y = int(pix[2]), int(pix[1])
         position = self.ws.px_to_xy(px_x, px_y)
         executed, place_pix, attempted = False, None, False
         stops_before = sim.force_stops

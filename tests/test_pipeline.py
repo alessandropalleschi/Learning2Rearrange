@@ -48,6 +48,7 @@ def test_learned_placement_is_a_two_step_action(fake_simulator):
     ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--outcome_weight', '0.5', '--outcome_penalty', '0.3']),
     ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--twin_q', '--n_step', '3']),
     ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--object_algo', 'iql', '--twin_q', '--n_step', '3']),
+    ('spatial', 'learned', (0.08,), ['--agent', 'object', '--hierarchy', '--object_algo', 'iql', '--skill_params', '--twin_q']),
     ('none', 'learned', (0.08,), ['--arch_skips', '--n_step', '3']),
     ('none', 'learned', (0.08,), ['--agent', 'policy_critic']),
     ('none', 'learned', (0.08,), ['--arch_skips', '--region_channels', '--equiv_targets']),
@@ -280,3 +281,19 @@ def test_parameterised_actions_reach_the_simulator(fake_simulator):
         assert pull.call_args.kwargs == {'approach': 0.1, 'heading': 0.2, 'distance': 0.07}
         env.step({'primitive': 'grasp', 'pix': (0, 50, 60), 'approach': -0.4})
         assert pick.called and pick.call_args.kwargs['approach'] == -0.4
+
+
+def test_parameters_in_the_action_tuple_reach_the_simulator(fake_simulator):
+    from unittest import mock
+
+    from l2r.config import Config
+    from l2r.envs.rearrange import RearrangeEnv
+    cfg = Config(placement='heuristic')
+    env = RearrangeEnv(cfg, num_obj=1)
+    env.reset()
+    with mock.patch.object(env.sim, 'push', return_value=True) as push, mock.patch.object(env.sim, 'pick', return_value=False) as pick:
+        env.step({'primitive': 'push', 'pix': (0, 50.0, 60.0, 0.5, 3.0)})
+        low, high = cfg.push_length_range
+        assert push.call_args.kwargs == {'push_length': low + 0.5 * (high - low), 'heading': 3.0}
+        env.step({'primitive': 'grasp', 'pix': (0, 50, 60, -0.3)})
+        assert pick.call_args.kwargs['approach'] == -0.3

@@ -101,7 +101,10 @@ def select_for(trainer, obs, q, i, explore_prob, cfg, ws):
     """`select_action` for sample i of a batch of network outputs `q` (QMaps): hierarchical or flat, as configured."""
     if q.prim is not None and not obs.get('held_class'):
         return select_hierarchical(trainer, obs, q.push[i], q.pick[i], q.prim[i], q.lengths[i], explore_prob, cfg, ws)
-    return select_action(trainer, obs, q.push[i], q.pick[i], q.place[i], explore_prob, cfg, ws)
+    primitive, pix, value = select_action(trainer, obs, q.push[i], q.pick[i], q.place[i], explore_prob, cfg, ws)
+    if hasattr(trainer, 'action_params'):  # parameterised skills: the continuous parameters travel in the action tuple
+        pix = trainer.action_params(i, primitive, pix, explore_prob)
+    return primitive, pix, value
 
 
 # ---------------------------------------------------------------------------------------------------

@@ -237,6 +237,9 @@ def adapt_demos(transitions, cfg):
     Without a belief (`cfg.belief == 'none'`) the recorded spatial belief is removed from the observations: the agent must not see a
     memory its environment does not give it (the object agent turns any belief it finds into ghost tokens)."""
     from l2r.learning.memory import Transition
+    if getattr(cfg, 'skill_params', False):  # parameterised skills: headings / approach angles in the action tuple
+        from l2r.learning.skill_params import adapt_demo_actions
+        transitions = adapt_demo_actions(transitions)
     lengths, (low, high) = np.asarray(cfg.push_lengths), cfg.push_length_range
     out = []
     strip = cfg.belief == 'none'

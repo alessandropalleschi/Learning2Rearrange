@@ -5,6 +5,9 @@ from l2r.learning.trainer import Trainer
 def make_trainer(cfg, *args, **kwargs):
     """Trainer / ObjectTrainer / PolicyCriticTrainer, all with the same interface (`forward_batch` returns dense Q-maps)."""
     if cfg.agent == 'object':
+        if cfg.skill_params:
+            from l2r.learning.skill_params import make_skill_trainer_class
+            return make_skill_trainer_class()(cfg, *args, **kwargs)
         if cfg.object_algo == 'iql':
             from l2r.learning.iql_trainer import IQLObjectTrainer
             return IQLObjectTrainer(cfg, *args, **kwargs)
