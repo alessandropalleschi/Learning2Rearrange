@@ -65,15 +65,17 @@ class Manipulator:
             return None
         return direction, tuple(start)
 
-    def _attach_paddle(self):
-        """Fix the paddle to the tool where it is now (the tool must already have its push orientation); returns (body, constraint)."""
+    def _attach_paddle(self, front_plate=False):
+        """Fix the paddle to the tool where it is now (the tool must already have its push orientation); returns (body, constraint).
+        The front plate (pushes towards the back) is only fitted when needed: going in, it sweeps a 6 cm wide corridor."""
         p, arm = self.arm.p, self.arm
         tip, _ = arm.tool_pose()
-        shapes = dict(shapeTypes=[p.GEOM_BOX] * len(PADDLE_PLATES), halfExtents=[h for h, _ in PADDLE_PLATES],
-                      collisionFramePositions=[o for _, o in PADDLE_PLATES])
+        plates = PADDLE_PLATES if front_plate else PADDLE_PLATES[:1]
+        shapes = dict(shapeTypes=[p.GEOM_BOX] * len(plates), halfExtents=[h for h, _ in plates],
+                      collisionFramePositions=[o for _, o in plates])
         collision = p.createCollisionShapeArray(**shapes)
         visual = p.createVisualShapeArray(shapeTypes=shapes['shapeTypes'], halfExtents=shapes['halfExtents'],
-                                          visualFramePositions=shapes['collisionFramePositions'], rgbaColors=[[0.3, 0.3, 0.35, 1]] * 2)
+                                          visualFramePositions=shapes['collisionFramePositions'], rgbaColors=[[0.3, 0.3, 0.35, 1]] * len(plates))
         body = p.createMultiBody(PADDLE_MASS, collision, visual, basePosition=tip, baseOrientation=(0, 0, 0, 1))
         for link in range(-1, p.getNumJoints(arm.body)):
             p.setCollisionFilterPair(arm.body, body, link, -1, 0)
@@ -149,7 +151,8 @@ class Manipulator:
         end[1] = max(min(end[1], b[1, 1] - WALL_MARGIN), b[1, 0] + WALL_MARGIN)
         front, quat = self._front(start[1], start[2]), PUSH_QUATERNION  # the stick stays straight in
         reached = arm.move_to_pose((front, quat), speed)
-        paddle = self._attach_paddle() if (reached and getattr(self.params, 'pusher', 'tip') == 'paddle') else None
+        backwards = np.cos(heading) < -np.cos(np.radians(45))  # within 45 degrees of straight to the back
+        paddle = self._attach_paddle(front_plate=backwards) if (reached and getattr(self.params, 'pusher', 'tip') == 'paddle') else None
         try:
             success = reached and arm.move_straight(front, start, quat, speed, detect_force=True)
             if not success:

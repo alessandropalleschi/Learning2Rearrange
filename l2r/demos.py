@@ -118,7 +118,8 @@ class ScriptedExpert:
         low, high = scene.regions[scene.class_name(object_id)]
         y = scene.poses()[object_id][0][1]
         distance = max(low - y, y - high, 0.0)
-        reach = max(self.cfg.push_lengths) - self.NEAR_MARGIN  # 0.06 m for the single 8 cm push of the paper
+        transfer = 0.95 if getattr(getattr(self.env.sim, 'params', None), 'pusher', 'tip') == 'paddle' else 0.5  # measured push transfer
+        reach = transfer * max(max(self.cfg.push_lengths) - 0.015, 0.0)  # how far one (longest) push really moves an object
         return 0.0 < distance <= reach and self.pushes.get(object_id, 0) < 1
 
     def _expose_hidden(self, cfg):
@@ -144,7 +145,8 @@ class ScriptedExpert:
         low, high = scene.regions[scene.class_name(object_id)]
         y = scene.poses()[object_id][0][1]
         direction = 1 if (low + high) / 2 > y else 0  # 1: towards +y, 0: towards -y
-        index = direction * len(cfg.push_lengths) + self._length_index(y, low, high, direction, cfg.push_lengths)
+        transfer = 0.95 if getattr(getattr(env.sim, 'params', None), 'pusher', 'tip') == 'paddle' else 0.5  # measured (scripts/physics_sanity.py)
+        index = direction * len(cfg.push_lengths) + self._length_index(y, low, high, direction, cfg.push_lengths, transfer)
         angle, length = decode_push(index, cfg.push_lengths)
         height = obs['classmap'].shape[0]
         for gap in (3, 4, 2, 5):
@@ -155,11 +157,13 @@ class ScriptedExpert:
         return None
 
     @staticmethod
-    def _length_index(y, low, high, direction, lengths):
-        """Index of the push length that moves an object at `y` closest to the middle of its region [low, high] (a push moves it by
-        about its length). With a single length that is index 0 (the paper's 8 cm)."""
+    def _length_index(y, low, high, direction, lengths, transfer=None):
+        """Index of the push length that moves an object at `y` closest to the middle of its region [low, high]. A push moves it by
+        `transfer` x (length - the 1.5 cm gap to the object) (measured: 0.5 with the tool tip, 0.95 with the paddle), or, without a
+        transfer, by about its length (the original rule). With a single length that is index 0 (the paper's 8 cm)."""
         sign = 1.0 if direction == 1 else -1.0
-        landing = [abs((y + sign * length) - (low + high) / 2) for length in lengths]
+        moved = [length if transfer is None else transfer * max(length - 0.015, 0.0) for length in lengths]
+        landing = [abs((y + sign * m) - (low + high) / 2) for m in moved]
         return int(np.argmin(landing))
 
     @staticmethod

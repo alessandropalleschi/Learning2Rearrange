@@ -78,9 +78,9 @@ def test_expert_pushes_objects_that_are_one_push_from_their_region_and_checks_th
     from types import SimpleNamespace
     from l2r.demos import ScriptedExpert
     scene = SimpleNamespace(regions={'blue': [0.10, 0.25]}, class_name=lambda i: 'blue',
-                            poses=lambda: {7: ((0.0, 0.06, 0.4), None), 8: ((0.0, -0.20, 0.4), None), 9: ((0.0, 0.15, 0.4), None)})
+                            poses=lambda: {7: ((0.0, 0.075, 0.4), None), 8: ((0.0, -0.20, 0.4), None), 9: ((0.0, 0.15, 0.4), None)})
     expert = ScriptedExpert(SimpleNamespace(sim=SimpleNamespace(scene=scene), cfg=SimpleNamespace(push_lengths=[0.08])))
-    assert expert._near_region(7)  # 4 cm from the region: one push
+    assert expert._near_region(7)  # 2.5 cm from the region: one (calibrated) push of the tool tip reaches about 3 cm
     assert not expert._near_region(8)  # 30 cm away: pick and place
     assert not expert._near_region(9)  # already inside
     expert.pushes[7] = 1
