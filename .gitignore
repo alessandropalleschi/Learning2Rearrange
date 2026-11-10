@@ -6,3 +6,4 @@ data/
 runs/*
 !runs/*/summary.md
 !runs/*/summary.csv
+assets/menagerie/
