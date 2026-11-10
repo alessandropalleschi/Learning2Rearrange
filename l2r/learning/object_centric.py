@@ -33,6 +33,7 @@ TYPE_INSTANCE, TYPE_REGION, TYPE_GLOBAL, TYPE_GHOST = 0, 1, 2, 3
 PLACE_STRIDE = 2  # cells between place candidates (finest) (a grid over the free cells the held object fits in)
 MAX_PLACE = 512  # at most this many place candidates (the grid gets coarser beyond)
 PLACE_FEATURES = 12
+OUTCOMES = 3  # executed, scene invalid, height map changed (see `RearrangeEnv._record_last`)
 CLASS_RGB = np.array([np.multiply(COLORS[name][:3], 255) for name in CLASSES]).round().astype(int)
 
 
@@ -282,27 +283,39 @@ def slot_of(state, primitive, action, tolerance=3):
 class ObjectQNet(nn.Module):
     """Transformer over [global, 3 region, N instance] tokens -> Q for every (instance, slot)."""
 
-    def __init__(self, n_slots, dim=64, layers=2, heads=4, placement=False):
+    def __init__(self, n_slots, dim=64, layers=2, heads=4, placement=False, outcome=False):
         super().__init__()
-        self.n_slots, self.placement = n_slots, placement
+        self.n_slots, self.placement, self.outcome = n_slots, placement, outcome
         self.embed = nn.Linear(FEATURES, dim)
         self.type_embed = nn.Embedding(4, dim)
         layer = nn.TransformerEncoderLayer(dim, heads, 2 * dim, dropout=0.0, activation='gelu', batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, n_slots))
+        if outcome:  # outcome model: per slot (executed, scene invalid, height map changed) logits, trained from free labels
+            self.outcome_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, n_slots * OUTCOMES))
         if placement:  # learned placement: each place candidate cross-attends to the (contextualised) scene tokens, then a value
             self.place_embed = nn.Linear(PLACE_FEATURES, dim)
             self.place_attention = nn.MultiheadAttention(dim, heads, batch_first=True)
             self.place_norm = nn.LayerNorm(dim)
             self.place_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
+            if outcome:
+                self.place_outcome_head = nn.Linear(dim, OUTCOMES)
 
-    def place_values(self, tokens, counts, place_tokens):
-        """place_tokens (B, P, PLACE_FEATURES) -> (B, P) values of placing the held object at each candidate."""
+    def place_values(self, tokens, counts, place_tokens, with_outcome=False):
+        """place_tokens (B, P, PLACE_FEATURES) -> (B, P) values of placing the held object at each candidate (and, with_outcome,
+        the (B, P, OUTCOMES) outcome logits)."""
         scene, pad = self.encode(tokens, counts)
         query = self.place_embed(place_tokens)
         attended, _ = self.place_attention(query, scene, scene, key_padding_mask=pad)
-        return self.place_head(self.place_norm(query + attended))[..., 0]
+        feature = self.place_norm(query + attended)
+        values = self.place_head(feature)[..., 0]
+        return (values, self.place_outcome_head(feature)) if with_outcome else values
+
+    def outcomes(self, tokens, counts):
+        """(B, Nmax, n_slots, OUTCOMES) outcome logits of every object-action slot."""
+        emb = self.embed_tokens(tokens, counts)
+        return self.outcome_head(emb).view(*emb.shape[:2], self.n_slots, OUTCOMES)
 
     def embed_tokens(self, tokens, counts):
         """Contextualised instance tokens (B, Nmax, dim), see `encode`."""
@@ -375,8 +388,8 @@ class ObjectQNetContinuous(ObjectQNet):
     the length). Per instance token: a pick value, an actor that proposes a push length per direction (0..1 of the length range), and a
     push critic Q(token, direction, length). Slots: 0 pick, 1 / 2 push in direction 0 / 1."""
 
-    def __init__(self, dim=64, layers=2, heads=4, placement=False):
-        super().__init__(n_slots=3, dim=dim, layers=layers, heads=heads, placement=placement)
+    def __init__(self, dim=64, layers=2, heads=4, placement=False, outcome=False):
+        super().__init__(n_slots=3, dim=dim, layers=layers, heads=heads, placement=placement, outcome=outcome)
         del self.head
         self.pick_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
         self.actor = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 2))

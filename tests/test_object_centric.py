@@ -240,3 +240,26 @@ def test_the_agent_learns_not_to_repeat_a_grasp_that_just_failed():
     fresh, after = trainer.forward_batch([obs]).pick[0, 0], trainer.forward_batch([failed]).pick[0, 0]
     assert fresh[blue[1], blue[2]] > fresh[green[1], green[2]] + 1
     assert after[green[1], green[2]] > after[blue[1], blue[2]] + 1
+
+
+def test_outcome_heads_learn_from_free_labels_and_the_risk_penalty_avoids_toppling_actions():
+    torch.manual_seed(0)
+    cfg = Config(placement='heuristic', batch_size=8, learning_rate=3e-3, prioritized=False, reward_mode='sparse', outcome_weight=1.0)
+    trainer = ObjectTrainer(cfg)
+    obs = observation()
+    state = trainer.info(obs)
+    blue, green = tuple(state['actions'][0, 0]), tuple(state['actions'][1, 0])
+    worked = dict(obs, last_action=np.array([0, 1, 0, 0, 1, 0.05, 0], np.float32))  # executed, changed, valid
+    toppled = dict(obs, last_action=np.array([0, 1, 0, 0, 0, 0.02, 1], np.float32))  # not executed, scene invalid
+    batch = [Transition(obs, blue, worked, -1.0, 'grasp', False), Transition(obs, green, toppled, -1.0, 'grasp', False)] * 4
+    for _ in range(200):
+        trainer.train_step(batch)
+    tokens, counts, _ = collate([state], 'cpu' if not torch.cuda.is_available() else 'cuda')
+    with torch.no_grad():
+        p = torch.sigmoid(trainer.model.outcomes(tokens, counts))[0].cpu().numpy()
+    assert p[0, 0, 0] > 0.8 and p[1, 0, 0] < 0.2  # executed: blue yes, green no
+    assert p[0, 0, 1] < 0.2 and p[1, 0, 1] > 0.8  # invalid: green
+    plain = trainer.forward_batch([obs]).pick[0, 0]
+    trainer.cfg.outcome_penalty = 0.5  # 0.5 x P(invalid) x 10
+    careful = trainer.forward_batch([obs]).pick[0, 0]
+    assert careful[green[1], green[2]] < plain[green[1], green[2]] - 3 and abs(careful[blue[1], blue[2]] - plain[blue[1], blue[2]]) < 1

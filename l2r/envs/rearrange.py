@@ -25,7 +25,7 @@ def decode_push(index, push_lengths):
 
 
 LAST_PRIMITIVES = ('push', 'grasp', 'place', 'pull')
-LAST_ACTION_SIZE = len(LAST_PRIMITIVES) + 2  # one-hot primitive, executed, changed fraction of the height map
+LAST_ACTION_SIZE = len(LAST_PRIMITIVES) + 3  # one-hot primitive, executed, changed fraction of the height map, scene invalid
 
 
 def check_push(ws, depth, pix_x, pix_y, angle, push_length=0.08):
@@ -256,7 +256,8 @@ class RearrangeEnv:
                 'actions': self.actions, 'phase': 'act', 'force_stops': sim.force_stops - stops_before,
                 'shaping': shaping}
         self.obs = next_obs
-        self._record_last(prim, pix, executed, obs, next_obs)
+        # a terminal step returns the previous observation: the outcome record compares with what the scene looks like now
+        self._record_last(prim, pix, executed, obs, sim.observe() if terminated else next_obs, invalid=not valid)
         return self.compact(next_obs), reward, terminated, truncated, info
 
     def _approach_for(self, pix):
@@ -312,14 +313,16 @@ class RearrangeEnv:
         """(3, 2) rows [low, high] of the target region of each class (CLASSES order) in the un-padded heightmap."""
         return np.array([[self.ws.y_to_row(y) for y in self.sim.scene.regions[name]] for name in CLASSES], np.int16)
 
-    def _record_last(self, primitive, pix, executed, before, after):
+    def _record_last(self, primitive, pix, executed, before, after, invalid=False):
         """What the agent may know about its previous action (no privileged information: the robot knows what it did, whether the
         primitive completed, and can compare two height maps): primitive one-hot, executed, fraction of the cabinet's cells whose height
-        changed by more than 1 cm; and the action pixel."""
+        changed by more than 1 cm, the scene became invalid; and the action pixel. The same record in the NEXT observation is the
+        label of the outcome heads (`object_trainer`)."""
         out = np.zeros(LAST_ACTION_SIZE, np.float32)
         out[LAST_PRIMITIVES.index(primitive) if primitive in LAST_PRIMITIVES else 0] = 1.0
         out[len(LAST_PRIMITIVES)] = float(bool(executed))
         out[len(LAST_PRIMITIVES) + 1] = float((np.abs(np.asarray(after['depthmap']) - np.asarray(before['depthmap'])) > 0.01).mean())
+        out[len(LAST_PRIMITIVES) + 2] = float(bool(invalid))
         self._last_action, self._last_pix = out, np.array([pix[1], pix[2]], np.int16)
 
     def compact(self, obs):

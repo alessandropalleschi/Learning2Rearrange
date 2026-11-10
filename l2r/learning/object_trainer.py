@@ -20,13 +20,16 @@ class ObjectTrainer(Trainer):
         (kept for the call sites; both support learned placement)."""
         super().__init__(cfg, is_testing, False, None, None)  # builds the dense network we replace below: cheap
         self.learned_place = self.cfg.placement == 'learned'
+        self.outcome = self.cfg.outcome_weight > 0  # outcome heads (executed / invalid / changed), trained from free labels
         self.n_slots = 1 + 2 * len(self.cfg.push_lengths)
         self.continuous = bool(self.cfg.hierarchy)  # --agent object --hierarchy: a continuous push length (actor + length-conditioned critic)
         if self.continuous:
             self.n_slots = 3
-            make = lambda: ObjectQNetContinuous(self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place).to(DEVICE)
+            make = lambda: ObjectQNetContinuous(self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place,
+                                                     outcome=self.outcome).to(DEVICE)
         else:
-            make = lambda: ObjectQNet(self.n_slots, self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place).to(DEVICE)
+            make = lambda: ObjectQNet(self.n_slots, self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place,
+                                      outcome=self.outcome).to(DEVICE)
         self.model, self.model_target = make(), make()
         if load_snapshot:
             self.model.load_state_dict(torch.load(snapshot, map_location=DEVICE))
@@ -70,6 +73,9 @@ class ObjectTrainer(Trainer):
                 q, actor = q.float().cpu().numpy(), actor.float().cpu().numpy()
             else:
                 q = net(tokens, n_objects).float().cpu().numpy()
+            risk = self.cfg.outcome_penalty * abs(self.cfg.reward_invalid) if self.outcome and network == 'policy' else 0.0
+            if risk:  # act cautiously: subtract the expected cost of making the scene invalid (the outcome model's P(invalid))
+                q = q - risk * torch.sigmoid(net.outcomes(tokens, n_objects)[..., 1]).float().cpu().numpy()
         h, w = obs_list[0]['depthmap'].shape[:2]
         shape = (h - 2 * self.offset_px, w - self.offset_px)
         push, pick = zip(*[rasterize(s, q[b], shape, 2 * len(self.cfg.push_lengths)) for b, s in enumerate(states)])
@@ -77,7 +83,11 @@ class ObjectTrainer(Trainer):
         place = np.full_like(pick, -1000.0)
         if self.learned_place and any(len(s['place_tokens']) for s in states):
             with torch.no_grad():
-                values = net.place_values(tokens, n_objects, collate_place(states, DEVICE)[0]).float().cpu().numpy()
+                if risk:
+                    values, outcome = net.place_values(tokens, n_objects, collate_place(states, DEVICE)[0], with_outcome=True)
+                    values = (values - risk * torch.sigmoid(outcome[..., 1])).float().cpu().numpy()
+                else:
+                    values = net.place_values(tokens, n_objects, collate_place(states, DEVICE)[0]).float().cpu().numpy()
             for b, s in enumerate(states):
                 for p, (_, row, col) in enumerate(s['place_actions']):
                     place[b, 0, row, col] = values[b, p]
@@ -123,6 +133,28 @@ class ObjectTrainer(Trainer):
             future[holding] = tgt.gather(1, pol.argmax(1, keepdim=True))[:, 0]
         return future
 
+    @staticmethod
+    def outcome_labels(transition):
+        """(executed, invalid, changed) of the action, from the outcome record in the next observation, or None (older data)."""
+        record = transition.next_state.get('last_action') if isinstance(transition.next_state, dict) else None
+        if record is None or len(record) < 7:
+            return None
+        record = np.asarray(record, np.float32)
+        return record[4], record[6], min(10.0 * float(record[5]), 1.0)
+
+    def _outcome_loss(self, predictions, transitions):
+        """Binary cross-entropy of the outcome logits of the taken actions against the free labels (rows without labels skipped)."""
+        logits, targets = [], []
+        for rows, pred in predictions:
+            for k, row in enumerate(rows):
+                labels = self.outcome_labels(transitions[row])
+                if labels is not None:
+                    logits.append(pred[k])
+                    targets.append(labels)
+        if not logits:
+            return None
+        return F.binary_cross_entropy_with_logits(torch.stack(logits).float(), torch.tensor(np.asarray(targets), device=DEVICE))
+
     def train_step(self, transitions, weights=None, demo=None):
         """Double DQN on the taken object-action slot or (learned placement) place candidate; for demonstration samples also a large
         margin over the other valid slots / candidates. Samples whose action matches no candidate are skipped (no gradient). As in the
@@ -150,7 +182,7 @@ class ObjectTrainer(Trainer):
             label = (reward + gamma * self._future(nexts) * (1.0 - done)).clamp(self.q_min, self.q_max)
 
         pred = torch.zeros(len(keep), device=DEVICE)
-        margins = []
+        margins, outcome_pred = [], []
         flags = np.zeros(len(keep), bool) if demo is None else np.asarray(demo)[keep].astype(bool)
         neg = -1e9
         actor_loss = None
@@ -172,6 +204,8 @@ class ObjectTrainer(Trainer):
             else:
                 q = self.model(tokens, n_objects)
             taken = q[arange, index[:, 0], index[:, 1]]
+            if self.outcome:
+                outcome_pred.append((slot_rows, self.model.outcomes(tokens, n_objects)[arange, index[:, 0], index[:, 1]]))
             pred = pred.index_put((torch.tensor(slot_rows, device=DEVICE),), taken)
             flagged = torch.as_tensor(flags[slot_rows], device=DEVICE)
             if flagged.any():
@@ -186,9 +220,14 @@ class ObjectTrainer(Trainer):
             group = [states[i] for i in items]
             tokens, n_objects, _ = collate(group, DEVICE)
             place_tokens, place_valid = collate_place(group, DEVICE)
-            values = self.model.place_values(tokens, n_objects, place_tokens)
+            if self.outcome:
+                values, place_outcome = self.model.place_values(tokens, n_objects, place_tokens, with_outcome=True)
+            else:
+                values = self.model.place_values(tokens, n_objects, place_tokens)
             index = torch.tensor([kinds[i][1] for i in items], device=DEVICE)
             arange = torch.arange(len(items), device=DEVICE)
+            if self.outcome:
+                outcome_pred.append((place_rows, place_outcome[arange, index]))
             taken = values[arange, index]
             pred = pred.index_put((torch.tensor(place_rows, device=DEVICE),), taken)
             flagged = torch.as_tensor(flags[place_rows], device=DEVICE)
@@ -198,9 +237,13 @@ class ObjectTrainer(Trainer):
                 best = torch.where(place_valid, values + penalty, torch.full_like(values, neg)).max(1).values
                 margins.append((best - taken)[flagged])
         per_sample = F.smooth_l1_loss(pred, label, reduction='none')
+        outcome_loss = self._outcome_loss(outcome_pred, [transitions[i] for i in keep]) if self.outcome else None
         if weights is not None:
             per_sample = per_sample * torch.as_tensor(np.asarray(weights)[keep], device=DEVICE, dtype=per_sample.dtype)
         loss = per_sample.mean()
+        if outcome_loss is not None:
+            loss = loss + self.cfg.outcome_weight * outcome_loss
+            self.last_outcome_loss = float(outcome_loss.detach())
         if margins:
             margin = torch.cat(margins).mean()
             self.last_margin = float(margin.detach())
