@@ -2,7 +2,7 @@
 
     PYTHONPATH=. python scripts/speed_ablation.py 60 adaptive+tol3e-3
 """
-import sys, time, json, numpy as np, pybullet
+import sys, time, numpy as np, pybullet
 from types import SimpleNamespace
 steps = [0]; orig = pybullet.stepSimulation
 def counting(*a, **k): steps[0] += 1; return orig(*a, **k)

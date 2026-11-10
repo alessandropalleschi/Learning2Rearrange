@@ -394,3 +394,27 @@ def test_outcome_mask_drops_candidates_predicted_to_fail_when_acting_and_in_targ
     assert not keep[0, 0, 0] and keep[0, 1, 0]
     nothing = trainer._feasible(torch.zeros(1, 2, 3, 3, device=DEVICE), valid)  # everything predicted to fail: keep the valid ones
     assert torch.equal(nothing, valid)
+
+
+def test_goal_masks_drive_the_goal_tokens_and_the_in_goal_features():
+    from l2r.learning.object_centric import region_features
+    obs = observation()  # blue object at rows 35..45, cols 30..49; green at rows 75..85, cols 60..79
+    goal_map = np.zeros((120, 100), np.uint8)
+    goal_map[30:50, 25:55] = 1  # blue goal: a slot around the blue object
+    goal_map[0:20, 80:100] = 2  # green goal: a slot far from the green object
+    obs['goal_map'] = goal_map
+    state = build_state(obs, [16])
+    tokens = state['tokens']
+    assert tokens[4, 12] == 1 and tokens[5, 12] == 0  # blue inside its goal, green not
+    assert tokens[5, 13] < 0 and tokens[5, 14] > 0  # the green goal is up (fewer rows) and to the front (more columns)
+    goals = region_features(obs)
+    assert np.isclose(goals[0, 5], 20 / 120 * 4) and np.isclose(goals[0, 6], 30 / 100 * 4)  # extent of the blue slot
+
+
+def test_goal_map_channels_of_the_dense_agent():
+    from l2r.learning.trainer import Trainer
+    out = np.zeros((5, 128, 104), np.float32)
+    goal_map = np.zeros((120, 100), np.uint8)
+    goal_map[10:20, 30:40] = 1
+    Trainer._geometry_channels(out, {'goal_map': goal_map, 'regions': np.zeros((3, 2))}, 0, 0, 128, 104)
+    assert out[0, 4 + 10:4 + 20, 4 + 30:4 + 40].all() and out[0].sum() == 100  # 4-cell border: rows both sides, columns left

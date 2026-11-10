@@ -143,3 +143,25 @@ def test_push_towards_the_back_and_pull_towards_the_robot_move_the_object_that_w
         moved['pull'] += pulled[0] > after[0] + 0.02
     assert moved['push'] >= 2, moved
     assert moved['pull'] >= 2, moved
+
+
+def test_grid_goal_slots_decide_success_by_position():
+    params = SimParams()
+    params.goal_layout = 'grid'
+    env = Environment(num_obj=[1], params=params)
+    np.random.seed(3)
+    random.seed(3)
+    assert env.reset()
+    scene, p = env.scene, env.p
+    uid = scene.object_ids[0]
+    key = scene.class_name(uid)
+    x0, x1, y0, y1 = scene.slots[key]
+    masks = scene.goal_masks()
+    assert set(masks) == {'blue', 'yellow', 'green'} and all(m.any() for m in masks.values())
+    assert not (masks['blue'] & masks['green']).any()  # different slots
+    pos, orn = p.getBasePositionAndOrientation(uid)
+    p.resetBasePositionAndOrientation(uid, ((x0 + x1) / 2, (y0 + y1) / 2, pos[2]), orn)
+    assert scene.fraction_sorted() == 1.0 and scene.goal_distance(p.getBasePositionAndOrientation(uid)[0], key) == 0.0
+    other = next(s for k, s in scene.slots.items() if k != key)
+    p.resetBasePositionAndOrientation(uid, ((other[0] + other[1]) / 2, (other[2] + other[3]) / 2, pos[2]), orn)
+    assert scene.fraction_sorted() == 0.0 and scene.goal_distance(p.getBasePositionAndOrientation(uid)[0], key) > 0

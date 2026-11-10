@@ -10,6 +10,7 @@ episode termination and the hindsight relabelling of observations.
 import random
 
 import numpy as np
+from scipy import ndimage
 from skimage.draw import line
 
 from l2r.config import Config
@@ -102,6 +103,11 @@ def placement_space(sim, obj_class, freespace, extent):
     region: otherwise the nearest valid cell lies in another region, the object is put there, picked up again and the
     episode ping-pongs (measured: expert success fell from 87% to 33% at 4 objects). Then it falls back to keeping only the
     back wall clear (`clear_of_back_wall`)."""
+    goal = goal_mask(sim, obj_class)
+    if goal is not None:  # mask goals ('grid'): the same rules with the class's goal cells
+        fitted = fit_footprint(freespace, *extent)
+        candidate = fitted if (fitted is not freespace and (fitted & goal).any()) else clear_of_back_wall(freespace, extent[0])
+        return (candidate & goal).astype(candidate.dtype) if (candidate & goal).any() else candidate
     low, high, _ = sim.target_pixels()
     k = [LABELS[name] for name in TARGET_ORDER].index(int(obj_class))
     fitted = fit_footprint(freespace, *extent)
@@ -113,8 +119,33 @@ def placement_space(sim, obj_class, freespace, extent):
     return in_region
 
 
+GOAL_INNER_MARGIN = 6  # cells (3 cm): placements keep the object's centre this far inside a goal slot
+
+
+def goal_mask(sim, obj_class):
+    """(H, W) bool goal cells of the class with label `obj_class` for mask layouts, or None for the 'bands' layout."""
+    scene = getattr(sim, 'scene', None)
+    if scene is None or getattr(scene, 'layout', 'bands') == 'bands':
+        return None
+    name = TARGET_ORDER[[LABELS[n] for n in TARGET_ORDER].index(int(obj_class))]
+    return scene.goal_masks()[name]
+
+
 def get_place_pose(sim, obj_class, freespace):
     """Heuristic placement pixel (col, row) for an object of class label `obj_class`."""
+    goal = goal_mask(sim, obj_class)
+    if goal is not None:  # free cell well inside the goal, nearest to its centre (a slot has edges on all sides, unlike a band)
+        free = (np.asarray(freespace) > 0)
+        inner = ndimage.binary_erosion(goal, iterations=GOAL_INNER_MARGIN)
+        inner = inner if (free & inner).any() else goal
+        cells = np.argwhere(free & inner) if (free & inner).any() else np.argwhere(free)
+        if not len(cells):
+            rows, cols = np.nonzero(goal)
+            return int(np.median(cols)), int(np.median(rows))
+        g_rows, g_cols = np.nonzero(goal)
+        score = np.hypot(cells[:, 0] - g_rows.mean(), cells[:, 1] - g_cols.mean())
+        row, col = cells[int(np.argmin(score))]
+        return int(col), int(row)
     y_down, y_up, _ = sim.target_pixels()  # in TARGET_ORDER
     index = [LABELS[name] for name in TARGET_ORDER].index(int(obj_class))
     return select_placement(y_up[index], y_down[index], freespace)
@@ -328,6 +359,13 @@ class RearrangeEnv:
             obs['belief_full'] = self.tracker.update(obs, last_action)
         return obs
 
+    def _goal_map(self):
+        """(H, W) uint8 goal of every cell: 1 + CLASSES index of the class whose goal it is, 0 elsewhere (any layout)."""
+        out = np.zeros(self.ws.heightmap_shape, np.uint8)
+        for k, name in enumerate(CLASSES):
+            out[self.sim.scene.goal_masks()[name]] = k + 1
+        return out
+
     def _regions(self):
         """(3, 2) rows [low, high] of the target region of each class (CLASSES order) in the un-padded heightmap."""
         return np.array([[self.ws.y_to_row(y) for y in self.sim.scene.regions[name]] for name in CLASSES], np.int16)
@@ -347,7 +385,7 @@ class RearrangeEnv:
     def compact(self, obs):
         """What leaves the environment and is stored in the replay buffer (a few 100 KB instead of ~4 MB:
         the raw camera images and the auxiliary maps are dropped)."""
-        out = {'colormap': obs['colormap'], 'depthmap': obs['depthmap'], 'regions': self._regions(),
+        out = {'colormap': obs['colormap'], 'depthmap': obs['depthmap'], 'regions': self._regions(), 'goal_map': self._goal_map(),
                'last_action': getattr(self, '_last_action', np.zeros(LAST_ACTION_SIZE, np.float32)),
                'last_pix': getattr(self, '_last_pix', np.array([-1, -1], np.int16))}
         if obs.get('held_class'):  # object in the gripper (learned placement): what the place head needs

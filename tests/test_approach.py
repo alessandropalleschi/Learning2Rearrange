@@ -42,3 +42,18 @@ def test_place_corridor_counts_other_objects_between_a_cell_and_the_front():
     assert counts[55, 90] == 0  # in front of it: nothing to pass
     assert counts[20, 30] == 0  # other rows: clear
     assert 0 < counts[47, 30] < 100  # the corridor edge clips it
+
+
+def test_goal_masks_paint_only_free_cells():
+    from l2r.sim.vision import top_down_maps
+    from l2r.sim.workspace import Workspace
+    ws = Workspace()
+    h, w = ws.heightmap_shape
+    b = ws.bounds
+    xs, ys = np.meshgrid(np.linspace(b[0][0] + 0.003, b[0][1] - 0.003, w), np.linspace(b[1][0] + 0.003, b[1][1] - 0.003, h))
+    points = np.stack([xs.ravel(), ys.ravel(), np.full(xs.size, b[2][0])], 1)
+    colors = np.full((points.shape[0], 3), 255, np.uint8)
+    mask = np.zeros((h, w), bool)
+    mask[10:20, 30:40] = True
+    _, colormap = top_down_maps(points, colors, ws, ('masks', [mask, np.zeros_like(mask), np.zeros_like(mask)], [(0, 0, 139), (0, 0, 0), (0, 0, 0)]))
+    assert (colormap[mask] == (0, 0, 139)).all() and (colormap[~mask] == 255).all()

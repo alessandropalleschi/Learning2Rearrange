@@ -103,7 +103,7 @@ class Environment:
         serve the learning signals that need them (hindsight relabelling), never the policy."""
         color, depth, object_ids, position, rotation, intrinsics = self.camera.render()
         seg = self.perception.segment(color, depth, object_ids, self.scene)
-        rows = self.scene.target_pixels()
+        rows = self.scene.goal_paint()
         learned = not self.perception.is_ground_truth
         obs = build_observation((color, depth, seg.instances, position, rotation, intrinsics), seg.names, self.ws, rows,
                                 split_instances=learned)

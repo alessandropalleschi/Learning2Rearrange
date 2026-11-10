@@ -102,8 +102,13 @@ class Trainer(object):
         and where the cell is (row / column coordinates in -1..1; a convolution is otherwise blind to absolute position)."""
         if 'regions' not in obs:
             raise KeyError("region_channels need observations with 'regions' (re-record the demonstrations)")
-        for k, (low, high) in enumerate(np.asarray(obs['regions'])):
-            out[k, top + PAD + int(low):top + PAD + int(high) + 1, left:left + w] = 1.0  # rows of the un-padded map + the 4 px border
+        if 'goal_map' in obs:  # goal masks (any layout), placed on the un-padded window of the map
+            goal_map = np.asarray(obs['goal_map'])
+            for k in range(3):
+                out[k, top + PAD:top + PAD + goal_map.shape[0], left + PAD:left + PAD + goal_map.shape[1]] = goal_map == k + 1  # 4 px border: rows both sides, columns left
+        else:
+            for k, (low, high) in enumerate(np.asarray(obs['regions'])):
+                out[k, top + PAD + int(low):top + PAD + int(high) + 1, left:left + w] = 1.0  # rows of the un-padded map + the 4 px border
         out[3, top:top + h, left:left + w] = np.linspace(-1, 1, h, dtype=np.float32)[:, None]
         out[4, top:top + h, left:left + w] = np.linspace(-1, 1, w, dtype=np.float32)[None, :]
 

@@ -40,6 +40,8 @@ class ScriptedExpert:
             base = dataclasses.replace(base, push_lengths=tuple(push_lengths), hierarchy=False)
         self.cfg = base
         self.failures = {}  # object id -> failed grasps
+        self.cleared = {}  # object id -> times moved out of another grasp's way (ordering rule)
+        self.ordering = bool(getattr(env.cfg, 'expert_ordering', False))
         self.pushes = {}  # object id -> pushes made on it
 
     def object_at(self, pix):
@@ -53,7 +55,7 @@ class ScriptedExpert:
         env, scene = self.env, self.env.sim.scene
         idmap, found = env.obs['idmap'], []
         for object_id, (pos, _) in scene.poses().items():
-            if scene.in_target(pos[1], scene.names[object_id]):
+            if scene.in_target(pos[1], scene.names[object_id], pos[0]):
                 continue
             rows, cols = np.nonzero(idmap == object_id)
             if rows.size >= 6:  # visible enough to touch
@@ -80,7 +82,7 @@ class ScriptedExpert:
         """(primitive, pix) or None if the expert has nothing sensible to do. A push is (index, row, col) with index = direction * L +
         length index, or (direction, row, col, fraction of the length range) if the environment's push length is continuous."""
         choice = self._act()
-        if choice is None or choice[0] != 'push' or not self.continuous:
+        if choice is None or choice[0] != 'push' or not self.continuous or len(choice[1]) >= 5:
             return choice
         index, row, col = choice[1]
         lengths, (low, high) = self.cfg.push_lengths, self.env.cfg.push_length_range
@@ -94,6 +96,10 @@ class ScriptedExpert:
             return 'place', (0, int(row), int(col))
         misplaced = self._misplaced_visible()
         candidates = [c for c in misplaced if self.failures.get(c[1], 0) < self.MAX_FAILURES]
+        if candidates and self.ordering:
+            choice = self._ordered_choice(candidates)
+            if choice is not None:
+                return choice
         if candidates:
             _, object_id, row, col = candidates[0]
             if self._near_region(object_id):  # one push finishes it: no pick and place
@@ -111,13 +117,49 @@ class ScriptedExpert:
         action = self._expose_hidden(cfg)
         return action or self._push_blocker(cfg)
 
+    BLOCKED_CELLS = 30  # raised cells of other objects in a grasp corridor above which the target counts as blocked
+
+    def _corridor(self, row, col):
+        """(obstacle cells, approach angle) of the grasp at (row, col) with the approach the environment will use."""
+        from l2r.envs.approach import choose_approach, obstacles
+        if getattr(self.env.cfg, 'grasp_approach', 'straight') == 'clear':
+            approach, count = choose_approach(self.env.obs, (row, col))
+            return count, approach
+        return obstacles(self.env.obs, (row, col), 0.0), 0.0
+
+    def _ordered_choice(self, candidates):
+        """Ordering rule: the least blocked misplaced object first (front-most on ties); if even that one is blocked, first move the
+        object that blocks its corridor most (at most once per object), so that the grasp does not knock it over."""
+        from l2r.envs.approach import corridor_mask
+        scored = sorted(((self._corridor(row, col)[0], -x, object_id, row, col) for x, object_id, row, col in candidates))
+        cost, _, object_id, row, col = scored[0]
+        if self._near_region(object_id):
+            action = self._push_towards_target(object_id, self.cfg)
+            if action:
+                self.pushes[object_id] = self.pushes.get(object_id, 0) + 1
+                return action
+        if cost > self.BLOCKED_CELLS:
+            _, approach = self._corridor(row, col)
+            idmap = self.env.obs['idmap']
+            mask = corridor_mask(idmap.shape, (row, col), approach, 8)
+            ids, counts = np.unique(idmap[mask & (idmap != 0) & (idmap != object_id)], return_counts=True)
+            for blocker in ids[np.argsort(-counts)]:
+                blocker = int(blocker)
+                if self.cleared.get(blocker, 0) >= 1 or self.failures.get(blocker, 0) >= self.MAX_FAILURES:
+                    continue
+                cells = np.argwhere(idmap == blocker)
+                if len(cells) < 6:
+                    continue
+                self.cleared[blocker] = self.cleared.get(blocker, 0) + 1
+                b_row, b_col = self._aim_cell(cells[:, 0], cells[:, 1])
+                return 'grasp', (0, b_row, b_col)  # pick and place it (its goal, away from the misplaced objects' rows)
+        return 'grasp', (0, row, col)
+
     def _near_region(self, object_id):
         """True if the object lies outside its target region but within one push (NEAR_REGION m) of it, and was not pushed
         before (a push that did not work is followed by a grasp)."""
         scene = self.env.sim.scene
-        low, high = scene.regions[scene.class_name(object_id)]
-        y = scene.poses()[object_id][0][1]
-        distance = max(low - y, y - high, 0.0)
+        distance = scene.goal_distance(scene.poses()[object_id][0], scene.class_name(object_id))
         transfer = 0.95 if getattr(getattr(self.env.sim, 'params', None), 'pusher', 'tip') == 'paddle' else 0.5  # measured push transfer
         reach = transfer * max(max(self.cfg.push_lengths) - 0.015, 0.0)  # how far one (longest) push really moves an object
         return 0.0 < distance <= reach and self.pushes.get(object_id, 0) < 1
@@ -137,13 +179,21 @@ class ScriptedExpert:
         return None
 
     def _push_towards_target(self, object_id, cfg):
-        """Blade next to the object on the side away from its target region, moving towards the region."""
+        """Blade next to the object on the side away from its target region, moving towards the region. With goal slots
+        ('grid' layout): sideways when the object is level with its slot, towards the back (a heading push) when it stands right in
+        front of it, otherwise no push (pick and place)."""
         env, obs, scene = self.env, self.env.obs, self.env.sim.scene
         rows, cols = np.nonzero(obs['idmap'] == object_id)
         if rows.size == 0:
             return None
         low, high = scene.regions[scene.class_name(object_id)]
-        y = scene.poses()[object_id][0][1]
+        x, y = scene.poses()[object_id][0][:2]
+        if getattr(scene, 'layout', 'bands') != 'bands':
+            x0, x1, y0, y1 = scene.slots[scene.class_name(object_id)]
+            if not x0 <= x <= x1:
+                if y0 <= y <= y1 and x > x1:  # straight in front of its slot: push it towards the back
+                    return self._push_back(rows, cols, x - (x0 + x1) / 2)
+                return None
         direction = 1 if (low + high) / 2 > y else 0  # 1: towards +y, 0: towards -y
         transfer = 0.95 if getattr(getattr(env.sim, 'params', None), 'pusher', 'tip') == 'paddle' else 0.5  # measured (scripts/physics_sanity.py)
         index = direction * len(cfg.push_lengths) + self._length_index(y, low, high, direction, cfg.push_lengths, transfer)
@@ -155,6 +205,14 @@ class ScriptedExpert:
             if check_push(env.ws, obs['depthmap'], col, row, angle, length) and self._blade_touches(obs, row, col, direction, length):
                 return 'push', (index, row, col)
         return None
+
+    def _push_back(self, rows, cols, distance):
+        """Heading push towards the back (pi) from just in front of the object, long enough to move it `distance` m."""
+        transfer = 0.95 if getattr(getattr(self.env.sim, 'params', None), 'pusher', 'tip') == 'paddle' else 0.5
+        low, high = self.env.cfg.push_length_range
+        length = float(np.clip(distance / transfer + 0.015, low, high))
+        row, col = int(np.median(rows)), int(min(cols.max() + 3, self.env.obs['idmap'].shape[1] - 1))
+        return 'push', (0, row, col, (length - low) / (high - low), float(np.pi))
 
     @staticmethod
     def _length_index(y, low, high, direction, lengths, transfer=None):

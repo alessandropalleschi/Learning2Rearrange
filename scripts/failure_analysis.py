@@ -32,8 +32,9 @@ def scene_state(env):
     scene, obs = env.sim.scene, env.obs
     out = {}
     for object_id, (pos, _) in scene.poses().items():
-        low, high = scene.regions[scene.class_name(object_id)]
-        out[object_id] = (np.asarray(pos), bool(low <= pos[1] <= high), int((obs['idmap'] == object_id).sum()) >= VISIBLE_CELLS)
+        inside = scene.goal_distance(pos, scene.class_name(object_id)) == 0.0 if hasattr(scene, 'goal_distance') else \
+            scene.regions[scene.class_name(object_id)][0] <= pos[1] <= scene.regions[scene.class_name(object_id)][1]
+        out[object_id] = (np.asarray(pos), bool(inside), int((obs['idmap'] == object_id).sum()) >= VISIBLE_CELLS)
     return out
 
 

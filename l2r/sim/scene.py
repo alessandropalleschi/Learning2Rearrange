@@ -5,7 +5,7 @@ from copy import deepcopy
 import numpy as np
 
 from l2r.sim.constants import (BLOCK_HALF_EXTENTS, CLASSES, LABELS, MAX_OBJECTS_PER_CLASS, OBJECT_CATALOGUE,
-                               TARGET_COLORS, TARGET_ORDER, target_region_choices)
+                               TARGET_COLORS, TARGET_ORDER, goal_slot_choices, target_region_choices)
 
 WALL_THICKNESS = 0.2
 CEILING_THICKNESS = 0.05
@@ -20,7 +20,8 @@ class Scene:
         self.p, self.params, self.ws = p, params, workspace
         self.object_ids = []  # PyBullet ids of the movable objects
         self.names = {}  # object id -> 'class YcbName'
-        self.regions = {}  # class -> [y_min, y_max] (m) of its target region
+        self.regions = {}  # class -> [y_min, y_max] (m) of its target region ('bands' layout)
+        self.slots = {}  # class -> [x_min, x_max, y_min, y_max] (m) of its goal slot ('grid' layout)
         self.relabel_ids, self.relabel_classes = [], []  # filled by `relabel_candidates`
         # until the first reset: the first three candidate intervals, unshuffled
         self.regions = {key: list(interval) for key, interval in zip(TARGET_ORDER, target_region_choices(self.ws.bounds))}
@@ -43,9 +44,50 @@ class Scene:
         velocities = [self.p.getBaseVelocity(i) for i in self.object_ids]
         return all(np.linalg.norm(v[0]) < 1e-2 and np.linalg.norm(v[1]) < 1e-2 for v in velocities)
 
-    def in_target(self, y, name):
-        low, high = self.regions[self.class_of(name)]
-        return low <= y <= high
+    @property
+    def layout(self):
+        return getattr(self.params, 'goal_layout', 'bands')
+
+    def in_target(self, y, name, x=None):
+        """Is an object at (x, y) inside the goal of its class? ('bands': only y matters.)"""
+        key = self.class_of(name)
+        if self.layout == 'bands':
+            low, high = self.regions[key]
+            return low <= y <= high
+        x0, x1, y0, y1 = self.slots[key]
+        return x is not None and x0 <= x <= x1 and y0 <= y <= y1
+
+    def goal_distance(self, pos, key):
+        """Distance (m) of an object position to the goal of class `key` (0 inside)."""
+        if self.layout == 'bands':
+            low, high = self.regions[key]
+            return max(low - pos[1], pos[1] - high, 0.0)
+        x0, x1, y0, y1 = self.slots[key]
+        return float(np.hypot(max(x0 - pos[0], pos[0] - x1, 0.0), max(y0 - pos[1], pos[1] - y1, 0.0)))
+
+    def goal_masks(self):
+        """{class: (H, W) bool} goal cells on the heightmap grid (un-padded), for both layouts."""
+        shape = self.ws.heightmap_shape
+        out = {}
+        for key in TARGET_ORDER:
+            mask = np.zeros(shape, bool)
+            if self.layout == 'bands':
+                low, high = (self.ws.y_to_row(v) for v in self.regions[key])
+                mask[max(low, 0):max(high, 0), :] = True
+            else:
+                x0, x1, y0, y1 = self.slots[key]
+                r0, r1 = self.ws.y_to_row(y0), self.ws.y_to_row(y1)
+                c0, c1 = self.ws.x_to_col(x0), self.ws.x_to_col(x1)
+                mask[max(r0, 0):max(r1, 0), max(c0, 0):max(c1, 0)] = True
+            out[key] = mask
+        return out
+
+    def goal_paint(self):
+        """What the observation paints: the band rows (low, high, colours) for 'bands', else ('masks', masks, colours)."""
+        if self.layout == 'bands':
+            return self.target_pixels()
+        masks = self.goal_masks()
+        return ('masks', [masks[k] for k in TARGET_ORDER], [TARGET_COLORS[k] for k in TARGET_ORDER])
 
     def target_pixels(self):
         """Rows of the target regions in the heightmap: (lower rows, upper rows, colours), in TARGET_ORDER."""
@@ -86,9 +128,9 @@ class Scene:
         poses = self.poses()
         inside, distance = 0, []
         for object_id, (pos, _) in poses.items():
-            low, high = self.regions[self.class_name(object_id)]
-            inside += low <= pos[1] <= high
-            distance.append(max(low - pos[1], pos[1] - high, 0.0))
+            d = self.goal_distance(pos, self.class_name(object_id))
+            inside += d == 0.0
+            distance.append(d)
         return inside / len(poses), float(np.mean(distance))
 
     def positions(self):
@@ -99,7 +141,7 @@ class Scene:
         """Fraction of the objects inside the target region of their own class."""
         self.p.stepSimulation()
         poses = self.poses()
-        return sum(self.in_target(pos[1], self.names[i]) for i, (pos, _) in poses.items()) / len(poses)
+        return sum(self.in_target(pos[1], self.names[i], pos[0]) for i, (pos, _) in poses.items()) / len(poses)
 
     def relabel_candidates(self):
         """Hindsight relabelling support: returns the fraction of objects lying inside *some* target region and
@@ -107,9 +149,8 @@ class Scene:
         self.relabel_ids, self.relabel_classes = [], []
         poses = self.poses()
         for object_id, (pos, _) in poses.items():
-            for key in self.regions:
-                low, high = self.regions[key]
-                if low <= pos[1] <= high:
+            for key in TARGET_ORDER:
+                if self.goal_distance(pos, key) == 0.0:
                     self.relabel_ids.append(object_id)
                     self.relabel_classes.append(LABELS[key])
                     break
@@ -120,6 +161,11 @@ class Scene:
         """Assign the three target intervals to the classes in a random order."""
         shuffled = random.sample(target_region_choices(self.ws.bounds), 3)
         self.regions = {key: [shuffled[k][0], shuffled[k][1]] for k, key in enumerate(TARGET_ORDER)}
+        if self.layout == 'grid':  # three of the grid slots, one per class (random every episode)
+            slots = random.sample(goal_slot_choices(self.ws.bounds), 3)
+            self.slots = {key: list(slots[k]) for k, key in enumerate(TARGET_ORDER)}
+            # the band intervals stay defined (callers that only know bands get the slot's y-range)
+            self.regions = {key: [self.slots[key][2], self.slots[key][3]] for key in TARGET_ORDER}
 
     def build_cabinet(self):
         """Static walls: floor, back, left, right and ceiling."""

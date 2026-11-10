@@ -90,12 +90,31 @@ def extract_ghosts(obs):
     return [g[0] for g in found], height, [g[1] for g in found]
 
 
+def goal_geometry(obs):
+    """Per class (CLASSES order): (goal mask (h, w), distance (cells) of every cell to the goal, nearest goal cell row / col of every
+    cell), from the observation's 'goal_map' (any layout), or None for observations that only carry band rows."""
+    if 'goal_map' not in obs:
+        return None
+    goal_map = np.asarray(obs['goal_map'])
+    out = []
+    for k in range(len(CLASSES)):
+        mask = goal_map == k + 1
+        if mask.any():
+            distance, (near_r, near_c) = ndimage.distance_transform_edt(~mask, return_indices=True)
+        else:
+            distance = np.full(mask.shape, float(max(mask.shape)))
+            near_r, near_c = np.indices(mask.shape)
+        out.append((mask, distance, near_r, near_c))
+    return out
+
+
 def instance_features(instances, obs, height_map=None, ages=None):
     """(N, FEATURES) float32: class one-hot, position, extent, in-region flag and distance, height, occlusion; for ghosts (height_map and
     ages given) the remembered heights, the ghost flag and the age of the memory."""
     color, depth = crop(obs['colormap']).astype(int), (crop(obs['depthmap']) if height_map is None else height_map)
     h, w = depth.shape
     regions = np.asarray(obs['regions'], np.float32)  # (3, 2) rows, un-padded = cropped coordinates
+    goals = goal_geometry(obs)
     grey = np.abs(color - OCCLUDED_RGB).sum(-1) <= 6
     raised = depth > 0.008
     out = np.zeros((len(instances), FEATURES), np.float32)
@@ -112,8 +131,14 @@ def instance_features(instances, obs, height_map=None, ages=None):
         out[i, 7:9] = (2 * c.max() / (w - 1) - 1, 2 * c.min() / (w - 1) - 1)
         out[i, 9] = r.size / 400.0
         out[i, 10:12] = (depth[r, c].mean() / 0.2, depth[r, c].max() / 0.2)
-        out[i, 12] = float(low <= centre <= high)
-        out[i, 13:15] = ((centre - (low + high) / 2) / h * 4, distance / h * 4)
+        if goals is not None:  # goal masks: inside the own goal, offset (rows, cols) to its nearest cell
+            mask, _, near_r, near_c = goals[inst.cls]
+            cr, cc = int(np.clip(round(centre), 0, mask.shape[0] - 1)), int(np.clip(round(c.mean()), 0, mask.shape[1] - 1))
+            out[i, 12] = float(mask[cr, cc])
+            out[i, 13:15] = ((near_r[cr, cc] - cr) / h * 4, (near_c[cr, cc] - cc) / w * 4)
+        else:
+            out[i, 12] = float(low <= centre <= high)
+            out[i, 13:15] = ((centre - (low + high) / 2) / h * 4, distance / h * 4)
         out[i, 15] = back.mean() if back.size else 0.0
         out[i, 16] = ahead.mean() if ahead.size else 0.0
         out[i, 17] = 1.0  # a real token (padding rows are all zero)
@@ -140,12 +165,21 @@ def last_action_flags(inst, obs):
 
 
 def region_features(obs):
-    """(3, FEATURES) float32 tokens of the target regions: class one-hot, rows (normalised)."""
-    h = crop(obs['depthmap']).shape[0]
+    """(3, FEATURES) float32 tokens of the goal areas (CLASSES order): class one-hot and, from the goal masks, centroid (row, col), extent
+    (rows, cols) and the free share of the goal; observations that only carry band rows: the band's rows and height."""
+    h, w = crop(obs['depthmap']).shape
     out = np.zeros((len(CLASSES), FEATURES), np.float32)
+    goals = goal_geometry(obs)
+    raised = crop(obs['depthmap']) > 0.008
     for k, (low, high) in enumerate(np.asarray(obs['regions'], np.float32)):
         out[k, k] = 1.0
-        out[k, 3:6] = (2 * low / (h - 1) - 1, 2 * high / (h - 1) - 1, (high - low) / h * 4)
+        if goals is not None and goals[k][0].any():
+            rows, cols = np.nonzero(goals[k][0])
+            out[k, 3:5] = (2 * rows.mean() / (h - 1) - 1, 2 * cols.mean() / (w - 1) - 1)
+            out[k, 5:7] = ((rows.max() - rows.min() + 1) / h * 4, (cols.max() - cols.min() + 1) / w * 4)
+            out[k, 7] = 1.0 - raised[goals[k][0][:h, :w]].mean()
+        else:
+            out[k, 3:6] = (2 * low / (h - 1) - 1, 2 * high / (h - 1) - 1, (high - low) / h * 4)
         out[k, 17] = 1.0
     return out
 
@@ -248,6 +282,7 @@ def place_candidates(obs):
         rows, cols = rows[:MAX_PLACE], cols[:MAX_PLACE]
     cls = CLASSES.index({v: k for k, v in LABELS.items()}[int(obs['held_class'])])  # class-map label (1 / 3 / 5) -> CLASSES index
     low, high = np.asarray(obs['regions'], np.float32)[cls]
+    goals = goal_geometry(obs)
     raised = crop(obs['depthmap']) > 0.008
     distance = ndimage.distance_transform_edt(~raised) if raised.any() else np.full(raised.shape, float(h))
     density = ndimage.uniform_filter(free.astype(np.float32), size=7)
@@ -255,10 +290,17 @@ def place_candidates(obs):
     out[:, cls] = 1.0
     out[:, 3] = 2 * rows / (h - 1) - 1
     out[:, 4] = 2 * cols / (w - 1) - 1
-    out[:, 5] = (rows >= low) & (rows <= high)
-    centre = (low + high) / 2
-    out[:, 6] = (rows - centre) / h * 4
-    out[:, 7] = np.maximum(np.maximum(low - rows, rows - high), 0) / h * 4
+    if goals is not None and goals[cls][0].any():  # goal masks: inside the held object's goal, offset to its centre, distance
+        mask, distance, _, _ = goals[cls]
+        g_rows, g_cols = np.nonzero(mask)
+        out[:, 5] = mask[rows, cols]
+        out[:, 6] = (rows - g_rows.mean()) / h * 4
+        out[:, 7] = distance[rows, cols] / h * 4
+    else:
+        out[:, 5] = (rows >= low) & (rows <= high)
+        centre = (low + high) / 2
+        out[:, 6] = (rows - centre) / h * 4
+        out[:, 7] = np.maximum(np.maximum(low - rows, rows - high), 0) / h * 4
     out[:, 8] = cols / w
     out[:, 9] = density[rows, cols]
     out[:, 10] = np.minimum(distance[rows, cols], 20) / 20.0

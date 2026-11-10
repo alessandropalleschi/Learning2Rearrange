@@ -46,6 +46,10 @@ class Workspace:
         b = self.bounds
         return [px * self.pixel_size + b[0][0], py * self.pixel_size + b[1][0]]
 
+    def x_to_col(self, x):
+        """Workspace x (m) -> heightmap column."""
+        return int(np.round((x - self.bounds[0, 0]) / self.pixel_size))
+
     def y_to_row(self, y):
         """Workspace y (m) -> heightmap row."""
         return int(np.round((y - self.bounds[1, 0]) / self.pixel_size))

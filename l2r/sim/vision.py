@@ -56,6 +56,11 @@ def top_down_maps(points, colors, ws, target_rows):
     heightmap[heightmap < 0.008] = 0  # floor noise
     for c in range(colors.shape[-1]):
         colormap[py, px, c] = colors[:, c]
+    if target_rows and target_rows[0] == 'masks':  # goal masks (any layout): paint the free cells of each goal
+        for mask, rgb in zip(target_rows[1], target_rows[2]):
+            free = mask[:height, :width] & np.all(colormap == 255, axis=-1)
+            colormap[free] = rgb
+        return heightmap, colormap
     for low, high, rgb in zip(*target_rows):
         region = colormap[low:high, :width]
         region[np.all(region == 255, axis=-1)] = rgb
@@ -122,7 +127,8 @@ def object_maps(points, objects, object_names, ws, target_rows, split=False):
     origin = {}
     if split:
         top, origin = split_components(top)
-    low, high = target_rows[0], target_rows[1]
+    masks = target_rows[1] if target_rows and target_rows[0] == 'masks' else None
+    low, high = (None, None) if masks is not None else (target_rows[0], target_rows[1])
     for uid in np.unique(top[top != 0]):
         cells = top == uid
         name = object_names[origin.get(uid, uid)].split(' ')[0]
@@ -130,7 +136,11 @@ def object_maps(points, objects, object_names, ws, target_rows, split=False):
         centroid = int(rows.sum() / rows.size)  # centroid row of the visible part
         k = TARGET_ORDER.index(name)
         id_map[cells], class_map[cells], binary[cells] = uid, LABELS[name], 1
-        if low[k] <= centroid <= high[k]:
+        if masks is not None:
+            cols = np.nonzero(cells)[1]
+            if masks[k][centroid, int(cols.sum() / cols.size)]:
+                on_target[cells] = -1
+        elif low[k] <= centroid <= high[k]:
             on_target[cells] = -1
     return id_map, class_map, binary, on_target, origin
 

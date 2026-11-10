@@ -24,6 +24,14 @@ def class_rgb255(name):
     return np.multiply(COLORS[name][:3], 255)
 
 
+def goal_slot_choices(bounds, grid=(2, 3), margin=0.01):
+    """Rectangular goal slots for `--goal_layout grid`: the cabinet floor split into grid[0] (depth, x) x grid[1] (width, y) cells;
+    returns [[x_min, x_max, y_min, y_max], ...] (m). Three of them are assigned to the classes per episode."""
+    (x0, x1), (y0, y1) = bounds[0], bounds[1]
+    xs, ys = np.linspace(x0, x1, grid[0] + 1), np.linspace(y0, y1, grid[1] + 1)
+    return [[xs[i] + margin, xs[i + 1] - margin, ys[j] + margin, ys[j + 1] - margin] for i in range(grid[0]) for j in range(grid[1])]
+
+
 def target_region_choices(bounds):
     """Candidate y-intervals (m) of the three target regions; they are randomly assigned to the classes."""
     y_min, y_max = bounds[1][0], bounds[1][1]

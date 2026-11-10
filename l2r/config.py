@@ -98,6 +98,7 @@ class Config:
     #     (conditioned on the class of the held object, restricted to free cells) ---
     placement: str = 'heuristic'
     place_corridor: bool = False  # heuristic placement: prefer cells whose straight-in corridor has no other object (env/expert)
+    expert_ordering: bool = False  # scripted expert: least blocked target first, clear the blocker of a blocked grasp first
     grasp_approach: str = 'straight'  # 'straight' (original) | 'clear': the env picks the approach line with the fewest obstacles
     placement_space: str = 'depth'  # with footprint_placement: 'depth' = keep the back wall clear (original); 'region' = fit the whole
                                      # footprint and offer only cells inside the object's own target region
@@ -149,7 +150,7 @@ class Config:
                    max_actions=get('max_actions', defaults.max_actions), batch_size=get('batch_size', defaults.batch_size), belief=get('belief', 'none'),
                    placement=get('placement', 'heuristic'), eps_decay=get('eps_decay', defaults.eps_decay),
                    push_lengths=tuple(get('push_lengths', defaults.push_lengths)),
-                   footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), grasp_approach=get('grasp_approach', 'straight'), place_corridor=get('place_corridor', False), backbone=get('backbone', 'conv'),
+                   footprint_placement=get('footprint_placement', False), placement_space=get('placement_space', 'depth'), grasp_approach=get('grasp_approach', 'straight'), expert_ordering=get('expert_ordering', False), place_corridor=get('place_corridor', False), backbone=get('backbone', 'conv'),
                    end_effector=get('end_effector', 'suction'), jaw_yaws=get('jaw_yaws', defaults.jaw_yaws),
                    hierarchy=get('hierarchy', False), agent=get('agent', 'dense'), arch_decoder=get('arch_decoder', 'plain'), arch_encoder=get('arch_encoder', 'resnet'), policy_topk=get('policy_topk', 10), arch_skips=get('arch_skips', False), arch_stride4=get('arch_stride4', False),
                    region_channels=get('region_channels', False), equiv_targets=get('equiv_targets', False),
@@ -235,6 +236,8 @@ class Config:
         parser.add_argument('--eps_end', type=float, default=0.01, help='floor of the epsilon-greedy exploration')
         parser.add_argument('--place_corridor', action='store_true', default=False,
                             help='heuristic placement: prefer cells whose carry-in corridor is free of other objects')
+        parser.add_argument('--expert_ordering', action='store_true', default=False,
+                            help='scripted expert: least blocked target first; clear the main blocker of a blocked grasp first')
         parser.add_argument('--grasp_approach', choices=['straight', 'clear'], default='straight',
                             help="grasp approach line: straight in (original) or the clearest of several angles in the height map")
         parser.add_argument('--placement_space', choices=['depth', 'region'], default='depth',
@@ -330,6 +333,7 @@ class SimParams:
 
     # end effector: the suction cup (default) or a parallel-jaw gripper (`--end_effector gripper`)
     end_effector: str = 'suction'
+    goal_layout: str = 'bands'              # 'bands' (paper: three bands across the width) | 'grid' (3 of 2 x 3 rectangular slots)
     pusher: str = 'tip'                     # 'tip' (the tool's own 2.6 cm tip, original) | 'paddle' (T-shaped plate during pushes)
 
     # domain randomisation (applied at every reset)
@@ -371,6 +375,7 @@ class SimParams:
         params.perception = getattr(args, 'perception', 'gt')
         params.end_effector = getattr(args, 'end_effector', 'suction')
         params.pusher = getattr(args, 'pusher', 'tip')
+        params.goal_layout = getattr(args, 'goal_layout', 'bands')
         params.perception_weights = getattr(args, 'perception_weights', params.perception_weights)
         params.object_types = tuple(getattr(args, 'object_types', None) or ()) or None
         return params
@@ -389,6 +394,8 @@ class SimParams:
                             help="object masks: PyBullet ground truth, or a trained segmentation network (train_perception.py)")
         parser.add_argument('--object_types', nargs='+', default=None, help='YCB types of the episodes (>= 3), e.g. to hold one out')
         parser.add_argument('--perception_weights', default='assets/perception/segnet.pth', help='weights of the network')
+        parser.add_argument('--goal_layout', choices=['bands', 'grid'], default='bands',
+                            help='target areas: bands across the cabinet width (paper) or rectangular slots of a 2 x 3 grid')
         parser.add_argument('--pusher', choices=['tip', 'paddle'], default='tip',
                             help='pushing geometry: the tool tip (original) or a T-shaped paddle fixed to the tool during pushes')
         parser.add_argument('--end_effector', choices=['suction', 'gripper'], default='suction',

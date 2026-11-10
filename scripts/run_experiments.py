@@ -66,7 +66,6 @@ def run_one(name, flags, seed, args):
         print('skip (done):', name, 'seed', seed)
         return result
     logs = os.path.relpath(directory, os.path.join(ROOT, 'logs'))  # train.py / evaluate.py write below logs/
-    snapshot = os.path.join(directory, 'models', 'snapshot.pth')
     common = [sys.executable]
     train = common + ['train.py', '--logging_directory', logs, '--random_seed', str(seed), '--num_envs', str(args.num_envs),
                       '--max_obj', str(args.max_obj), '--num_obj', str(args.num_obj), '--max_iterations', str(args.steps),
