@@ -15,7 +15,8 @@ class Config:
     #     F = gamma * phi(s') - phi(s), which leaves the optimal policy unchanged: phi = scale * (sorted fraction - 1) or
     #     -scale * mean distance of the objects to their target region (relative to the cabinet width). 'noop' adds a
     #     penalty to actions that moved no object (>= 5 mm). ---
-    reward_mode: str = 'progress'  # 'sparse' (paper) | 'progress' (default: potential-based shaping) | 'distance' | 'noop'
+    reward_mode: str = 'progress'  # 'sparse' (paper) | 'progress' (default: potential-based shaping) | 'distance' | 'noop' |
+                                   # 'combined' (progress + distance potential, plus the no-op penalty)
     reward_shaping_scale: float = 1.0
     noop_penalty: float = 1.0
 
@@ -164,7 +165,7 @@ class Config:
                                  'length (actor-critic) and the pixel are chosen')
         parser.add_argument('--push_length_range', type=float, nargs=2, default=[0.03, 0.15], metavar=('MIN', 'MAX'),
                             help='continuous push length range in m (with --hierarchy)')
-        parser.add_argument('--reward_mode', choices=['sparse', 'progress', 'distance', 'noop'], default='progress',
+        parser.add_argument('--reward_mode', choices=['sparse', 'progress', 'distance', 'noop', 'combined'], default='progress',
                             help="reward: the paper's sparse one, potential-based shaping by sorted fraction ('progress') or by "
                                  "distance to the target region ('distance'), or sparse + a penalty for actions that move nothing")
         parser.add_argument('--reward_scale', type=float, default=1.0, help='scale of the shaping potential')
@@ -220,9 +221,10 @@ class Config:
     @property
     def q_range(self):
         """(min, max) of the action values: rewards are bounded, and potential-based shaping shifts Q by -phi(s) <= scale."""
-        shaped = self.reward_mode in ('progress', 'distance')
-        low = (self.reward_invalid - (self.noop_penalty if self.reward_mode == 'noop' else 0.0)) / (1.0 - self.gamma)
-        return low, self.reward_goal + (self.reward_shaping_scale if shaped else 0.0)
+        shift = {'progress': 1.0, 'distance': 1.0, 'combined': 2.0}.get(self.reward_mode, 0.0) * self.reward_shaping_scale
+        noop = self.noop_penalty if self.reward_mode in ('noop', 'combined') else 0.0
+        low = (self.reward_invalid - noop) / (1.0 - self.gamma)
+        return low, self.reward_goal + shift
 
     @property
     def decoder(self):

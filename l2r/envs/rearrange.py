@@ -254,23 +254,26 @@ class RearrangeEnv:
     def _potential(self):
         """Shaping potential phi(s) of the current scene (0 for the sparse reward); 0 at a goal state."""
         cfg = self.cfg
-        if cfg.reward_mode not in ('progress', 'distance'):
+        if cfg.reward_mode not in ('progress', 'distance', 'combined'):
             return 0.0
         fraction, distance = self.sim.scene.progress()
+        width = float(self.ws.bounds[1][1] - self.ws.bounds[1][0])
         if cfg.reward_mode == 'progress':
             return cfg.reward_shaping_scale * (fraction - 1.0)
-        return -cfg.reward_shaping_scale * distance / float(self.ws.bounds[1][1] - self.ws.bounds[1][0])
+        if cfg.reward_mode == 'distance':
+            return -cfg.reward_shaping_scale * distance / width
+        return cfg.reward_shaping_scale * ((fraction - 1.0) - distance / width)  # combined: placements and partial progress
 
     def _shaped(self, reward, terminated, valid):
         """Add the reward variant's extra term to the sparse reward; returns (reward, extra term)."""
         cfg, extra = self.cfg, 0.0
-        if cfg.reward_mode in ('progress', 'distance'):
+        if cfg.reward_mode in ('progress', 'distance', 'combined'):
             phi_next = self._potential() if (valid and not terminated) else 0.0  # absorbing states have potential 0
             extra = cfg.gamma * phi_next - self._phi
             self._phi = phi_next
-        elif cfg.reward_mode == 'noop' and not terminated:
+        if cfg.reward_mode in ('noop', 'combined') and not terminated:
             moved = np.abs(self.sim.scene.positions() - self._positions).max() if len(self._positions) else 0.0
-            extra = -cfg.noop_penalty if moved < 0.005 else 0.0
+            extra += -cfg.noop_penalty if moved < 0.005 else 0.0
         return reward + extra, extra
 
     # ------------------------------------------------------------------ observations

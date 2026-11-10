@@ -121,7 +121,7 @@ def run_fake_episode(**cfg_kwargs):
     return cfg, np.array(rewards), np.array(shaping), relabels
 
 
-@pytest.mark.parametrize('mode,phi0', [('progress', -1.0), ('distance', -0.2 / 0.6)])
+@pytest.mark.parametrize('mode,phi0', [('progress', -1.0), ('distance', -0.2 / 0.6), ('combined', -1.0 - 0.2 / 0.6)])
 def test_potential_based_shaping_keeps_the_discounted_return_up_to_the_initial_potential(fake_simulator, mode, phi0):
     """sum_t gamma^t (r_t + gamma phi(s_t+1) - phi(s_t)) = sum_t gamma^t r_t - phi(s_0) for an absorbing goal (phi = 0):
     the shaped return differs from the sparse one by a constant, so the optimal policy is the same."""
@@ -147,6 +147,14 @@ def test_relabelling_still_triggers_with_shaped_rewards_and_the_value_range_foll
     assert Config(reward_mode='sparse').q_range == pytest.approx((-100.0, 0.0))
     assert Config(reward_mode='progress', reward_shaping_scale=2.0).q_range == pytest.approx((-100.0, 2.0))
     assert Config(reward_mode='noop', noop_penalty=1.0).q_range[0] == pytest.approx(-110.0)
+    assert Config(reward_mode='combined', reward_shaping_scale=3.0, noop_penalty=0.5).q_range == pytest.approx((-105.0, 6.0))
+
+
+def test_combined_reward_adds_the_noop_penalty_to_the_potential_shaping(fake_simulator, monkeypatch):
+    monkeypatch.setattr(FakeSim, '_positions', lambda self: np.zeros((1, 3)))  # nothing ever moves
+    _, _, with_noop, _ = run_fake_episode(reward_mode='combined', noop_penalty=0.5)
+    _, _, potential_only, _ = run_fake_episode(reward_mode='combined', noop_penalty=0.0)
+    assert np.allclose(with_noop - potential_only, [-0.5, -0.5, 0.0])
 
 
 def test_curriculum_advances_after_a_greedy_validation(fake_simulator, tmp_path, monkeypatch, capsys):
