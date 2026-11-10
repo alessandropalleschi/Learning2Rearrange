@@ -217,9 +217,11 @@ flowchart LR
 | memory | `--belief recurrent` | ConvGRU at the bottleneck, from the encoded observation and the last action |
 
 ![dense Q-maps](docs/figures/qmaps_dense.png)
-*Q-maps of the dense U-Net + ConvNeXt agent (RL with the curriculum, 5,000 steps, still training) on one scene: pick values on the
-front-face cells, push values for both directions (best of the three lengths), and place values while an object is held. Grey cells are
-masked out.*
+*Q-maps of the dense U-Net + ConvNeXt agent (RL with the curriculum, 5,000 steps, still training) on one scene with five objects.
+Q-values are shown only on feasible cells: pick on the objects' front faces, push from cells whose blade path meets an object (best of
+the three lengths per cell; the arrow is the greedy push and its length), place on the free cells the held object fits in. The coloured
+bars on the left are the target regions; light grey is occluded. The greedy action pushes the blue object standing in the yellow region
+up into the blue one.*
 
 The context modules start as the identity (zero-initialised residual output). Which combination works best is measured in
 [Status and results](#status-and-results): the U-Net decoder with the ConvNeXt encoder (`--arch_skips --arch_encoder convnext`).
@@ -248,8 +250,10 @@ flowchart LR
 ```
 
 ![object-centric agent](docs/figures/qmaps_object.png)
-*The object-centric agent (RL, 8,000 steps, still training) on the same scene: extracted object tokens and a ghost token from the
-belief, the value of each object's skills, and the values of the place candidates while an object is held.*
+*The object-centric agent (RL, 8,000 steps, still training) on the same scene: the object tokens it extracts (numbered) and a ghost
+token for a remembered, now hidden object (dashed); the Q-value of each skill on each object (n/a: infeasible, e.g. no room for the
+blade); and the values of the place candidates while an object is held. It makes the same choice as the dense agent: push object 3 up,
+with its own continuous length.*
 
 * **Fixed or continuous push length.** Without `--hierarchy` every (direction, length) is a slot. With `--hierarchy` an actor proposes
   a length per object and direction, and a length-conditioned critic (Fourier features of the length) scores it. RL trains the actor
