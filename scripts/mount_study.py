@@ -41,6 +41,13 @@ class Probe:
     def dexterity(self, q):
         return float(np.linalg.svd(self.k.jacobian(q)[:3], compute_uv=False)[-1])
 
+    def facing(self, q):
+        """The arm faces the cabinet: the elbow between the shoulder and the cabinet (smaller x) and above the shoulder."""
+        self.d.qpos[self.k.qadr] = q
+        mujoco.mj_kinematics(self.m, self.d)
+        shoulder, elbow = (self.d.xpos[self.m.body(n).id] for n in ('upper_arm_link', 'forearm_link'))
+        return bool(elbow[0] < shoulder[0] - 0.05 and elbow[2] > shoulder[2] + 0.1)
+
     def elbow_up(self, q):
         self.d.qpos[self.k.qadr] = q
         mujoco.mj_kinematics(self.m, self.d)
@@ -49,7 +56,7 @@ class Probe:
         return float(el[2] - (sh + t * (wr - sh))[2])
 
 
-def candidate_homes(kin, probe, stage, rot, rng, starts=200):
+def candidate_homes(kin, probe, stage, rot, rng, starts=200, facing=False):
     """Distinct collision-free solutions of the staging pose (slide centred), the PyBullet home posture among the seeds."""
     seeds = [np.array([0, 1, -1, 0.5, 0.5, 0.5, 1]) * np.pi]
     seeds = [s[-len(kin.low):] for s in seeds]
@@ -62,6 +69,8 @@ def candidate_homes(kin, probe, stage, rot, rng, starts=200):
             q0[0] = 0.0
         q, ok = kin.solve(q0, stage, rot)
         if not ok or not probe.free(q) or (first and abs(q[0]) > 0.05):
+            continue
+        if facing and not probe.facing(q):
             continue
         q = np.concatenate([q[:first], (q[first:] + np.pi) % (2 * np.pi) - np.pi])
         if all(np.abs(q - other).max() > 0.3 for other in found):
@@ -91,12 +100,12 @@ def reach(kin, probe, home, lines):
     return reached / max(len(lines), 1), dexterity, stray
 
 
-def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L'):
+def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L', facing=False, stage_margin=0.1):
     model = world_spec(ws, tool=ToolGeometry(shape=shape, blade=blade), base=base, slide=slide).compile()
     kin = Kinematics(model)
     probe = Probe(model, kin)
     b, floor = ws.bounds, ws.bounds[2][0]
-    front = b[0][1] + 0.1
+    front = b[0][1] + stage_margin
     lines = []
     xs = np.linspace(b[0][0] + 0.06, b[0][1] - 0.06, 5)
     ys = np.linspace(b[1][0] + 0.06, b[1][1] - 0.06, 5)
@@ -107,7 +116,7 @@ def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L'):
         if b[1][0] + 0.02 <= crossing <= b[1][1] - 0.02:  # lines that do not pass the opening are out for any tool
             target = np.array([x, y, floor + 0.05])
             lines.append((target - direction * ((front - x) / -direction[0]), target, rot))
-    homes = candidate_homes(kin, probe, np.array([front, 0.0, floor + 0.05]), horizontal(0.0), rng)
+    homes = candidate_homes(kin, probe, np.array([front, 0.0, floor + 0.05]), horizontal(0.0), rng, facing=facing)
     if not homes:
         return None
     coarse = lines[::7]  # pick the home that reaches the most of a subset, then evaluate it on all lines
@@ -122,6 +131,8 @@ def evaluate(base, ws, rng, blade=0.75, slide=True, shape='L'):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--x', type=float, nargs='+', default=[0.6, 0.9, 1.1, 1.3, 1.5])
+    parser.add_argument('--facing', action='store_true', help='only homes with the arm facing the cabinet (elbow up, in front)')
+    parser.add_argument('--stage_margin', type=float, default=0.1, help='staging: the tip this far in front of the cabinet (m)')
     parser.add_argument('--shape', choices=['L', 'straight'], default='L')
     parser.add_argument('--no_slide', action='store_true', help='a fixed base (no lateral slide)')
     parser.add_argument('--blade', type=float, nargs='+', default=[0.75], help='blade length (m)')
@@ -130,7 +141,7 @@ def main():
     args = parser.parse_args()
     ws = Workspace.from_params(SimParams())
     for blade, x, y, z in itertools.product(args.blade, args.x, args.y, args.z):
-        out = evaluate((x, y, z), ws, np.random.default_rng(0), blade, not args.no_slide, args.shape)
+        out = evaluate((x, y, z), ws, np.random.default_rng(0), blade, not args.no_slide, args.shape, args.facing, args.stage_margin)
         if out is None:
             print(args.shape + ' blade %.2f base x %.2f y %.2f z %.2f: no home posture' % (blade, x, y, z), flush=True)
             continue
