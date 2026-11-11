@@ -343,7 +343,9 @@ def record_episodes(env, episodes, num_objects, seed=0, max_steps=40, log=print)
 
 def save_demos(path, transitions, stats):
     with open(path, 'wb') as f:
-        pickle.dump({'transitions': [tuple(t) for t in transitions], 'stats': stats}, f, protocol=4)
+        strip = lambda o: {k: v for k, v in o.items() if k != '_object_state'} if isinstance(o, dict) else o  # the agent's cache
+        rows = [tuple(strip(v) for v in t) for t in transitions]
+        pickle.dump({'transitions': rows, 'stats': stats}, f, protocol=4)
 
 
 def adapt_demos(transitions, cfg):

@@ -1,7 +1,5 @@
 """Trainer of the object-centric Q-function (double DQN over object-action slots). Drop-in for `Trainer`: same interface, the dense Q-maps
 it returns have values only at the candidate pixels of the visible objects (see `object_centric`)."""
-from collections import OrderedDict
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -11,7 +9,7 @@ from l2r.learning.object_centric import (ObjectQNet, ObjectQNetContinuous, build
                                          slot_of)
 from l2r.learning.trainer import QMaps, Trainer
 
-CACHE_SIZE = 2048  # extracted states kept (the replay buffer re-uses observations many times)
+STATE_KEY = '_object_state'  # where an observation keeps its extracted state (see ObjectTrainer.info)
 
 
 class ObjectTrainer(Trainer):
@@ -50,18 +48,22 @@ class ObjectTrainer(Trainer):
         else:
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.learning_rate, weight_decay=self.cfg.weight_decay)
         self.scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, self.cfg.lr_decay)
-        self._cache = OrderedDict()
 
     # ------------------------------------------------------------------ state extraction
     def info(self, obs):
-        """`build_state` of an observation, cached by object identity (the cache keeps the observation alive: ids are not re-used)."""
-        key = id(obs)
-        if key in self._cache:
-            return self._cache[key][1]
-        state = build_state(obs, self.push_lengths_px[:1] if self.continuous else self.push_lengths_px, pull=self.pull)
-        self._cache[key] = (obs, state)
-        if len(self._cache) > CACHE_SIZE:
-            self._cache.popitem(last=False)
+        """`build_state` of an observation, built once and kept in the observation itself (key STATE_KEY) for as long as the
+        observation lives (in the replay buffer: every replayed sample used to rebuild it once it fell out of a small cache, about
+        70% of the learner's time). The stored state is tagged with the slot layout and the identity of the colour / depth maps it
+        was built from: a copy with recoloured maps (hindsight relabelling) gets its own."""
+        pull = self.pull
+        lengths = tuple(self.push_lengths_px[:1] if self.continuous else self.push_lengths_px)
+        tag = (lengths, pull, id(obs.get('colormap')), id(obs.get('depthmap')), id(obs.get('history')))
+        stored = obs.get(STATE_KEY) if isinstance(obs, dict) else None
+        if stored is not None and stored[0] == tag:
+            return stored[1]
+        state = build_state(obs, list(lengths), pull=pull)
+        if isinstance(obs, dict):
+            obs[STATE_KEY] = (tag, state)
         return state
 
     # ------------------------------------------------------------------ acting
