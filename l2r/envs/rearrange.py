@@ -327,7 +327,7 @@ class RearrangeEnv:
                 'place_pix': place_pix, 'relabel': bool(relabel), 'episode_return': self.episode_return,
                 **({'relabel_reward': relabel_reward} if relabel_reward is not None else {}),
                 'actions': self.actions, 'phase': 'act', 'force_stops': sim.force_stops - stops_before,
-                'shaping': shaping}
+                'shaping': shaping, 'refused': bool(getattr(sim, 'last_refused', False))}
         self.obs = next_obs
         # a terminal step returns the previous observation: the outcome record compares with what the scene looks like now
         self._record_last(prim, pix, executed, obs, sim.observe() if terminated else next_obs, invalid=not valid)

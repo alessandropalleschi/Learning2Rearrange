@@ -144,6 +144,7 @@ class NativeEnvironment(Environment):
         self.suction = self.tool = Suction()
         self.kin = self.ctl = None
         self._force_stops, self._force_events = 0, []
+        self.last_refused = False  # the last primitive was refused before the robot moved (infeasible), see `info['refused']`
 
     # ------------------------------------------------------------------ episode
     def reset(self):
@@ -255,6 +256,7 @@ class NativeEnvironment(Environment):
 
     # ------------------------------------------------------------------ primitives
     def push(self, xy, angle=0.0, push_length=0.08, speed=0.01, heading=None):
+        self.last_refused = False
         b = self.ws.bounds
         start = np.array([xy[0], xy[1], b[2][0] + PUSH_HEIGHT])
         if heading is None:
@@ -274,6 +276,12 @@ class NativeEnvironment(Environment):
         if entry is None or not self._go(entry, rotation):
             log.debug('push %s: %s', np.round(start, 3), 'no line through the opening' if entry is None else 'no joint move to the entry')
             self._home()
+            self.last_refused = True
+            return False
+        if self.ctl.plan_line(start, rotation, collision_free=self._free_now) is None:
+            log.debug('push %s: the approach line is not collision free', np.round(start, 3))
+            self._home()
+            self.last_refused = True
             return False
         approached = self._line(start, rotation, SPEED)
         pushed = approached.reached and self._line(end, rotation, PUSH_SPEED).reached
@@ -288,10 +296,17 @@ class NativeEnvironment(Environment):
         entry = self._line_start(target, approach)
         if entry is None:
             log.debug('attach %s: the approach line does not pass the opening', np.round(target, 3))
+            self.last_refused = True
             return None
         if not self._go(entry, rotation):
             log.debug('attach %s: no collision-free joint move to the entry point', np.round(target, 3))
             self._home()
+            self.last_refused = True
+            return None
+        if self.ctl.plan_line(target, rotation, collision_free=self._free_now) is None:
+            log.debug('attach %s: the approach line is not collision free', np.round(target, 3))
+            self._home()
+            self.last_refused = True
             return None
         tool = self.tool
         tool.release()
@@ -310,6 +325,7 @@ class NativeEnvironment(Environment):
         return tool.activated, rotation, entry
 
     def pick(self, xy, speed=0.01, yaw=0.0, approach=0.0, height=None):
+        self.last_refused = False
         result = self._attach(xy, approach, height)
         if result is None:
             return False
@@ -332,6 +348,7 @@ class NativeEnvironment(Environment):
         return bool(held) and self.scene.is_valid(ignore=(self.tool.grip_body,) if held else ())
 
     def pull(self, xy, approach=0.0, heading=0.0, distance=0.08, speed=0.01, height=None):
+        self.last_refused = False
         b = self.ws.bounds
         result = self._attach(xy, approach, height)
         if result is None:
@@ -350,31 +367,54 @@ class NativeEnvironment(Environment):
         return bool(attached and dragged) and self.scene.is_valid()
 
     def place(self, xy, speed=0.01):
-        """Put the held object at `xy`; if that point cannot be reached, at the nearest reachable point on the same line, up to
-        12 cm shallower (the object is never dropped outside the cabinet when a point inside is reachable)."""
+        """Put the held object at `xy`. If that point cannot be reached (deep near a side wall the wrist would hit the wall),
+        at the nearest reachable point that is shallower and / or further from the side wall (up to 12 cm and 9 cm: the target
+        regions are bands along y, so a shift away from the wall keeps it in its region); never dropped outside the cabinet when
+        a point inside is reachable. Executed (True) only at the requested point."""
+        self.last_refused = False
         b, tool = self.ws.bounds, self.tool
         offset = tool.offset if tool.offset is not None else np.zeros(3)
         rotation = horizontal(0.0)
-        placed = False
         carry_z = self.ctl.tip()[0][2]  # in at the carry height (the object clear of the floor), lowered at the end
-        for shallower in (0.0, 0.03, 0.06, 0.09, 0.12):
-            position = np.array([xy[0] - offset[0] + shallower, xy[1] - offset[1], carry_z])
+        inward = -np.sign(xy[1]) if abs(xy[1]) > 1e-6 else 1.0  # away from the nearer side wall
+        shifts = sorted(((dx, dy) for dx in (0.0, 0.03, 0.06, 0.09, 0.12) for dy in (0.0, 0.03, 0.06, 0.09)),
+                        key=lambda shift: np.hypot(*shift))
+        placed, done = False, False
+        for dx, dy in shifts:
+            position = np.array([xy[0] - offset[0] + dx, xy[1] - offset[1] + inward * dy, carry_z])
+            if position[0] > b[0][1] - 0.02:
+                continue
             entry = self._line_start(position, 0.0)
-            if entry is None or position[0] > b[0][1] - 0.02:
-                break
-            plan_in = None
-            if self._go(entry, rotation):
-                plan_in = self.ctl.plan_line(position, rotation, collision_free=self._free_now)
-            if plan_in is not None:
-                placed = self._line(position, rotation, SPEED).reached and shallower == 0.0
-                down = position - np.array([0, 0, LIFT - 0.005])  # set it down (5 mm above where it was grasped)
-                self._line(down, rotation, PUSH_SPEED, force=False)
-                break
-            log.debug('place %s: unreachable, trying %.2f m shallower', np.round(position, 3), shallower + 0.03)
+            if entry is None:
+                continue
+            if self.ctl.plan_line(position, rotation, collision_free=self._free_now) is None and \
+                    not self._reachable_from_entry(entry, position, rotation):
+                continue
+            if not self._go(entry, rotation):
+                continue
+            if self.ctl.plan_line(position, rotation, collision_free=self._free_now) is None:
+                continue
+            placed = self._line(position, rotation, SPEED).reached and dx == 0.0 and dy == 0.0
+            self._line(position - np.array([0, 0, LIFT - 0.005]), rotation, PUSH_SPEED, force=False)  # set it down
+            done = True
+            if dx or dy:
+                log.debug('place %s: put %.2f m shallower, %.2f m from the wall', np.round(xy, 3), dx, dy)
+            break
+        if not done:
+            log.debug('place %s: no reachable point nearby', np.round(xy, 3))
+            self.last_refused = True
         tool.release()
         self.ctl.hold(SETTLE_TICKS)
         self._leave(rotation)
         return bool(placed) and self.scene.is_valid()
+
+    def _reachable_from_entry(self, entry, position, rotation):
+        """Cheap test before moving: the IK of the entry and of the end point exist and are collision free (with the object)."""
+        for point in (entry, position):
+            q, ok = self.kin.solve(self.ctl.measured(), point, rotation)
+            if not ok or not self._free_now(q):
+                return False
+        return True
 
     def holds(self):
         """The cup still holds its object (the weld has not let go)."""

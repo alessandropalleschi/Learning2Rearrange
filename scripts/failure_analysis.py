@@ -38,8 +38,9 @@ def scene_state(env):
     return out
 
 
-def run_episode(env, seed, obs, act):
-    """One episode from the (already reset) observation `obs`; `act(obs) -> (primitive, pix)`."""
+def run_episode(env, seed, obs, act, report=None):
+    """One episode from the (already reset) observation `obs`; `act(obs) -> (primitive, pix)`; `report(primitive, pix,
+    target, info)` after every step (the expert's failure memory)."""
     steps, info = [], {'sorted': False}
     terminated = truncated = False
     held = None
@@ -52,6 +53,8 @@ def run_episode(env, seed, obs, act):
         if primitive == 'grasp':
             held = target
         obs, reward, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix})
+        if report is not None:
+            report(primitive, pix, target, info)
         after = scene_state(env)
         moved = [i for i in before if i in after and np.linalg.norm(after[i][0][:2] - before[i][0][:2]) > MOVED]
         steps.append({'primitive': primitive, 'pix': [float(v) for v in pix], 'executed': bool(info['executed']),
@@ -67,7 +70,7 @@ def run_episode(env, seed, obs, act):
                       'target': target, 'held': held,
                       'placed_in_region': (bool(after[held][1]) if held in after else None) if primitive == 'place' else None,
                       'q': q_value, 'reward': float(reward), 'terminal': bool(terminated),
-                      'force_stops': int(info.get('force_stops', 0) or 0)})
+                      'force_stops': int(info.get('force_stops', 0) or 0), 'refused': bool(info.get('refused', False))})
     gamma = env.cfg.gamma
     future = 0.0  # realised return from each step (as the trainer discounts: the grasp -> place step is not discounted)
     for s in reversed(steps):
@@ -146,6 +149,7 @@ def summarize(episodes):
     rates = [float(np.mean(g)) for g in grasps_per_episode if g]
     summary['grasp executed (median per episode)'] = float(np.median(rates)) if rates else float('nan')
     grasp_steps = [s for s in acts if s['primitive'] == 'grasp']
+    summary['actions refused (infeasible)'] = float(np.mean([s.get('refused', False) for s in acts])) if acts else float('nan')
     summary['grasps stopped by the force limit'] = float(np.mean([s.get('force_stops', 0) > 0 for s in grasp_steps])) if grasp_steps else float('nan')
     summary['sorted episodes with an object tilted > 20 deg'] = sum(1 for e in episodes if e['outcome'] == 'sorted'
                                                                     and e.get('max_tilt_deg', 0.0) > 20.0)
@@ -182,7 +186,10 @@ def main(argv=None):
                 if choice is None:  # nothing sensible: a push at the corner that touches nothing (costs an action)
                     return 'push', ((0, 0, 0, 0.5) if cfg.hierarchy else (0, 0, 0))
                 return choice
-            return run_episode(env, seed, obs, act)
+
+            def report(primitive, pix, target, info):  # as when recording demonstrations: failed grasps are remembered
+                expert.report(primitive, pix, target, info['executed'])
+            return run_episode(env, seed, obs, act, report)
     else:
         from l2r.learning.factory import make_trainer
         from l2r.learning.policy import attach_initial, select_for

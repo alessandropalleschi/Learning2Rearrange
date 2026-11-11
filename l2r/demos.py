@@ -40,6 +40,8 @@ class ScriptedExpert:
             base = dataclasses.replace(base, push_lengths=tuple(push_lengths), hierarchy=False)
         self.cfg = base
         self.failures = {}  # object id -> failed grasps
+        self.push_failures = {}  # object id -> pushes that were not executed (refused or stopped): not retried after MAX_FAILURES
+        self.pushed_object = None  # the object the last proposed push was meant to move
         self.cleared = {}  # object id -> times moved out of another grasp's way (ordering rule)
         self.ordering = bool(getattr(env.cfg, 'expert_ordering', False))
         self.pushes = {}  # object id -> pushes made on it
@@ -50,6 +52,13 @@ class ScriptedExpert:
     def report(self, primitive, pix, object_id, executed):
         if primitive == 'grasp' and not executed:
             self.failures[object_id] = self.failures.get(object_id, 0) + 1
+        if primitive == 'push' and not executed:
+            object_id = self.pushed_object if self.pushed_object is not None else object_id  # the push cell is beside it
+            if object_id:
+                self.push_failures[object_id] = self.push_failures.get(object_id, 0) + 1
+
+    def _may_push(self, object_id):
+        return self.push_failures.get(object_id, 0) < self.MAX_FAILURES
 
     def _misplaced_visible(self):
         env, scene = self.env, self.env.sim.scene
@@ -90,6 +99,7 @@ class ScriptedExpert:
         return 'push', (index // len(lengths), row, col, float(np.clip(fraction, 0.0, 1.0)))
 
     def _act(self):
+        self.pushed_object = None
         env, cfg = self.env, self.cfg
         if env.holding:
             col, row = env.obs['heuristic_place']
@@ -102,16 +112,20 @@ class ScriptedExpert:
                 return choice
         if candidates:
             _, object_id, row, col = candidates[0]
-            if self._near_region(object_id):  # one push finishes it: no pick and place
+            if self._near_region(object_id) and self._may_push(object_id):  # one push finishes it: no pick and place
                 action = self._push_towards_target(object_id, cfg)
                 if action:
                     self.pushes[object_id] = self.pushes.get(object_id, 0) + 1
+                    self.pushed_object = object_id
                     return action
             return 'grasp', (0, row, col)
         # nothing can be grasped: push a misplaced object (the one that resisted most) towards its target region
         for _, object_id, _, _ in sorted(misplaced, key=lambda c: -self.failures.get(c[1], 0)):
+            if not self._may_push(object_id):
+                continue
             action = self._push_towards_target(object_id, cfg)
             if action:
+                self.pushed_object = object_id
                 return action
         # every misplaced object is hidden behind others: push the front-most object aside to expose them
         action = self._expose_hidden(cfg)
@@ -280,7 +294,7 @@ def record_episodes(env, episodes, num_objects, seed=0, max_steps=40, log=print)
             if choice is None:
                 break
             primitive, pix = choice
-            full, grasped = env.obs, expert.object_at(choice[1]) if choice[0] == 'grasp' else None
+            full, grasped = env.obs, expert.object_at(choice[1]) if choice[0] in ('grasp', 'push') else None
             next_obs, reward, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix})
             expert.report(primitive, pix, grasped, info['executed'])
             transitions.append(Transition(obs, pix, next_obs, reward, primitive, bool(terminated)))
