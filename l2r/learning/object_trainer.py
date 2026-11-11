@@ -53,17 +53,20 @@ class ObjectTrainer(Trainer):
     def info(self, obs):
         """`build_state` of an observation, built once and kept in the observation itself (key STATE_KEY) for as long as the
         observation lives (in the replay buffer: every replayed sample used to rebuild it once it fell out of a small cache, about
-        70% of the learner's time). The stored state is tagged with the slot layout and the identity of the colour / depth maps it
-        was built from: a copy with recoloured maps (hindsight relabelling) gets its own."""
+        70% of the learner's time). The stored state is tagged with the slot layout, the identity of the dict and of every value in
+        it: a copy (hindsight relabelling, dict(obs, last_action=...)) or a replaced key gets a new state. (Arrays modified in place
+        are not detected, as with the previous identity cache.)"""
         pull = self.pull
         lengths = tuple(self.push_lengths_px[:1] if self.continuous else self.push_lengths_px)
-        tag = (lengths, pull, id(obs.get('colormap')), id(obs.get('depthmap')), id(obs.get('history')))
-        stored = obs.get(STATE_KEY) if isinstance(obs, dict) else None
+        if not isinstance(obs, dict):
+            return build_state(obs, list(lengths), pull=pull)
+        # the dict itself (a copy, e.g. dict(obs, last_action=...), is a new dict) and every value in it (a replaced key)
+        tag = (lengths, pull, id(obs), tuple((k, id(v)) for k, v in obs.items() if k != STATE_KEY))
+        stored = obs.get(STATE_KEY)
         if stored is not None and stored[0] == tag:
             return stored[1]
         state = build_state(obs, list(lengths), pull=pull)
-        if isinstance(obs, dict):
-            obs[STATE_KEY] = (tag, state)
+        obs[STATE_KEY] = (tag, state)
         return state
 
     # ------------------------------------------------------------------ acting
