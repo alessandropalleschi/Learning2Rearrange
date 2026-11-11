@@ -132,6 +132,7 @@ class Controller:
         self.dt = model.opt.timestep * substeps
         self.force_sensor = model.sensor('ft_force')
         self.force_window, self.force_debounce = force_window, force_debounce
+        self.on_tick = None  # called after every control tick (e.g. the suction's force check)
         self.command = self.measured()
 
     def measured(self):
@@ -148,6 +149,8 @@ class Controller:
         self.d.ctrl[self.acts] = self.command
         for _ in range(self.substeps):
             mujoco.mj_step(self.m, self.d)
+        if self.on_tick is not None:
+            self.on_tick()
 
     def hold(self, ticks=1):
         for _ in range(ticks):

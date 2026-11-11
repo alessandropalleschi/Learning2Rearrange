@@ -87,7 +87,7 @@ def test_expert_grasp_holds_the_object_with_the_suction_weld():
     parser = argparse.ArgumentParser()
     add_arguments(parser)
     run = parser.parse_args('--agent object --hierarchy --belief spatial --placement learned --footprint_placement '
-                            '--adaptive_step --joint_tolerance 3e-3 --sim_quality modern --backend mujoco'.split())
+                            '--adaptive_step --joint_tolerance 3e-3 --sim_quality modern --backend mujoco_urdf'.split())
     env = make_env(Config.from_args(run), False, 3, SimParams.from_args(run), 30000)
     env.reset(num_obj=3, seed=30000)
     choice = make_expert(env).act()
@@ -126,6 +126,8 @@ def test_backend_flag_selects_the_simulator():
     parser = argparse.ArgumentParser()
     SimParams.add_arguments(parser)
     assert SimParams.from_args(parser.parse_args([])).backend == 'pybullet'
-    chosen = SimParams.from_args(parser.parse_args(['--backend', 'mujoco']))
+    chosen = SimParams.from_args(parser.parse_args(['--backend', 'mujoco_urdf']))
     assert make_simulator(chosen) is MujocoEnvironment
+    from l2r.sim.mj.native import NativeEnvironment
+    assert make_simulator(SimParams.from_args(parser.parse_args(['--backend', 'mujoco']))) is NativeEnvironment
     assert make_simulator(SimParams()) is Environment

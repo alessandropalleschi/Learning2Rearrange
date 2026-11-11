@@ -2,8 +2,8 @@
 
 Tool (flange frame: z = flange normal): a bracket `drop` along the normal, then a horizontal blade of length `blade` along the
 flange x axis, a suction cup at its end. With the flange pointing down, joint 6 turns the blade in the floor plane. The blade is
-a thin vertical plate (pushes with its end or sideways with its face); the cup is its own body so that the suction (an adhesion
-actuator) acts through the cup only. A force / torque sensor sits at the flange (the force between the tool and the wrist, as the
+a thin vertical plate (pushes with its end or sideways with its face); the cup is its own body: the suction welds the touched
+object to it (see `native.Suction`; it lets go above the vacuum's force limit). A force / torque sensor sits at the flange (the force between the tool and the wrist, as the
 UR5e's built-in sensor measures it).
 
 Geometry and mount from `scripts/mount_study.py` (one posture for the whole cabinet, the tool colliding with the arm): a 0.35 m
@@ -106,9 +106,9 @@ def _menagerie_spec(base=BASE_POSITION, slide=True, arm='ur5e'):
     return spec
 
 
-def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION, slide=True, arm='ur5e'):
+def robot_spec(tool=None, base=BASE_POSITION, slide=True, arm='ur5e'):
     """MjSpec with the arm (its base at `base`, on a pedestal when raised), the slide actuator, gravity compensation, the
-    tool, the flange sensor and the suction actuator."""
+    tool and the flange sensor. The suction itself is a weld per object added with the scene (see `native.Suction`)."""
     tool = tool or ToolGeometry()
     spec = _menagerie_spec(base, slide, arm)
     info = ARMS[arm]
@@ -118,8 +118,9 @@ def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION, slide=True, ar
     carriage.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[PEDESTAL_RADIUS, 0.01, 0], pos=[0, 0, -0.01],
                       contype=0, conaffinity=0, rgba=[0.3, 0.3, 0.3, 1], mass=10.0)  # mounting plate
     if base[2] > 0.02:  # a cylinder under the robot base only, riding with the slide (its rail on the ground)
-        carriage.add_geom(name='pedestal', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[PEDESTAL_RADIUS, base[2] / 2 - 0.01, 0],
-                          pos=[0, 0, -base[2] / 2 - 0.01], rgba=[0.35, 0.35, 0.38, 1], mass=0.0)
+        height = base[2] - 0.03  # from 1 cm above the ground (the rail carries it) to the mounting plate
+        carriage.add_geom(name='pedestal', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[PEDESTAL_RADIUS, height / 2, 0],
+                          pos=[0, 0, -0.02 - height / 2], rgba=[0.35, 0.35, 0.38, 1], mass=0.0)
     if slide:
         for side in (-1, 1):
             spec.worldbody.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.015, SLIDE_RANGE + PEDESTAL_RADIUS, 0.01],
@@ -158,16 +159,11 @@ def robot_spec(tool=None, suction_force=30.0, base=BASE_POSITION, slide=True, ar
     mujoco.mju_mat2Quat(cup_quat, np.column_stack([x_tip, np.cross(direction, x_tip), direction]).flatten())
     cup.add_geom(name='cup', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[tool.cup_radius, tool.cup_length / 2, 0],
                  pos=list(direction * tool.cup_length / 2), quat=list(cup_quat), rgba=[0.15, 0.35, 0.8, 1],
-                 mass=tool.mass * (1 - sum(shares.values())), margin=0.004, gap=0.004, friction=[1.0, 0.005, 0.0001])
+                 mass=tool.mass * (1 - sum(shares.values())), friction=[1.0, 0.005, 0.0001])
     cup.add_site(name='tip', pos=list(tip_pos - cup_origin), quat=list(quat))
     spec.add_sensor(name='ft_force', type=mujoco.mjtSensor.mjSENS_FORCE, objtype=mujoco.mjtObj.mjOBJ_SITE, objname='ft_sensor')
     spec.add_sensor(name='ft_torque', type=mujoco.mjtSensor.mjSENS_TORQUE, objtype=mujoco.mjtObj.mjOBJ_SITE,
                     objname='ft_sensor')
-    suction = spec.add_actuator(name='suction', target='cup')
-    suction.trntype = mujoco.mjtTrn.mjTRN_BODY
-    suction.gaintype, suction.biastype = mujoco.mjtGain.mjGAIN_FIXED, mujoco.mjtBias.mjBIAS_NONE
-    suction.gainprm[0] = float(suction_force)  # N at full vacuum: the cup lets go above it
-    suction.ctrlrange, suction.ctrllimited = [0.0, 1.0], 1
     if info['base_housing']:
         spec.body('base').add_geom(name='base_housing', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=[0.076, 0.045, 0],
                                    pos=[0, 0, 0.045], rgba=[0, 0, 0, 0], group=3)  # the Menagerie UR5e base has no collision shape

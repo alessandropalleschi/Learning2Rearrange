@@ -64,17 +64,29 @@ def test_blade_push_moves_the_block_along_the_heading(heading_deg):
     assert d.xmat[block][8] > np.cos(np.radians(5))  # still upright
 
 
-def test_suction_carries_the_block_out_of_the_cabinet():
-    rot = horizontal(0.0)
-    face = np.array([0.025, 0.0, FLOOR + 0.04])
-    start = face + np.array([WS.bounds[0][1] + STAGE_MARGIN - face[0], 0, 0])
-    m, d, c = setup(start, rot)
-    assert c.move_line(face - np.array([0.01, 0, 0]), rot, speed=0.05).reached
-    d.ctrl[m.actuator('suction').id] = 1.0
-    c.hold(20)
-    c.move_line(c.tip()[0] + np.array([0, 0, 0.02]), rot, speed=0.05)
-    c.move_line(start + np.array([0.10, 0, 0.02]), rot, speed=0.15)  # a grasp retreats until the object is clear
-    assert d.xpos[m.body('block').id][0] > WS.bounds[0][1]
-    d.ctrl[m.actuator('suction').id] = 0.0
-    c.hold(100)
-    assert d.xpos[m.body('block').id][0] > WS.bounds[0][1] - 0.05  # released out there (it falls)
+def test_native_environment_expert_grasp_holds_and_places():
+    """The task environment on the native backend: the expert's first grasp welds the object to the cup and carries it out of
+    the cabinet; the place puts it back inside, released, with the scene valid."""
+    import argparse
+
+    from l2r.config import Config
+    from l2r.demos import make_expert
+    from l2r.envs.rearrange import make_env
+    from l2r.training import add_arguments
+    parser = argparse.ArgumentParser()
+    add_arguments(parser)
+    run = parser.parse_args('--agent object --hierarchy --belief spatial --placement learned --footprint_placement '
+                            '--sim_quality modern --grasp_approach clear --backend mujoco'.split())
+    env = make_env(Config.from_args(run), False, 5, SimParams.from_args(run), 30000)
+    env.reset(num_obj=5, seed=30000)
+    choice = make_expert(env).act()
+    assert choice[0] == 'grasp'
+    _, _, _, _, info = env.step({'primitive': 'grasp', 'pix': choice[1]})
+    sim = env.sim
+    held = sim.tool.grip_body
+    assert info['executed'] and env.holding and sim.holds()
+    assert sim.p.getBasePositionAndOrientation(held)[0][0] > env.ws.bounds[0][1]  # out of the cabinet
+    col, row = env.obs['heuristic_place']
+    _, _, _, _, info = env.step({'primitive': 'place', 'pix': (0, int(row), int(col))})
+    assert not sim.holds()
+    assert sim.p.getBasePositionAndOrientation(held)[0][0] < env.ws.bounds[0][1]  # back inside

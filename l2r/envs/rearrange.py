@@ -173,7 +173,11 @@ def get_place_pose(sim, obj_class, freespace):
 
 def make_simulator(params):
     """The simulator class of `params.backend` (PyBullet by default; MuJoCo is imported only when asked for)."""
-    if getattr(params, 'backend', 'pybullet') == 'mujoco':
+    backend = getattr(params, 'backend', 'pybullet')
+    if backend == 'mujoco':
+        from l2r.sim.mj.native import NativeEnvironment
+        return NativeEnvironment
+    if backend == 'mujoco_urdf':
         from l2r.sim.mj.environment import MujocoEnvironment
         return MujocoEnvironment
     return Environment

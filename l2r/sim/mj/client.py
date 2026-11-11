@@ -198,11 +198,16 @@ class MujocoClient:
         g.friction = [friction, 0.005, 0.0001]
         return g
 
-    def compile(self, home_joints=None):
+    def compile(self, home_joints=None, base_spec=None, settle=None, weld_to=None):
         """Build the MuJoCo model of everything recorded since `resetSimulation`, put the arm at `home_joints` and run the
-        simulation steps requested while building (the objects' settling)."""
+        simulation steps requested while building (the objects' settling). `base_spec`: an MjSpec the recorded world is added
+        to (the native robot of `robot.py`; then no URDF arm is recorded). `settle(model, data)` runs before those steps.
+        `weld_to`: the body of `base_spec` that gets one inactive weld per movable object (the native suction cup)."""
         arm = next((r for r in self.records if r.kind == 'arm'), None)
-        spec = mujoco.MjSpec.from_string(assets.arm_urdf_text(arm.position)) if arm else mujoco.MjSpec()
+        if base_spec is not None:
+            spec = base_spec
+        else:
+            spec = mujoco.MjSpec.from_string(assets.arm_urdf_text(arm.position)) if arm else mujoco.MjSpec()
         spec.option.timestep = self.time_step
         spec.option.gravity = list(self.gravity)
         spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
@@ -265,9 +270,9 @@ class MujocoClient:
                 g.pos, g.quat = list(m['visual_origin'][0]), list(T.to_mj(m['visual_origin'][1]))
                 g.contype = g.conaffinity = 0
                 g.rgba, g.mass = [1, 1, 1, 1], 0
-            if arm:
+            if arm or weld_to:
                 welds.append(uid)
-        tool = self.joint_table[-1][7] if arm else None
+        tool = self.joint_table[-1][7] if arm else weld_to
         for uid in welds:  # one suction weld per movable object, off until createConstraint
             eq = spec.add_equality(name='l2r_weld_%d' % uid, type=mujoco.mjtEq.mjEQ_WELD, objtype=mujoco.mjtObj.mjOBJ_BODY,
                                    name1=tool, name2='l2r_body_%d' % uid)
@@ -278,6 +283,8 @@ class MujocoClient:
         self._index()
         if arm:
             self._tune_servos(home_joints)
+        if settle is not None:
+            settle(self.model, self.data)
         mujoco.mj_forward(self.model, self.data)
         steps, self.pending_steps = self.pending_steps, 0
         for _ in range(steps):
