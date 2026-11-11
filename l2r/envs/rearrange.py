@@ -171,6 +171,22 @@ def get_place_pose(sim, obj_class, freespace):
     return select_placement(y_up[index], y_down[index], freespace)
 
 
+PULL_WALL_ZONE = 0.07  # m: a pull of an object this close to a side wall drags it away from that wall
+PULL_APPROACH = np.radians(30)  # in from the cabinet's middle towards the wall
+PULL_LENGTH = 0.08  # m
+
+
+def default_pull(position, ws):
+    """Parameters of a pull at `position` (x, y) when the action gives none: next to a side wall, in from the middle at 30 degrees
+    and dragged 8 cm away from the wall and towards the front (45 degrees); elsewhere straight in and straight towards the front."""
+    b = ws.bounds
+    y = float(position[1])
+    if min(y - b[1][0], b[1][1] - y) < PULL_WALL_ZONE:
+        side = np.sign(y) or 1.0
+        return {'approach': float(-side * PULL_APPROACH), 'heading': float(np.arctan2(-side, 1.0)), 'length': PULL_LENGTH}
+    return {'approach': 0.0, 'heading': 0.0, 'length': PULL_LENGTH}
+
+
 def make_simulator(params):
     """The simulator class of `params.backend` (PyBullet by default; MuJoCo is imported only when asked for)."""
     backend = getattr(params, 'backend', 'pybullet')
@@ -256,8 +272,10 @@ class RearrangeEnv:
             executed = sim.push(position, push_length=float(action.get('length', max(cfg.push_lengths))), heading=float(action['heading']))
         elif prim == 'pull':  # attach (cup / jaws), drag along the floor, release
             attempted = True
-            executed = sim.pull(position, approach=float(action.get('approach', 0.0)), heading=float(action.get('heading', 0.0)),
-                                distance=float(action.get('length', max(cfg.push_lengths))))
+            default = default_pull(position, self.ws)  # a bare pull (the object agent's slot, the expert): off the nearer wall
+            executed = sim.pull(position, approach=float(action.get('approach', default['approach'])),
+                                heading=float(action.get('heading', default['heading'])),
+                                distance=float(action.get('length', default['length'])))
         elif prim == 'push':
             angle, length = decode_push(pix[0], cfg.push_lengths)
             if cfg.hierarchy:  # continuous length: pix[3] in 0..1 of the range

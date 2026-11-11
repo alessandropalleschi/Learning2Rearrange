@@ -276,7 +276,7 @@ class TrainingLoop:
 
     def _save_visualization(self, q, obs, choice, info):
         primitive, pix, _ = choice
-        maps = {'push': q.push, 'grasp': q.pick, 'place': q.place}[primitive][0]
+        maps = {'push': q.push, 'grasp': q.pick, 'place': q.place, 'pull': q.pull}[primitive][0]
         if primitive == 'push':  # the two directions of the chosen length
             n_len = len(self.cfg.push_lengths)
             maps, pix = maps[[pix[0] % n_len, n_len + pix[0] % n_len]], (pix[0] // n_len,) + tuple(pix[1:])

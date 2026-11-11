@@ -15,7 +15,7 @@ from l2r.learning.models import QNet, DEVICE, ACTION_CHANNELS, HELD_CLASSES
 REGION_CHANNELS = 5  # 3 region bands + 2 coordinate channels
 PAD = 4  # border of the observation maps (rows on both sides, columns on the left)
 
-QMaps = namedtuple('QMaps', ['push', 'pick', 'place', 'hidden', 'lengths', 'prim'], defaults=(None, None))
+QMaps = namedtuple('QMaps', ['push', 'pick', 'place', 'hidden', 'lengths', 'prim', 'pull'], defaults=(None, None, None))
 
 
 class Trainer(object):

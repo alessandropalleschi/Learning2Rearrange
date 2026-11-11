@@ -50,7 +50,7 @@ def test_network_and_rasterisation():
     tokens, n_objects, valid = collate([state, state], 'cpu')
     q = ObjectQNet(n_slots=3)(tokens, n_objects)
     assert q.shape == (2, 2, 3) and valid.shape == (2, 2, 3)
-    push, pick = rasterize(state, q[0].detach().numpy(), (120, 100), 2)
+    push, pick, _ = rasterize(state, q[0].detach().numpy(), (120, 100), 2)
     assert push.shape == (2, 120, 100) and pick.shape == (1, 120, 100)
     assert (pick > -999).sum() == 2 and (push > -999).sum() == 4  # only the candidate pixels carry values
 
@@ -418,3 +418,40 @@ def test_goal_map_channels_of_the_dense_agent():
     goal_map[10:20, 30:40] = 1
     Trainer._geometry_channels(out, {'goal_map': goal_map, 'regions': np.zeros((3, 2))}, 0, 0, 128, 104)
     assert out[0, 4 + 10:4 + 20, 4 + 30:4 + 40].all() and out[0].sum() == 100  # 4-cell border: rows both sides, columns left
+
+
+def test_pull_slot_only_for_objects_against_a_side_wall():
+    obs = observation(blue_rows=(2, 13), green_rows=(55, 66))  # blue centred 7 rows from the wall, green in the middle
+    state = build_state(obs, [16], pull=True)
+    assert state['valid'].shape == (2, 4) and state['pull']
+    assert state['valid'][0, -1] and not state['valid'][1, -1]
+    assert tuple(state['actions'][0, -1]) == tuple(state['actions'][0, 0])  # pulled from the pick cell
+    pick = state['actions'][0, 0]
+    assert slot_of(state, 'pull', tuple(pick)) == (0, 3)
+    assert slot_of(build_state(obs, [16]), 'pull', tuple(pick)) is None  # no slot without the flag
+    push, pick_map, pull = rasterize(state, np.zeros((2, 4), np.float32), (120, 100), 2)
+    assert pull is not None and (pull > -999).sum() == 1
+
+
+def test_trainer_with_the_pull_slot_returns_a_pull_map_and_value():
+    for hierarchy in (False, True):
+        cfg = Config(agent='object', pull_slot=True, hierarchy=hierarchy)
+        trainer = ObjectTrainer(cfg)
+        obs = observation(blue_rows=(2, 13), green_rows=(55, 66))
+        q = trainer.forward_batch([obs])
+        assert q.pull is not None and (q.pull[0] > -999).sum() == 1
+        if hierarchy:
+            assert q.prim.shape == (1, 4) and q.prim[0, 3] > -999
+
+
+def test_default_pull_drags_off_the_nearer_wall():
+    from l2r.config import SimParams
+    from l2r.envs.rearrange import default_pull
+    from l2r.sim.workspace import Workspace
+    ws = Workspace.from_params(SimParams())
+    near_plus = default_pull((0.0, ws.bounds[1][1] - 0.03), ws)
+    assert near_plus['approach'] < 0 and np.isclose(near_plus['heading'], -np.pi / 4)  # in from the middle, away from +y
+    near_minus = default_pull((0.0, ws.bounds[1][0] + 0.03), ws)
+    assert near_minus['approach'] > 0 and np.isclose(near_minus['heading'], np.pi / 4)
+    middle = default_pull((0.0, 0.0), ws)
+    assert middle['approach'] == 0.0 and middle['heading'] == 0.0

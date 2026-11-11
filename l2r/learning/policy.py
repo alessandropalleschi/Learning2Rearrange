@@ -24,8 +24,8 @@ def select_placement(trainer, obs, place_q, explore_prob, cfg):
     return 'place', pix, float(q[pix[1], pix[2]])
 
 
-def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg, ws):
-    """Epsilon-greedy over the primitives (push / pick; place while an object is held).
+def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg, ws, pull_q=None):
+    """Epsilon-greedy over the primitives (push / pick, and pull with the object agent's pull slot; place while an object is held).
 
     push_q (2,h,w), pick_q (1,h,w) and place_q (1,h,w) are the raw Q-maps of the network for `obs`.
     `ws` is the `Workspace` (needed to check that an explored push touches something).
@@ -35,12 +35,14 @@ def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg, ws):
         return select_placement(trainer, obs, place_q, explore_prob, cfg)
     push_q = trainer.preprocessQmaps(push_q, obs['depthmap'], 'push')
     pick_q = trainer.preprocessQmaps(pick_q, obs['depthmap'], 'grasp')
-    primitive = 'push' if np.max(push_q) > np.max(pick_q) else 'grasp'
     q = {'push': push_q, 'grasp': pick_q}
+    if pull_q is not None and (pull_q > -1000).any():  # the pull slot's candidates (already restricted to valid cells)
+        q['pull'] = pull_q
+    primitive = max(q, key=lambda name: np.max(q[name]))
 
     if explore_prob > 0 and np.random.uniform() < explore_prob:
         if np.random.randint(0, 2) == 1:
-            primitive = 'push' if np.random.randint(0, 2) == 0 else 'grasp'
+            primitive = list(q)[np.random.randint(len(q))]
         valid = np.flatnonzero(q[primitive].ravel() > -1000)
         if valid.size:
             pix = np.unravel_index(np.random.choice(valid), q[primitive].shape)
@@ -57,10 +59,10 @@ def select_action(trainer, obs, push_q, pick_q, place_q, explore_prob, cfg, ws):
     return primitive, tuple(int(i) for i in pix), float(q[primitive][pix])
 
 
-PRIMITIVE_INDEX = {'push': 0, 'grasp': 1, 'place': 2}  # order of the level-1 values of the hierarchical network
+PRIMITIVE_INDEX = {'push': 0, 'grasp': 1, 'place': 2, 'pull': 3}  # order of the level-1 values of the hierarchical network
 
 
-def select_hierarchical(trainer, obs, push_q, pick_q, prim_q, lengths, explore_prob, cfg, ws):
+def select_hierarchical(trainer, obs, push_q, pick_q, prim_q, lengths, explore_prob, cfg, ws, pull_q=None):
     """Hierarchical decision: (1) the primitive from the level-1 values (restricted to feasible primitives), (2) its
     parameters: the pixel / direction from the dense Q-map of that primitive and, for a push, the continuous length from
     the actor (plus exploration noise). Exploring: a random feasible primitive, a random feasible pixel and length.
@@ -68,6 +70,8 @@ def select_hierarchical(trainer, obs, push_q, pick_q, prim_q, lengths, explore_p
     prim_q (3,) and lengths (2,h,w; 0..1) come from the hierarchical network. Returns (primitive, (a, row, col[, length]), value)."""
     q = {'push': trainer.preprocessQmaps(push_q, obs['depthmap'], 'push'),
          'grasp': trainer.preprocessQmaps(pick_q, obs['depthmap'], 'grasp')}
+    if pull_q is not None and len(prim_q) > PRIMITIVE_INDEX['pull']:
+        q['pull'] = pull_q  # the object agent's pull slot (its candidates are already the valid cells)
     options = [name for name in q if (q[name] > -1000).any()] or ['grasp']
     exploring = explore_prob > 0 and np.random.uniform() < explore_prob
     if exploring:
@@ -99,9 +103,10 @@ def select_hierarchical(trainer, obs, push_q, pick_q, prim_q, lengths, explore_p
 
 def select_for(trainer, obs, q, i, explore_prob, cfg, ws):
     """`select_action` for sample i of a batch of network outputs `q` (QMaps): hierarchical or flat, as configured."""
+    pull = q.pull[i] if getattr(q, 'pull', None) is not None else None
     if q.prim is not None and not obs.get('held_class'):
-        return select_hierarchical(trainer, obs, q.push[i], q.pick[i], q.prim[i], q.lengths[i], explore_prob, cfg, ws)
-    primitive, pix, value = select_action(trainer, obs, q.push[i], q.pick[i], q.place[i], explore_prob, cfg, ws)
+        return select_hierarchical(trainer, obs, q.push[i], q.pick[i], q.prim[i], q.lengths[i], explore_prob, cfg, ws, pull)
+    primitive, pix, value = select_action(trainer, obs, q.push[i], q.pick[i], q.place[i], explore_prob, cfg, ws, pull)
     if hasattr(trainer, 'action_params'):  # parameterised skills: the continuous parameters travel in the action tuple
         pix = trainer.action_params(i, primitive, pix, explore_prob)
     return primitive, pix, value

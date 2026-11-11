@@ -31,6 +31,7 @@ MIN_AREA = 6  # cells (5 mm): smaller pieces are noise
 OCCLUDED_RGB = 105
 GRASP_DEPTH_CELLS = 2  # aim this many cells behind the front-most cell (see demos.GRASP_DEPTH_CELLS)
 PUSH_GAP = 3  # cells between the blade start and the object
+PULL_WALL_CELLS = 14  # cells (7 cm): an object centred this close to a side wall gets a pull slot (envs.rearrange.default_pull)
 TYPE_INSTANCE, TYPE_REGION, TYPE_GLOBAL, TYPE_GHOST = 0, 1, 2, 3
 PLACE_STRIDE = 2  # cells between place candidates (finest) (a grid over the free cells the held object fits in)
 MAX_PLACE = 512  # at most this many place candidates (the grid gets coarser beyond)
@@ -199,19 +200,21 @@ def global_features(instances, obs, ghosts=()):
     return out
 
 
-def candidate_actions(instances, obs, push_lengths_px, edge_margin=GRASP_EDGE_MARGIN):
+def candidate_actions(instances, obs, push_lengths_px, edge_margin=GRASP_EDGE_MARGIN, pull=False):
     """(N, 1 + 2L, 3) int pixel actions (rot, row, col) and (N, 1 + 2L) bool validity of every object-action slot.
 
     slot 0: pick at the instance's front face (aimed GRASP_DEPTH_CELLS inside it, in the central part of its width);
     slot 1 + d * L + l: push in direction d (0: towards decreasing rows, 1: towards increasing rows) with length index l, the blade
     starting PUSH_GAP cells beside the object on the opposite side. A push is valid only if the blade's own strip has object cells in
-    its path."""
+    its path. With `pull`, a last slot: pull at the pick cell (the environment drags the object off the nearer side wall), valid for
+    objects centred within PULL_WALL_CELLS of a side wall."""
     depth = crop(obs['depthmap'])
     h, w = depth.shape
     near = depth > PUSH_OBJECT_HEIGHT
     n_len = len(push_lengths_px)
-    actions = np.zeros((len(instances), 1 + 2 * n_len, 3), np.int64)
-    valid = np.zeros((len(instances), 1 + 2 * n_len), bool)
+    n_slots = 1 + 2 * n_len + (1 if pull else 0)
+    actions = np.zeros((len(instances), n_slots, 3), np.int64)
+    valid = np.zeros((len(instances), n_slots), bool)
     paths = {(d, l): push_path_cells(near, push_lengths_px[l], d == 1, BLADE_HALF_WIDTH_CELLS)
              for d in (0, 1) for l in range(n_len)}
     for i, inst in enumerate(instances):
@@ -233,6 +236,10 @@ def candidate_actions(instances, obs, push_lengths_px, edge_margin=GRASP_EDGE_MA
                 slot = 1 + direction * n_len + l
                 actions[i, slot] = (direction * n_len + l, start, push_col)
                 valid[i, slot] = 0 <= start < h and not depth[start, push_col] > 0.008 and bool(paths[(direction, l)][start, push_col])
+        if pull:
+            centre = float(np.median(rows))
+            actions[i, -1] = actions[i, 0]
+            valid[i, -1] = min(centre, h - 1 - centre) < PULL_WALL_CELLS
     return actions, valid
 
 
@@ -322,10 +329,10 @@ def place_index_of(state, action, tolerance=3):
     return best if distance[best] <= tolerance else None
 
 
-def build_state(obs, push_lengths_px):
-    """Everything the network and the action mapping need for one observation."""
+def build_state(obs, push_lengths_px, pull=False):
+    """Everything the network and the action mapping need for one observation (`pull`: with the pull slot, the last one)."""
     instances = extract_instances(obs)
-    actions, valid = candidate_actions(instances, obs, push_lengths_px)
+    actions, valid = candidate_actions(instances, obs, push_lengths_px, pull=pull)
     ghosts, remembered, ages = extract_ghosts(obs)
     ghost_tokens = instance_features(ghosts, obs, remembered, ages) if ghosts else np.zeros((0, FEATURES), np.float32)
     place_actions, place_tokens = place_candidates(obs)
@@ -334,7 +341,7 @@ def build_state(obs, push_lengths_px):
         history = history.copy()
         history[:, 23] = (np.arange(len(history)) + 1) / HISTORY
         ghost_tokens = np.concatenate([ghost_tokens, history], axis=0)
-    return {'instances': instances, 'actions': actions, 'valid': valid, 'ghosts': ghosts, 'ghost_tokens': ghost_tokens,
+    return {'instances': instances, 'actions': actions, 'valid': valid, 'ghosts': ghosts, 'ghost_tokens': ghost_tokens, 'pull': pull,
             'place_actions': place_actions, 'place_tokens': place_tokens,
             'tokens': np.concatenate([global_features(instances, obs, ghosts)[None], region_features(obs),
                                       instance_features(instances, obs)], axis=0)}
@@ -346,7 +353,11 @@ def slot_of(state, primitive, action, tolerance=3):
         return None
     best, best_distance = None, tolerance + 1
     rot = int(action[0])
-    slots = [0] if primitive == 'grasp' else ([1 + rot] if primitive == 'push' else [])
+    n_slots = np.shape(state['valid'])[1]
+    if primitive == 'pull':
+        slots = [n_slots - 1] if state.get('pull') else []
+    else:
+        slots = [0] if primitive == 'grasp' else ([1 + rot] if primitive == 'push' else [])
     for slot in slots:
         for i in range(len(state['instances'])):
             if not state['valid'][i, slot]:
@@ -479,18 +490,24 @@ def collate_place(states, device):
 
 
 def rasterize(state, q, shape, n_push, fill=-1000.0):
-    """Slot values (N, S) -> the dense Q-map interface: push (2L, h, w), pick (1, h, w) with the value at each valid slot's pixel and
-    `fill` everywhere else, so the unchanged action selection (masked argmax / random among valid cells) only sees real candidates."""
+    """Slot values (N, S) -> the dense Q-map interface: push (2L, h, w), pick (1, h, w) and, with the pull slot, pull (1, h, w) (else
+    None) with the value at each valid slot's pixel and `fill` everywhere else, so the unchanged action selection (masked argmax /
+    random among valid cells) only sees real candidates."""
     push = np.full((n_push, *shape), fill, np.float32)
     pick = np.full((1, *shape), fill, np.float32)
+    pull = np.full((1, *shape), fill, np.float32) if state.get('pull') else None
+    n_slots = state['valid'].shape[1]
     for i in range(len(state['instances'])):
-        for slot in range(state['valid'].shape[1]):
+        for slot in range(n_slots):
             if not state['valid'][i, slot]:
                 continue
             rot, row, col = state['actions'][i, slot]
-            target = pick[0] if slot == 0 else push[int(rot)]
+            if pull is not None and slot == n_slots - 1:
+                target = pull[0]
+            else:
+                target = pick[0] if slot == 0 else push[int(rot)]
             target[row, col] = max(target[row, col], q[i, slot])
-    return push, pick
+    return push, pick, pull
 
 
 class ObjectQNetContinuous(ObjectQNet):
@@ -498,8 +515,14 @@ class ObjectQNetContinuous(ObjectQNet):
     the length). Per instance token: a pick value, an actor that proposes a push length per direction (0..1 of the length range), and a
     push critic Q(token, direction, length). Slots: 0 pick, 1 / 2 push in direction 0 / 1."""
 
-    def __init__(self, dim=64, layers=2, heads=4, placement=False, outcome=False, twin=False, iql=False):
-        super().__init__(n_slots=3, dim=dim, layers=layers, heads=heads, placement=placement, outcome=outcome, twin=twin, iql=iql)
+    def __init__(self, dim=64, layers=2, heads=4, placement=False, outcome=False, twin=False, iql=False, pull=False):
+        super().__init__(n_slots=4 if pull else 3, dim=dim, layers=layers, heads=heads, placement=placement, outcome=outcome, twin=twin,
+                         iql=iql)
+        self.pull = pull  # slot 3: pull (a value per object, like the pick)
+        if pull:
+            self.pull_head = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
+            if twin:
+                self.pull_head_twin = nn.Sequential(nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
         del self.head
         if twin:
             del self.head_twin
@@ -526,15 +549,17 @@ class ObjectQNetContinuous(ObjectQNet):
         return torch.stack(outs, dim=-1)
 
     def forward_full(self, tokens, counts, lengths=None, heads=False):
-        """-> (Q (B,N,3) (mean of the twin heads; heads=True: (H,B,N,3)), actor lengths (B,N,2), push values at the actor's lengths
+        """-> (Q (B,N,S) (S = 3, or 4 with the pull slot; mean of the twin heads; heads=True: (H,B,N,S)), actor lengths (B,N,2), push
+        values at the actor's lengths
         from the first critic on DETACHED features (B,N,2)). `lengths` (B,N,2) overrides the lengths the critic is evaluated at
         (training: the executed ones)."""
         emb = self.embed_tokens(tokens, counts)
         actor = torch.sigmoid(self.actor(emb.detach()))
         used = actor.detach() if lengths is None else lengths
-        q = [torch.cat([self.pick_head(emb), self._push_values(emb, used)], dim=-1)]
+        q = [torch.cat([self.pick_head(emb), self._push_values(emb, used)] + ([self.pull_head(emb)] if self.pull else []), dim=-1)]
         if self.twin:
-            q.append(torch.cat([self.pick_head_twin(emb), self._push_values(emb, used, self.push_critic_twin)], dim=-1))
+            q.append(torch.cat([self.pick_head_twin(emb), self._push_values(emb, used, self.push_critic_twin)]
+                               + ([self.pull_head_twin(emb)] if self.pull else []), dim=-1))
         q = torch.stack(q)
         return (q if heads else q.mean(0)), actor, self._push_values(emb.detach(), actor)
 

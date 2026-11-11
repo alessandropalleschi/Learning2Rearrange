@@ -23,12 +23,13 @@ class ObjectTrainer(Trainer):
         self.outcome = self.cfg.outcome_weight > 0  # outcome heads (executed / invalid / changed), trained from free labels
         self.twin = bool(self.cfg.twin_q)  # clipped double Q: two value heads, targets from their minimum
         self.iql = self.cfg.object_algo == 'iql'
-        self.n_slots = 1 + 2 * len(self.cfg.push_lengths)
+        self.pull = bool(getattr(self.cfg, 'pull_slot', False))  # --pull_slot: a last slot per object, pull it off a side wall
+        self.n_slots = 1 + 2 * len(self.cfg.push_lengths) + int(self.pull)
         self.continuous = bool(self.cfg.hierarchy)  # --agent object --hierarchy: a continuous push length (actor + length-conditioned critic)
         if self.continuous:
-            self.n_slots = 3
+            self.n_slots = 3 + int(self.pull)
             make = lambda: ObjectQNetContinuous(self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place,
-                                                     outcome=self.outcome, twin=self.twin, iql=self.iql).to(DEVICE)
+                                                     outcome=self.outcome, twin=self.twin, iql=self.iql, pull=self.pull).to(DEVICE)
         else:
             make = lambda: ObjectQNet(self.n_slots, self.cfg.object_dim, self.cfg.object_layers, placement=self.learned_place,
                                       outcome=self.outcome, twin=self.twin, iql=self.iql).to(DEVICE)
@@ -57,7 +58,7 @@ class ObjectTrainer(Trainer):
         key = id(obs)
         if key in self._cache:
             return self._cache[key][1]
-        state = build_state(obs, self.push_lengths_px[:1] if self.continuous else self.push_lengths_px)
+        state = build_state(obs, self.push_lengths_px[:1] if self.continuous else self.push_lengths_px, pull=self.pull)
         self._cache[key] = (obs, state)
         if len(self._cache) > CACHE_SIZE:
             self._cache.popitem(last=False)
@@ -84,8 +85,9 @@ class ObjectTrainer(Trainer):
                 q = q - risk * torch.sigmoid(net.outcomes(tokens, n_objects)[..., 1]).float().cpu().numpy()
         h, w = obs_list[0]['depthmap'].shape[:2]
         shape = (h - 2 * self.offset_px, w - self.offset_px)
-        push, pick = zip(*[rasterize(s, q[b], shape, 2 * len(self.cfg.push_lengths)) for b, s in enumerate(states)])
+        push, pick, pull = zip(*[rasterize(s, q[b], shape, 2 * len(self.cfg.push_lengths)) for b, s in enumerate(states)])
         push, pick = np.stack(push), np.stack(pick)
+        pull = np.stack(pull) if self.pull else None
         place = np.full_like(pick, -1000.0)
         if self.learned_place and any(len(s['place_tokens']) for s in states):
             with torch.no_grad():
@@ -103,7 +105,7 @@ class ObjectTrainer(Trainer):
                 for p, (_, row, col) in enumerate(s['place_actions']):
                     place[b, 0, row, col] = values[b, p]
         if not self.continuous:
-            return QMaps(push, pick, place, None)
+            return QMaps(push, pick, place, None, pull=pull)
         lengths = np.full(push.shape, 0.5, np.float32)  # the actor's length at every candidate push pixel (0.5 elsewhere)
         for b, state in enumerate(states):
             for i in range(len(state['instances'])):
@@ -113,7 +115,9 @@ class ObjectTrainer(Trainer):
                         lengths[b, slot - 1, row, col] = actor[b, i, slot - 1]
         prim = np.stack([push.reshape(len(states), -1).max(1), pick.reshape(len(states), -1).max(1), np.full(len(states), -1000.0)], axis=1)
         prim[:, 2] = place.reshape(len(states), -1).max(1)
-        return QMaps(push, pick, place, None, lengths, prim.astype(np.float32))
+        if self.pull:  # level-1 value of the pull (index 3, see policy.PRIMITIVE_INDEX)
+            prim = np.concatenate([prim, pull.reshape(len(states), -1).max(1)[:, None]], axis=1)
+        return QMaps(push, pick, place, None, lengths, prim.astype(np.float32), pull)
 
     def _masking(self, network='policy'):
         return self.outcome and self.cfg.outcome_mask > 0 and network == 'policy'

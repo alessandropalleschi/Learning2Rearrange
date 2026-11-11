@@ -103,9 +103,7 @@ class ScriptedExpert:
         fraction = (lengths[index % len(lengths)] - low) / (high - low)
         return 'push', (index // len(lengths), row, col, float(np.clip(fraction, 0.0, 1.0)))
 
-    PULL_APPROACH = np.radians(30)  # pull: in from the cabinet's middle towards the wall at this angle
-    PULL_LENGTH = 0.08  # m, dragged away from the wall and towards the front (45 degrees)
-    WALL_ZONE = 0.07  # m: an object whose centre is this close to a side wall counts as against it
+    WALL_ZONE = 0.07  # m: an object whose centre is this close to a side wall counts as against it (as envs.rearrange.PULL_WALL_ZONE)
 
     def _pull_from_wall(self, misplaced):
         """A pull for a misplaced object against a side wall that the grasps could not take (or None): attach from the
@@ -119,10 +117,7 @@ class ScriptedExpert:
                     and self.pulls.get(object_id, 0) < self.MAX_FAILURES):
                 self.pulls[object_id] = self.pulls.get(object_id, 0) + 1
                 self.failures[object_id] = 0  # off the wall it may be graspable again
-                side = np.sign(y)  # +1: against the +y wall
-                self.extra = {'approach': float(-side * self.PULL_APPROACH), 'heading': float(np.arctan2(-side, 1.0)),
-                              'length': self.PULL_LENGTH}
-                return 'pull', (0, row, col)
+                return 'pull', (0, row, col)  # the environment's default pull drags it off the wall (envs.rearrange.default_pull)
         return None
 
     def _act(self):
