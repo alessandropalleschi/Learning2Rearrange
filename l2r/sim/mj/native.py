@@ -27,7 +27,7 @@ from l2r.sim.environment import TIME_STEP, Environment
 from l2r.sim.mj.camera import MujocoCamera
 from l2r.sim.mj.client import MujocoClient
 from l2r.sim.mj.control import Controller, Kinematics
-from l2r.sim.mj.robot import BASE_POSITION, STAGE_MARGIN, ToolGeometry, robot_spec
+from l2r.sim.mj.robot import BASE_POSITION, ROBOT as ROBOT_BIT, SCENE as SCENE_BIT, STAGE_MARGIN, ToolGeometry, robot_spec
 from l2r.sim.primitives import MAX_APPROACH, OPENING_MARGIN, PICK_HEIGHT, PUSH_HEIGHT, WALL_MARGIN
 from l2r.sim.scene import Scene
 from l2r.sim.workspace import Workspace
@@ -39,6 +39,7 @@ SPEED = 0.15  # m/s in free space
 PUSH_SPEED = 0.05  # m/s while pushing / approaching an object
 SETTLE_TICKS = 25
 LIFT = 0.02  # m: a grasped object is lifted this much off the floor
+HELD_PENETRATION = 0.003  # m: a held object counts as colliding with the cabinet only beyond this penetration
 CARRY_MARGIN = 0.2  # m: the tip this far in front of the opening while an object is held (out of the cabinet)
 
 
@@ -209,15 +210,23 @@ class NativeEnvironment(Environment):
 
     # ------------------------------------------------------------------ motion helpers
     def _free_now(self, q):
-        return self._free(q, self.p.data)
+        held = self.tool.grip_body if self.tool.activated else None
+        return self._free(q, self.p.data, None if held is None else self.p.body_of[held])
 
     def _go(self, position, rotation):
-        """Joint move to the tip pose (outside the cabinet), collision checked along the joint path."""
+        """To a tip pose outside the cabinet. Holding an object: Cartesian lines (sideways in front of the opening, then to the
+        pose), checked every centimetre with the object; otherwise a joint move, checked every 0.05 rad."""
+        if self.holds():
+            tip = self.ctl.tip()[0]
+            side = np.array([max(tip[0], position[0]), position[1], position[2]])
+            return (self._line(side, rotation, SPEED, force=False).reached and
+                    self._line(position, rotation, SPEED, force=False).reached)
         q, ok = self.kin.solve(self.ctl.measured(), position, rotation)
         if not ok:
             return False
         start = self.ctl.measured()
-        if not all(self._free_now(start + (q - start) * s) for s in np.linspace(0.2, 1.0, 5)):
+        samples = max(5, int(np.ceil(np.abs(q - start).max() / 0.05)))
+        if not all(self._free_now(start + (q - start) * s) for s in np.linspace(1.0 / samples, 1.0, samples)):
             return False
         return self.ctl.move_joints(q).reached
 
@@ -288,7 +297,9 @@ class NativeEnvironment(Environment):
         tool.release()
         owner = self.p.geom_owner
         touched = lambda: bool(tool.touching(owner))
-        self._line(target + rotation[:, 2] * 0.04, rotation, PUSH_SPEED, stop=touched)  # up to 4 cm past the face point
+        end = target + rotation[:, 2] * 0.04  # up to 4 cm past the face point, but not into the back wall
+        end[0] = max(end[0], self.ws.bounds[0][0] + self.tool_geometry.cup_radius + 0.005)
+        self._line(end, rotation, PUSH_SPEED, stop=touched)
         objects = tool.touching(owner)
         if not objects:
             log.debug('attach %s: no cup contact (tip stopped at %s)', np.round(target, 3), np.round(self.ctl.tip()[0], 3))
@@ -310,8 +321,10 @@ class NativeEnvironment(Environment):
             axis = rotation[:, 2]
             out = tip - axis * max(self.ws.bounds[0][1] + CARRY_MARGIN - tip[0], 0.0) / max(-axis[0], 1e-3)
             self._line(out, rotation, SPEED, force=False)  # out of the cabinet along the approach line
-            if self.holds():
-                self._go(np.array([self.ws.bounds[0][1] + CARRY_MARGIN, out[1], out[2]]), horizontal(0.0))  # carry pose
+            if self.holds():  # the carry pose: in front of the opening (within its width), the tool straight
+                b = self.ws.bounds
+                carry_y = float(np.clip(out[1], b[1][0] + OPENING_MARGIN, b[1][1] - OPENING_MARGIN))
+                self._go(np.array([b[0][1] + CARRY_MARGIN, carry_y, out[2]]), horizontal(0.0))
         held = attached and self.holds()
         if not held:
             self.tool.release()
@@ -337,14 +350,27 @@ class NativeEnvironment(Environment):
         return bool(attached and dragged) and self.scene.is_valid()
 
     def place(self, xy, speed=0.01):
+        """Put the held object at `xy`; if that point cannot be reached, at the nearest reachable point on the same line, up to
+        12 cm shallower (the object is never dropped outside the cabinet when a point inside is reachable)."""
         b, tool = self.ws.bounds, self.tool
         offset = tool.offset if tool.offset is not None else np.zeros(3)
-        position = np.array([xy[0] - offset[0], xy[1] - offset[1], b[2][0] + PUSH_HEIGHT])
         rotation = horizontal(0.0)
-        entry = self._line_start(position, 0.0)
         placed = False
-        if entry is not None and self._go(entry, rotation):
-            placed = self._line(position, rotation, SPEED).reached
+        carry_z = self.ctl.tip()[0][2]  # in at the carry height (the object clear of the floor), lowered at the end
+        for shallower in (0.0, 0.03, 0.06, 0.09, 0.12):
+            position = np.array([xy[0] - offset[0] + shallower, xy[1] - offset[1], carry_z])
+            entry = self._line_start(position, 0.0)
+            if entry is None or position[0] > b[0][1] - 0.02:
+                break
+            plan_in = None
+            if self._go(entry, rotation):
+                plan_in = self.ctl.plan_line(position, rotation, collision_free=self._free_now)
+            if plan_in is not None:
+                placed = self._line(position, rotation, SPEED).reached and shallower == 0.0
+                down = position - np.array([0, 0, LIFT - 0.005])  # set it down (5 mm above where it was grasped)
+                self._line(down, rotation, PUSH_SPEED, force=False)
+                break
+            log.debug('place %s: unreachable, trying %.2f m shallower', np.round(position, 3), shallower + 0.03)
         tool.release()
         self.ctl.hold(SETTLE_TICKS)
         self._leave(rotation)
@@ -369,21 +395,56 @@ class NativeEnvironment(Environment):
 
 
 def _collision_check(model, kin):
-    """free(q, data): no contact of the robot with the cabinet, the pedestal or itself (contacts with movable objects allowed)."""
+    """free(q, data, attached): no contact of the robot with the cabinet, the pedestal or itself, and none of the `attached`
+    (held) body with the cabinet (contacts with the other movable objects are allowed: pushing them is the point)."""
     probe = mujoco.MjData(model)
     movable = {b for b in range(model.nbody) if model.body_jntnum[b] and
                model.jnt_type[model.body_jntadr[b]] == mujoco.mjtJoint.mjJNT_FREE}
 
-    def free(q, data=None):
+    def name(g):
+        return model.geom(g).name or model.body(model.geom_bodyid[g]).name
+
+    def free(q, data=None, attached=None):
         if data is not None:
             probe.qpos[:] = data.qpos
         probe.qpos[kin.qadr] = q
-        mujoco.mj_forward(model, probe)
+        mujoco.mj_forward(model, probe)  # (a welded object follows the cup through its equality constraint only when
+        # simulated: move it with the cup here, keeping its pose relative to the cup as it is in `data`)
+        if attached is not None and data is not None:
+            _carry(model, data, probe, attached)
         for c in probe.contact[:probe.ncon]:
-            if c.dist < 0 and model.geom_bodyid[c.geom1] not in movable and model.geom_bodyid[c.geom2] not in movable:
-                free.last = (model.geom(c.geom1).name or model.body(model.geom_bodyid[c.geom1]).name,
-                             model.geom(c.geom2).name or model.body(model.geom_bodyid[c.geom2]).name)
+            if c.dist >= 0:
+                continue
+            b1, b2 = model.geom_bodyid[c.geom1], model.geom_bodyid[c.geom2]
+            static1, static2 = b1 not in movable, b2 not in movable
+            if static1 and static2:
+                hit = True
+            elif attached is not None and attached in (b1, b2):
+                if c.dist > -HELD_PENETRATION:  # resting on the floor / touching a wall is not a collision
+                    continue
+                other = c.geom2 if b1 == attached else c.geom1
+                hit = model.geom_bodyid[other] not in movable and model.geom_contype[other] & SCENE_BIT and \
+                    not model.geom_contype[other] & ROBOT_BIT
+            else:
+                hit = False
+            if hit:
+                free.last = (name(c.geom1), name(c.geom2))
                 return False
         return True
     free.last = None
     return free
+
+
+def _carry(model, data, probe, body):
+    """Put the free body `body` in `probe` where it sits relative to the cup in `data` (then recompute the contacts)."""
+    cup = model.body('cup').id
+    rel_pos = data.xmat[cup].reshape(3, 3).T @ (data.xpos[body] - data.xpos[cup])
+    rel_quat, inv = np.zeros(4), np.zeros(4)
+    mujoco.mju_negQuat(inv, data.xquat[cup])
+    mujoco.mju_mulQuat(rel_quat, inv, data.xquat[body])
+    pos = probe.xpos[cup] + probe.xmat[cup].reshape(3, 3) @ rel_pos
+    quat = np.zeros(4)
+    mujoco.mju_mulQuat(quat, probe.xquat[cup], rel_quat)
+    adr = model.jnt_qposadr[model.body_jntadr[body]]
+    probe.qpos[adr:adr + 3], probe.qpos[adr + 3:adr + 7] = pos, quat
+    mujoco.mj_forward(model, probe)
