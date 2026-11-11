@@ -415,6 +415,7 @@ Train and evaluate: `python train_perception.py collect|train|evaluate [--task a
 | `--mask_level structured` | grasp only just inside an object's **front face**, push only with an object in the **blade's own strip**: 703 -> 193 grasp cells per scene; a random push moves an object 88% of the time instead of 62% |
 | `--footprint_placement` | keep the placement target clear of the back wall by the held object's depth |
 | `--placement_space region` | additionally fit the object's whole footprint and offer only cells inside its own target region |
+| `--relabel_shaping` | hindsight-relabelled transitions get the shaped reward a real final step earns (`reward_goal` minus the potential of the state before the action under the relabelled classes) instead of `reward_goal` |
 
 ### Demonstrations, DAgger and RL
 ```mermaid
@@ -447,7 +448,8 @@ would not be Q-values); a generative policy (diffusion / ACT) is not used: a den
 | `--physics paper` | the paper's cabinet dimensions, weaker suction, lighter objects (unvalidated) |
 | `--adaptive_step`, `--joint_tolerance`, `--camera_scale`, `--step_distance` | speed options (measured in `SIMULATION_NOTES.md`) |
 | `--randomize` | domain randomisation (friction, mass, camera pose, sensor noise) |
-| `--backend mujoco` | MuJoCo instead of PyBullet (scaffold, `l2r/sim/mj`): the same arm, suction, primitives and scenes (a seed gives the same scene on both engines); suction cup and tip pusher only, no GUI; `--mj_servo_bandwidth` sets the joint servos |
+| `--backend mujoco` | the native MuJoCo simulator (`l2r/sim/mj/native.py`, run `scripts/fetch_menagerie.sh` once): Menagerie UR5e on a 0.5 m pedestal and a lateral slide, L tool (0.10 m bracket, 0.45 m blade, suction cup welded to the object up to 80 N, flange force sensor), planned collision-checked line moves; same scenes, observations and task logic as PyBullet (a seed gives the same scene); about 9x faster; scripted expert 0.88 / 0.85 at 5 / 6 objects. `--backend mujoco_urdf`: the PyBullet robot and primitives on MuJoCo (comparison); `--mj_blade`, `--mj_base X Z` |
+| `--tilt_limit_deg D` | validity on the true tilt (an object is toppled at D degrees) instead of separate roll / pitch limits of 1.2 rad |
 
 ---
 
@@ -495,7 +497,7 @@ dense agent reaches 6 objects, but no configuration improves clearly beyond the 
 | dense agent | `--arch_skips --arch_encoder convnext --push_lengths 0.04 0.08 0.12 --belief spatial --placement learned --footprint_placement` |
 | object agent | `--agent object --hierarchy --object_algo iql --twin_q --n_step 3 --belief spatial --placement learned --footprint_placement` |
 | training | `--demos <file> --pretrain_steps 3000 --curriculum_eval 20 --curriculum_window 3 --success_threshold 0.85 --eps_start 0.2 --eps_end 0.05 --reward_mode combined --reward_scale 3` |
-| primitives | `--grasp_approach clear --place_corridor --pusher paddle`, with `--sim_quality modern` (being validated) |
+| primitives | `--grasp_approach clear`, with `--sim_quality modern`: scripted expert 0.795 at 5 objects, 0.73 at 6 (200 paired episodes; `--place_corridor`, `--placement_space region`, `--pusher paddle` and `--expert_ordering` give no significant gain on top, see `runs/diag/m200_summary.md`) |
 
 **In progress:** choosing the primitive set under `modern` physics with the scripted expert, then new demonstrations and retraining
 from them; goal masks and goal tokens for arbitrary target areas; the task library (UR and Franka, parallel and vacuum grippers).
