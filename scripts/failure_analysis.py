@@ -49,10 +49,11 @@ def run_episode(env, seed, obs, act, report=None):
         chosen = act(obs)
         primitive, pix = chosen[0], chosen[1]
         q_value = chosen[2] if len(chosen) > 2 else None
-        target = int(env.obs['idmap'][pix[1], pix[2]]) if primitive in ('grasp', 'push') else None
+        extra = chosen[3] if len(chosen) > 3 and chosen[3] else {}  # e.g. a pull's approach / heading / length
+        target = int(env.obs['idmap'][pix[1], pix[2]]) if primitive in ('grasp', 'push', 'pull') else None
         if primitive == 'grasp':
             held = target
-        obs, reward, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix})
+        obs, reward, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix, **extra})
         if report is not None:
             report(primitive, pix, target, info)
         after = scene_state(env)
@@ -185,7 +186,7 @@ def main(argv=None):
                 choice = expert.act()
                 if choice is None:  # nothing sensible: a push at the corner that touches nothing (costs an action)
                     return 'push', ((0, 0, 0, 0.5) if cfg.hierarchy else (0, 0, 0))
-                return choice
+                return choice[0], choice[1], None, dict(expert.extra)
 
             def report(primitive, pix, target, info):  # as when recording demonstrations: failed grasps are remembered
                 expert.report(primitive, pix, target, info['executed'])

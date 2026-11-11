@@ -175,10 +175,19 @@ class Controller:
         refuses it. The path the robot then follows is the one that was checked."""
         start_pos, start_rot = self.tip()
         end_rot = start_rot if end_rot is None else np.asarray(end_rot)
-        n = max(1, int(np.ceil(np.linalg.norm(np.asarray(end_pos) - start_pos) / step)))
+        q_start, q_end = np.zeros(4), np.zeros(4)
+        mujoco.mju_mat2Quat(q_start, np.asarray(start_rot, float).flatten())
+        mujoco.mju_mat2Quat(q_end, np.asarray(end_rot, float).flatten())
+        turn = np.zeros(3)
+        mujoco.mju_subQuat(turn, q_end, q_start)  # the turn, spread over the line (one waypoint per 3 degrees at least)
+        n = max(1, int(np.ceil(np.linalg.norm(np.asarray(end_pos) - start_pos) / step)),
+                int(np.ceil(np.linalg.norm(turn) / np.radians(3))))
         q, path = self.measured(), [self.measured()]
         for i in range(1, n + 1):
-            q, ok = self.k.solve(q, start_pos + (np.asarray(end_pos) - start_pos) * i / n, end_rot)
+            quat, rot = q_start.copy(), np.zeros(9)
+            mujoco.mju_quatIntegrate(quat, turn, i / n)
+            mujoco.mju_quat2Mat(rot, quat)
+            q, ok = self.k.solve(q, start_pos + (np.asarray(end_pos) - start_pos) * i / n, rot.reshape(3, 3))
             if not ok or (collision_free is not None and not collision_free(q)):
                 return None
             path.append(q)

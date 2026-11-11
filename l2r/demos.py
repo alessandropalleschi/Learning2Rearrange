@@ -42,6 +42,9 @@ class ScriptedExpert:
         self.failures = {}  # object id -> failed grasps
         self.push_failures = {}  # object id -> pushes that were not executed (refused or stopped): not retried after MAX_FAILURES
         self.pushed_object = None  # the object the last proposed push was meant to move
+        self.pull_failures = {}  # object id -> pulls that were not executed
+        self.pulls = {}  # object id -> pulls proposed (at most MAX_FAILURES per object: a pull that worked is not repeated forever)
+        self.extra = {}  # parameters of the last proposed action beyond (primitive, pix), e.g. a pull's approach / heading / length
         self.cleared = {}  # object id -> times moved out of another grasp's way (ordering rule)
         self.ordering = bool(getattr(env.cfg, 'expert_ordering', False))
         self.pushes = {}  # object id -> pushes made on it
@@ -52,6 +55,8 @@ class ScriptedExpert:
     def report(self, primitive, pix, object_id, executed):
         if primitive == 'grasp' and not executed:
             self.failures[object_id] = self.failures.get(object_id, 0) + 1
+        if primitive == 'pull' and not executed and object_id:
+            self.pull_failures[object_id] = self.pull_failures.get(object_id, 0) + 1
         if primitive == 'push' and not executed:
             object_id = self.pushed_object if self.pushed_object is not None else object_id  # the push cell is beside it
             if object_id:
@@ -98,8 +103,31 @@ class ScriptedExpert:
         fraction = (lengths[index % len(lengths)] - low) / (high - low)
         return 'push', (index // len(lengths), row, col, float(np.clip(fraction, 0.0, 1.0)))
 
+    PULL_APPROACH = np.radians(30)  # pull: in from the cabinet's middle towards the wall at this angle
+    PULL_LENGTH = 0.08  # m, dragged away from the wall and towards the front (45 degrees)
+    WALL_ZONE = 0.07  # m: an object whose centre is this close to a side wall counts as against it
+
+    def _pull_from_wall(self, misplaced):
+        """A pull for a misplaced object against a side wall that the grasps could not take (or None): attach from the
+        cabinet's middle side and drag it away from the wall, so that it can be grasped next."""
+        scene, b = self.env.sim.scene, self.env.ws.bounds
+        poses = scene.poses()
+        for _, object_id, row, col in misplaced:
+            y = poses[object_id][0][1]
+            near_wall = min(y - b[1][0], b[1][1] - y) < self.WALL_ZONE
+            if (near_wall and self.failures.get(object_id, 0) >= self.MAX_FAILURES
+                    and self.pulls.get(object_id, 0) < self.MAX_FAILURES):
+                self.pulls[object_id] = self.pulls.get(object_id, 0) + 1
+                self.failures[object_id] = 0  # off the wall it may be graspable again
+                side = np.sign(y)  # +1: against the +y wall
+                self.extra = {'approach': float(-side * self.PULL_APPROACH), 'heading': float(np.arctan2(-side, 1.0)),
+                              'length': self.PULL_LENGTH}
+                return 'pull', (0, row, col)
+        return None
+
     def _act(self):
         self.pushed_object = None
+        self.extra = {}
         env, cfg = self.env, self.cfg
         if env.holding:
             col, row = env.obs['heuristic_place']
@@ -119,6 +147,9 @@ class ScriptedExpert:
                     self.pushed_object = object_id
                     return action
             return 'grasp', (0, row, col)
+        pull = self._pull_from_wall(misplaced)  # an object stuck against a side wall: drag it off the wall first
+        if pull is not None:
+            return pull
         # nothing can be grasped: push a misplaced object (the one that resisted most) towards its target region
         for _, object_id, _, _ in sorted(misplaced, key=lambda c: -self.failures.get(c[1], 0)):
             if not self._may_push(object_id):
@@ -294,8 +325,8 @@ def record_episodes(env, episodes, num_objects, seed=0, max_steps=40, log=print)
             if choice is None:
                 break
             primitive, pix = choice
-            full, grasped = env.obs, expert.object_at(choice[1]) if choice[0] in ('grasp', 'push') else None
-            next_obs, reward, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix})
+            full, grasped = env.obs, expert.object_at(choice[1]) if choice[0] in ('grasp', 'push', 'pull') else None
+            next_obs, reward, terminated, truncated, info = env.step({'primitive': primitive, 'pix': pix, **expert.extra})
             expert.report(primitive, pix, grasped, info['executed'])
             transitions.append(Transition(obs, pix, next_obs, reward, primitive, bool(terminated)))
             if info['relabel']:
