@@ -3,9 +3,6 @@ YCB objects and an RGB-D camera. Components live in the sibling modules; this cl
 import logging
 
 import numpy as np
-import pybullet
-import pybullet_data
-from pybullet_utils import bullet_client
 
 from l2r.config import SimParams
 from l2r.perception import make_perception
@@ -41,6 +38,9 @@ class Environment:
         self.time_step = time_step
         self.ws = Workspace.from_params(self.params)
         self.perception = perception or make_perception(self.params)
+        import pybullet  # here, not at module level: the MuJoCo backends reuse this class and module without PyBullet
+        import pybullet_data
+        from pybullet_utils import bullet_client
         self.p = client or bullet_client.BulletClient(connection_mode=pybullet.GUI if gui else pybullet.DIRECT)
         self.p.setAdditionalSearchPath(pybullet_data.getDataPath())
         self.p.setTimeStep(time_step)
